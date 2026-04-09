@@ -8,15 +8,16 @@ Exposes a Click command group with five sub-commands:
     spark-perf-lint version  — print the package version
     spark-perf-lint explain  — show detailed rule documentation
 
-Scan logic and reporter wiring will be added in later phases; each
-command currently emits a "not yet implemented" stub so the CLI surface
-can be iterated on independently of the engine.
+The scan command is wired to ``ScanOrchestrator`` for full engine execution.
+Reporter integration (JSON, Markdown, GitHub PR) will be completed once the
+reporters/ package is implemented.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -213,25 +214,26 @@ def scan(
     if not quiet:
         _print_scan_header(paths, config, verbose)
 
-    # --- Scan logic will be wired up in a later phase ---
-    click.echo(
-        click.style(
-            "spark-perf-lint scan: Not yet implemented — coming in Phase 2 (engine wiring).",
-            fg="yellow",
-        )
-    )
-    click.echo(f"  Config source : {config.config_file_path or 'built-in defaults'}")
-    click.echo(f"  Paths         : {[str(p) for p in paths] or ['(current directory)']}")
-    click.echo(f"  Threshold     : {config.severity_threshold.name}")
-    click.echo(f"  Fail on       : {[s.name for s in config.fail_on]}")
-    click.echo(f"  Formats       : {config.report_formats}")
-    if output_path:
-        click.echo(f"  Output file   : {output_path}")
-    if dimensions:
-        click.echo(f"  Dimensions    : {dimensions}")
-    if rules:
-        click.echo(f"  Rules filter  : {rules}")
-    click.echo(f"  Show fix      : {show_fix}")
+    # --- Run the scan ---
+    from spark_perf_lint.engine.orchestrator import ScanOrchestrator
+
+    scan_paths = [str(p) for p in paths] if paths else [str(Path.cwd())]
+    orchestrator = ScanOrchestrator(config)
+
+    try:
+        report = orchestrator.scan(scan_paths)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(click.style(f"Scan error: {exc}", fg="red"), err=True)
+        sys.exit(2)
+
+    # --- Render output ---
+    _render_report(report, config, output_path, show_fix, quiet, verbose)
+
+    # --- Exit code ---
+    fail_severities = set(config.fail_on)
+    should_fail = any(f.severity in fail_severities for f in report.findings)
+    if should_fail:
+        sys.exit(1)
 
 
 def _print_scan_header(
@@ -252,6 +254,92 @@ def _print_scan_header(
         click.echo(f"  Config : {source}")
         click.echo(f"  Paths  : {[str(p) for p in paths] or ['.']}")
     click.echo("")
+
+
+def _render_report(
+    report: Any,
+    config: LintConfig,
+    output_path: Path | None,
+    show_fix: bool,
+    quiet: bool,
+    verbose: bool,
+) -> None:
+    """Render *report* to stdout (or *output_path*) using a minimal terminal formatter.
+
+    Full reporter integration (JSON, Markdown, GitHub PR) will be wired in
+    once the reporters/ package is complete.  For now this provides a clean,
+    colour-coded terminal view sufficient for development and pre-commit use.
+
+    Args:
+        report: ``AuditReport`` produced by the orchestrator.
+        config: Resolved configuration (used for threshold filtering).
+        output_path: If set, write plain-text output here instead of stdout.
+        show_fix: Whether to render before/after code snippets.
+        quiet: Suppress all non-finding output.
+        verbose: Print per-file timing and rule counts.
+    """
+    import io
+
+    threshold = config.severity_threshold
+    visible = [f for f in report.findings if f.severity >= threshold]
+
+    buf = io.StringIO()
+
+    if not visible:
+        if not quiet:
+            buf.write(
+                click.style("  No findings at or above threshold. ", fg="green")
+                + click.style(f"({report.files_scanned} file(s) scanned)\n", fg="bright_black")
+            )
+    else:
+        for finding in visible:
+            sev_color = _SEVERITY_COLORS.get(finding.severity.name, "white")
+            sev_badge = click.style(f"[{finding.severity.name}]", fg=sev_color, bold=True)
+            loc = click.style(f"{finding.file_path}:{finding.line_number}", fg="bright_white")
+            rid = click.style(finding.rule_id, fg="bright_black")
+            buf.write(f"  {sev_badge} {loc}  {rid}\n")
+            buf.write(f"         {finding.message}\n")
+            if show_fix and finding.recommendation:
+                buf.write(
+                    click.style(f"         Fix: {finding.recommendation}\n", fg="bright_black")
+                )
+            if show_fix and finding.before_code and finding.after_code:
+                buf.write(click.style("         Before: ", fg="red") + finding.before_code + "\n")
+                buf.write(click.style("         After:  ", fg="green") + finding.after_code + "\n")
+            buf.write("\n")
+
+    if not quiet:
+        total = len(visible)
+        crit = sum(1 for f in visible if f.severity.name == "CRITICAL")
+        warn = sum(1 for f in visible if f.severity.name == "WARNING")
+        info = sum(1 for f in visible if f.severity.name == "INFO")
+        elapsed = f"{report.scan_duration_seconds:.2f}s"
+        summary_parts = [
+            click.style(f"{crit} critical", fg="red") if crit else "",
+            click.style(f"{warn} warning", fg="yellow") if warn else "",
+            click.style(f"{info} info", fg="blue") if info else "",
+        ]
+        summary = ", ".join(p for p in summary_parts if p) or click.style("0 findings", fg="green")
+        buf.write(
+            click.style("  ─" * 30 + "\n", fg="bright_black")
+            + f"  {total} finding(s): {summary}"
+            + click.style(f"  [{report.files_scanned} file(s), {elapsed}]\n", fg="bright_black")
+        )
+        if verbose:
+            from spark_perf_lint.rules.registry import RuleRegistry
+
+            n_rules = len(RuleRegistry.instance().get_enabled_rules(config))
+            buf.write(click.style(f"  Rules run: {n_rules}\n", fg="bright_black"))
+
+    text = buf.getvalue()
+    if output_path is not None:
+        # Strip ANSI codes for file output
+        import re
+
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        output_path.write_text(plain, encoding="utf-8")
+    else:
+        click.echo(text, nl=False)
 
 
 # =============================================================================
