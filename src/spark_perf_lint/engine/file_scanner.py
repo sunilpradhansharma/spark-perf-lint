@@ -117,7 +117,6 @@ _PYSPARK_USAGE_MARKERS: tuple[str, ...] = (
     "SQLContext",
     "HiveContext",
     "SparkConf",
-    "pyspark",
     "spark.read",
     "spark.sql",
     "spark.table",

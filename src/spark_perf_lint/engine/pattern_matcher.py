@@ -329,7 +329,7 @@ class PatternMatcher:
             receiver = cache_call.receiver_src
             # Count calls on the same receiver after the cache line
             subsequent_uses = [
-                c for c in all_calls if c.receiver_src == receiver and c.line >= cache_call.line
+                c for c in all_calls if c.receiver_src == receiver and c.line > cache_call.line
             ]
             if len(subsequent_uses) <= 1:
                 results.append(
