@@ -1,0 +1,699 @@
+"""CLI entry point for spark-perf-lint.
+
+Exposes a Click command group with five sub-commands:
+
+    spark-perf-lint scan     — run the linter on one or more paths
+    spark-perf-lint rules    — list all available rules
+    spark-perf-lint init     — scaffold a project config file
+    spark-perf-lint version  — print the package version
+    spark-perf-lint explain  — show detailed rule documentation
+
+Scan logic and reporter wiring will be added in later phases; each
+command currently emits a "not yet implemented" stub so the CLI surface
+can be iterated on independently of the engine.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Optional
+
+import click
+
+from spark_perf_lint import __version__
+from spark_perf_lint.config import CONFIG_FILENAME, ConfigError, LintConfig
+
+# ---------------------------------------------------------------------------
+# Shared option definitions (reused across commands via decorators)
+# ---------------------------------------------------------------------------
+
+_SEVERITY_CHOICES = click.Choice(["CRITICAL", "WARNING", "INFO"], case_sensitive=False)
+_FORMAT_CHOICES = click.Choice(
+    ["terminal", "json", "markdown", "github-pr"], case_sensitive=False
+)
+
+
+# =============================================================================
+# Root group
+# =============================================================================
+
+
+@click.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    invoke_without_command=True,
+)
+@click.pass_context
+def main(ctx: click.Context) -> None:
+    """spark-perf-lint — Apache Spark performance linter.
+
+    Run 'spark-perf-lint COMMAND --help' for command-specific options.
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+# =============================================================================
+# spark-perf-lint scan
+# =============================================================================
+
+
+@main.command("scan")
+@click.argument(
+    "paths",
+    nargs=-1,
+    type=click.Path(exists=True, file_okay=True, dir_okay=True, path_type=Path),
+    metavar="PATH...",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=f"Explicit path to a {CONFIG_FILENAME} config file.",
+    metavar="PATH",
+)
+@click.option(
+    "--severity-threshold",
+    type=_SEVERITY_CHOICES,
+    default=None,
+    help="Minimum severity level to include in output (overrides config).",
+    metavar="LEVEL",
+)
+@click.option(
+    "--fail-on",
+    type=_SEVERITY_CHOICES,
+    multiple=True,
+    help=(
+        "Severity level(s) that cause a non-zero exit code. "
+        "Can be repeated: --fail-on CRITICAL --fail-on WARNING. "
+        "Overrides config."
+    ),
+    metavar="LEVEL",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=_FORMAT_CHOICES,
+    multiple=True,
+    help=(
+        "Output format(s). Can be repeated: --format terminal --format json. "
+        "Overrides config."
+    ),
+    metavar="FORMAT",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    help="Write the report to this file instead of stdout.",
+    metavar="PATH",
+)
+@click.option(
+    "--dimension",
+    "dimensions",
+    default=None,
+    help=(
+        "Scan only these dimensions. Comma-separated dimension codes, "
+        "e.g. 'D03,D08'. Prefix the code with '!' to exclude: '!D11'."
+    ),
+    metavar="CODES",
+)
+@click.option(
+    "--rule",
+    "rules",
+    default=None,
+    help=(
+        "Scan only these rule IDs. Comma-separated, "
+        "e.g. 'SPL-D03-001,SPL-D08-002'."
+    ),
+    metavar="RULE_IDS",
+)
+@click.option(
+    "--fix/--no-fix",
+    "show_fix",
+    default=True,
+    show_default=True,
+    help="Show before/after code suggestions in the report.",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Show scan progress, rule counts, and timing details.",
+)
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    default=False,
+    help="Only print findings; suppress header, footer, and progress output.",
+)
+def scan(
+    paths: tuple[Path, ...],
+    config_path: Optional[Path],
+    severity_threshold: Optional[str],
+    fail_on: tuple[str, ...],
+    output_format: tuple[str, ...],
+    output_path: Optional[Path],
+    dimensions: Optional[str],
+    rules: Optional[str],
+    show_fix: bool,
+    verbose: bool,
+    quiet: bool,
+) -> None:
+    """Scan PATH(s) for Spark performance anti-patterns.
+
+    PATH can be one or more Python files or directories. Directories are
+    scanned recursively; files not ending in '.py' are skipped.
+
+    Exit codes:\n
+      0  — no findings at or above --fail-on severity\n
+      1  — one or more findings at or above --fail-on severity\n
+      2  — configuration or I/O error
+
+    Examples:\n
+      spark-perf-lint scan .\n
+      spark-perf-lint scan src/ --severity-threshold WARNING --format json\n
+      spark-perf-lint scan jobs/etl.py --fail-on CRITICAL --fail-on WARNING\n
+      spark-perf-lint scan . --dimension D03,D08 --quiet
+    """
+    # Build CLI override dict from options that were explicitly provided
+    cli_overrides: dict = {}
+
+    if severity_threshold:
+        cli_overrides.setdefault("general", {})["severity_threshold"] = severity_threshold
+    if fail_on:
+        cli_overrides.setdefault("general", {})["fail_on"] = list(fail_on)
+    if output_format:
+        # Normalise github-pr → github_pr to match internal representation
+        cli_overrides.setdefault("general", {})["report_format"] = [
+            f.replace("-", "_") for f in output_format
+        ]
+
+    # Resolve config
+    try:
+        if config_path is not None:
+            import yaml  # lazy import — only needed here
+
+            raw_yaml = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            from spark_perf_lint.config import _deep_merge, _DEFAULTS
+
+            merged = _deep_merge(_deep_merge({}, _DEFAULTS), raw_yaml)
+            if cli_overrides:
+                merged = _deep_merge(merged, cli_overrides)
+            LintConfig._validate(merged)
+            config = LintConfig(raw=merged, config_file_path=config_path)
+        else:
+            start_dir = paths[0].parent if (paths and paths[0].is_file()) else (
+                paths[0] if paths else Path.cwd()
+            )
+            config = LintConfig.load(start_dir=start_dir, cli_overrides=cli_overrides or None)
+    except ConfigError as exc:
+        click.echo(f"Configuration error: {exc}", err=True)
+        sys.exit(2)
+
+    if not quiet:
+        _print_scan_header(paths, config, verbose)
+
+    # --- Scan logic will be wired up in a later phase ---
+    click.echo(
+        click.style(
+            "spark-perf-lint scan: Not yet implemented — coming in Phase 2 (engine wiring).",
+            fg="yellow",
+        )
+    )
+    click.echo(f"  Config source : {config.config_file_path or 'built-in defaults'}")
+    click.echo(f"  Paths         : {[str(p) for p in paths] or ['(current directory)']}")
+    click.echo(f"  Threshold     : {config.severity_threshold.name}")
+    click.echo(f"  Fail on       : {[s.name for s in config.fail_on]}")
+    click.echo(f"  Formats       : {config.report_formats}")
+    if output_path:
+        click.echo(f"  Output file   : {output_path}")
+    if dimensions:
+        click.echo(f"  Dimensions    : {dimensions}")
+    if rules:
+        click.echo(f"  Rules filter  : {rules}")
+    click.echo(f"  Show fix      : {show_fix}")
+
+
+def _print_scan_header(
+    paths: tuple[Path, ...],
+    config: LintConfig,
+    verbose: bool,
+) -> None:
+    """Print a styled scan header to stdout."""
+    click.echo(
+        click.style(
+            f"spark-perf-lint v{__version__}",
+            fg="bright_cyan",
+            bold=True,
+        )
+    )
+    if verbose:
+        source = str(config.config_file_path) if config.config_file_path else "built-in defaults"
+        click.echo(f"  Config : {source}")
+        click.echo(f"  Paths  : {[str(p) for p in paths] or ['.']}")
+    click.echo("")
+
+
+# =============================================================================
+# spark-perf-lint rules
+# =============================================================================
+
+
+# Map of dimension code → (block_name, human label)
+_DIMENSION_META: dict[str, tuple[str, str]] = {
+    "D01": ("d01_cluster_config", "Cluster Configuration"),
+    "D02": ("d02_shuffle", "Shuffle"),
+    "D03": ("d03_joins", "Joins"),
+    "D04": ("d04_partitioning", "Partitioning"),
+    "D05": ("d05_skew", "Data Skew"),
+    "D06": ("d06_caching", "Caching"),
+    "D07": ("d07_io_format", "I/O Format"),
+    "D08": ("d08_aqe", "Adaptive Query Execution"),
+    "D09": ("d09_udf_code", "UDF Code Quality"),
+    "D10": ("d10_catalyst", "Catalyst Optimizer"),
+    "D11": ("d11_monitoring", "Monitoring & Observability"),
+}
+
+# Static rule catalogue (populated from the default YAML comments).
+# Format: rule_id → (default_severity, short_description)
+_RULE_CATALOGUE: dict[str, tuple[str, str]] = {
+    # D01 — Cluster Configuration
+    "SPL-D01-001": ("WARNING", "Executor memory below recommended minimum (4 GB)"),
+    "SPL-D01-002": ("WARNING", "Driver memory below recommended minimum (2 GB)"),
+    "SPL-D01-003": ("WARNING", "executor.cores not set (defaults to 1)"),
+    "SPL-D01-004": ("WARNING", "spark.cores.max not set for standalone/YARN coarse mode"),
+    "SPL-D01-005": ("WARNING", "spark.default.parallelism not set explicitly"),
+    "SPL-D01-006": ("CRITICAL", "Memory fraction + memoryOverhead > available RAM"),
+    "SPL-D01-007": ("WARNING", "Hardcoded master URL"),
+    "SPL-D01-008": ("INFO",    "SparkSession created without appName"),
+    # D02 — Shuffle
+    "SPL-D02-001": ("WARNING", "spark.sql.shuffle.partitions left at default (200)"),
+    "SPL-D02-002": ("CRITICAL","groupByKey used instead of reduceByKey/aggregateByKey"),
+    "SPL-D02-003": ("WARNING", "sortByKey without a preceding partitionBy"),
+    "SPL-D02-004": ("WARNING", "repartition() called immediately before a write"),
+    "SPL-D02-005": ("WARNING", "coalesce() called with value > current partition count"),
+    "SPL-D02-006": ("INFO",    "Shuffle without compression enabled"),
+    "SPL-D02-007": ("WARNING", "Multiple wide transformations without checkpoint"),
+    # D03 — Joins
+    "SPL-D03-001": ("CRITICAL","Cartesian product (cross join) detected"),
+    "SPL-D03-002": ("WARNING", "Large-to-large join without broadcast hint"),
+    "SPL-D03-003": ("WARNING", "Broadcast hint on table exceeding broadcast threshold"),
+    "SPL-D03-004": ("INFO",    "Join on string columns without Bloom filter"),
+    "SPL-D03-005": ("WARNING", "Multiple joins on same DataFrame without caching"),
+    "SPL-D03-006": ("CRITICAL","Skewed join without salting or AQE skew join enabled"),
+    "SPL-D03-007": ("WARNING", "Join before filter (filter pushdown opportunity)"),
+    # D04 — Partitioning
+    "SPL-D04-001": ("WARNING", "Partition count > max_partition_count"),
+    "SPL-D04-002": ("WARNING", "Partition count < min_partition_count"),
+    "SPL-D04-003": ("WARNING", "repartition() with no argument"),
+    "SPL-D04-004": ("WARNING", "Writing without partitionBy on large datasets"),
+    "SPL-D04-005": ("WARNING", "partitionBy on high-cardinality column (small files)"),
+    "SPL-D04-006": ("CRITICAL","coalesce(1) or repartition(1) to single partition"),
+    "SPL-D04-007": ("INFO",    "Reading partitioned data without partition filter"),
+    # D05 — Data Skew
+    "SPL-D05-001": ("WARNING", "groupBy on low-cardinality column (likely skew)"),
+    "SPL-D05-002": ("WARNING", "Join key contains null values (null skew)"),
+    "SPL-D05-003": ("CRITICAL","No salting before join on skewed key"),
+    "SPL-D05-004": ("WARNING", "Window function with unbounded partition (skew risk)"),
+    "SPL-D05-005": ("CRITICAL","collect() / toPandas() on unaggregated large dataset"),
+    # D06 — Caching
+    "SPL-D06-001": ("WARNING", "DataFrame cached but never unpersisted (memory leak)"),
+    "SPL-D06-002": ("INFO",    "DataFrame cached but used only once"),
+    "SPL-D06-003": ("WARNING", "cache() used instead of persist(StorageLevel) for large data"),
+    "SPL-D06-004": ("WARNING", "Repeated action on same DataFrame without cache"),
+    "SPL-D06-005": ("INFO",    "cache() called after a write (pointless)"),
+    "SPL-D06-006": ("WARNING", "StorageLevel.DISK_ONLY used (use Parquet write instead)"),
+    # D07 — I/O Format
+    "SPL-D07-001": ("WARNING", "Reading CSV without explicit schema (full scan)"),
+    "SPL-D07-002": ("CRITICAL","Writing in CSV or JSON format (use Parquet/Delta)"),
+    "SPL-D07-003": ("WARNING", "Reading Parquet without predicate pushdown filter"),
+    "SPL-D07-004": ("WARNING", "No compression codec set for output"),
+    "SPL-D07-005": ("WARNING", "Using wholeTextFiles() on large dataset"),
+    "SPL-D07-006": ("WARNING", "Reading with inferSchema=True in production code"),
+    "SPL-D07-007": ("INFO",    "Writing without specifying mode (default overwrites)"),
+    # D08 — AQE
+    "SPL-D08-001": ("CRITICAL","spark.sql.adaptive.enabled not set to true"),
+    "SPL-D08-002": ("WARNING", "AQE skew join not enabled"),
+    "SPL-D08-003": ("WARNING", "AQE coalesce partitions not enabled"),
+    "SPL-D08-004": ("INFO",    "advisoryPartitionSizeInBytes not tuned from default"),
+    "SPL-D08-005": ("WARNING", "AQE enabled but local shuffle reader disabled"),
+    # D09 — UDF Code Quality
+    "SPL-D09-001": ("WARNING", "Python UDF used where pandas UDF (vectorized) could be used"),
+    "SPL-D09-002": ("WARNING", "UDF not registered with return type annotation"),
+    "SPL-D09-003": ("CRITICAL","UDF contains DataFrame or SparkContext reference"),
+    "SPL-D09-004": ("WARNING", "UDF complexity exceeds max_udf_complexity threshold"),
+    "SPL-D09-005": ("INFO",    "Lambda used as UDF (not debuggable, not reusable)"),
+    "SPL-D09-006": ("WARNING", "UDF applied inside a loop (should be vectorized)"),
+    "SPL-D09-007": ("WARNING", "UDF output used as join key (prevents predicate pushdown)"),
+    # D10 — Catalyst Optimizer
+    "SPL-D10-001": ("WARNING", "select('*') prevents column pruning"),
+    "SPL-D10-002": ("WARNING", "Python object used in withColumn (breaks optimization)"),
+    "SPL-D10-003": ("WARNING", "Filter after groupBy instead of before (late filter)"),
+    "SPL-D10-004": ("CRITICAL","explode() without subsequent filter (combinatorial explosion)"),
+    "SPL-D10-005": ("WARNING", "withColumn in a loop (creates deeply nested plan)"),
+    "SPL-D10-006": ("INFO",    "Chained filter() calls that could be merged"),
+    "SPL-D10-007": ("CRITICAL","Non-deterministic function in join condition"),
+    # D11 — Monitoring & Observability
+    "SPL-D11-001": ("WARNING", "No SparkListener or accumulator instrumentation"),
+    "SPL-D11-002": ("WARNING", "spark.eventLog.enabled not set to true"),
+    "SPL-D11-003": ("WARNING", "No try/except around Spark actions (silent failures)"),
+    "SPL-D11-004": ("INFO",    "spark.ui.enabled set to false in non-local mode"),
+    "SPL-D11-005": ("INFO",    "No logging framework used in job entry point"),
+}
+
+_SEVERITY_COLORS: dict[str, str] = {
+    "CRITICAL": "red",
+    "WARNING": "yellow",
+    "INFO": "blue",
+}
+
+
+@main.command("rules")
+@click.option(
+    "--dimension",
+    "dimension_filter",
+    default=None,
+    help="Show only rules for this dimension (e.g. 'D03').",
+    metavar="CODE",
+)
+@click.option(
+    "--severity",
+    "severity_filter",
+    type=_SEVERITY_CHOICES,
+    default=None,
+    help="Show only rules with this default severity.",
+    metavar="LEVEL",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"], case_sensitive=False),
+    default="table",
+    show_default=True,
+    help="Output format.",
+)
+def rules(
+    dimension_filter: Optional[str],
+    severity_filter: Optional[str],
+    output_format: str,
+) -> None:
+    """List all available rules with IDs, dimensions, and default severities.
+
+    Examples:\n
+      spark-perf-lint rules\n
+      spark-perf-lint rules --dimension D03\n
+      spark-perf-lint rules --severity CRITICAL\n
+      spark-perf-lint rules --format json
+    """
+    filtered = {
+        rule_id: (sev, desc)
+        for rule_id, (sev, desc) in _RULE_CATALOGUE.items()
+        if (dimension_filter is None or rule_id.startswith(f"SPL-{dimension_filter.upper()}"))
+        and (severity_filter is None or sev == severity_filter.upper())
+    }
+
+    if output_format == "json":
+        import json
+
+        payload = [
+            {
+                "rule_id": rule_id,
+                "dimension": rule_id.split("-")[1],
+                "severity": sev,
+                "description": desc,
+            }
+            for rule_id, (sev, desc) in filtered.items()
+        ]
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    # Table output
+    if not filtered:
+        click.echo("No rules match the given filters.")
+        return
+
+    current_dim = ""
+    for rule_id, (sev, desc) in filtered.items():
+        dim = rule_id.split("-")[1]  # e.g. "D03"
+        if dim != current_dim:
+            current_dim = dim
+            _, label = _DIMENSION_META.get(dim, ("", dim))
+            click.echo("")
+            click.echo(click.style(f"  {dim} · {label}", bold=True, fg="bright_cyan"))
+            click.echo(click.style("  " + "─" * 60, fg="bright_black"))
+
+        sev_str = click.style(f"{sev:<8}", fg=_SEVERITY_COLORS.get(sev, "white"))
+        click.echo(f"  {rule_id}  {sev_str}  {desc}")
+
+    click.echo("")
+    click.echo(
+        click.style(
+            f"  {len(filtered)} rule(s) listed. "
+            "Use 'spark-perf-lint explain RULE_ID' for full documentation.",
+            fg="bright_black",
+        )
+    )
+
+
+# =============================================================================
+# spark-perf-lint init
+# =============================================================================
+
+
+@main.command("init")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=f"Overwrite an existing {CONFIG_FILENAME} without prompting.",
+)
+@click.option(
+    "--minimal",
+    is_flag=True,
+    default=False,
+    help="Write only the most commonly customised keys instead of the full file.",
+)
+def init(force: bool, minimal: bool) -> None:
+    """Create a default .spark-perf-lint.yaml in the current directory.
+
+    The generated file contains all available options with inline comments
+    explaining each setting. Edit it to tune thresholds, enable/disable
+    rules, and configure reporters for your project.
+
+    Examples:\n
+      spark-perf-lint init\n
+      spark-perf-lint init --force\n
+      spark-perf-lint init --minimal
+    """
+    dest = Path.cwd() / CONFIG_FILENAME
+
+    if dest.exists() and not force:
+        click.confirm(
+            f"{CONFIG_FILENAME} already exists. Overwrite?",
+            abort=True,
+        )
+
+    # Locate the bundled default config shipped with the package
+    bundled = Path(__file__).parent.parent.parent / CONFIG_FILENAME
+    if not bundled.exists():
+        # Fall back: the file may live at the repo root during development
+        bundled = Path(__file__).resolve().parents[3] / CONFIG_FILENAME
+
+    if bundled.exists() and not minimal:
+        dest.write_text(bundled.read_text(encoding="utf-8"), encoding="utf-8")
+        click.echo(
+            click.style(f"Created {dest}", fg="green", bold=True)
+            + f"  (copied from bundled defaults)"
+        )
+    else:
+        # Write a concise minimal stub
+        _write_minimal_config(dest)
+        click.echo(
+            click.style(f"Created {dest}", fg="green", bold=True)
+            + "  (minimal config)"
+        )
+
+    click.echo(
+        "\nEdit the file to customise thresholds, enable/disable rules, and "
+        "configure reporters.\nRun 'spark-perf-lint scan .' to start linting."
+    )
+
+
+def _write_minimal_config(dest: Path) -> None:
+    """Write a compact starter config to *dest*."""
+    content = """\
+# spark-perf-lint configuration
+# Full reference: spark-perf-lint explain --help
+# Generated by: spark-perf-lint init --minimal
+
+general:
+  severity_threshold: INFO   # INFO | WARNING | CRITICAL
+  fail_on: [CRITICAL]
+  report_format: [terminal]
+  max_findings: 0            # 0 = unlimited
+
+thresholds:
+  broadcast_threshold_mb: 10
+  max_shuffle_partitions: 2000
+  min_shuffle_partitions: 10
+
+severity_override: {}
+  # SPL-D03-001: CRITICAL
+
+ignore:
+  files:
+    - "**/*_test.py"
+    - "**/conftest.py"
+  rules: []
+  directories:
+    - ".venv"
+    - "venv"
+    - "build"
+    - "dist"
+"""
+    dest.write_text(content, encoding="utf-8")
+
+
+# =============================================================================
+# spark-perf-lint version
+# =============================================================================
+
+
+@main.command("version")
+@click.option(
+    "--short",
+    is_flag=True,
+    default=False,
+    help="Print only the version number (no package name).",
+)
+def version(short: bool) -> None:
+    """Print the spark-perf-lint version and exit.
+
+    Examples:\n
+      spark-perf-lint version\n
+      spark-perf-lint version --short
+    """
+    if short:
+        click.echo(__version__)
+    else:
+        click.echo(f"spark-perf-lint {__version__}")
+
+
+# =============================================================================
+# spark-perf-lint explain
+# =============================================================================
+
+
+@main.command("explain")
+@click.argument("rule_id", metavar="RULE_ID")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json", "markdown"], case_sensitive=False),
+    default="text",
+    show_default=True,
+    help="Output format.",
+)
+def explain(rule_id: str, output_format: str) -> None:
+    """Show detailed documentation for a specific rule.
+
+    Includes the rule description, default severity, which Spark
+    internals are affected, before/after code examples, and the
+    decision-matrix context used by the engine.
+
+    RULE_ID follows the pattern SPL-D{dimension}-{number},
+    e.g. SPL-D03-001.
+
+    Examples:\n
+      spark-perf-lint explain SPL-D03-001\n
+      spark-perf-lint explain SPL-D08-001 --format markdown\n
+      spark-perf-lint explain SPL-D02-002 --format json
+    """
+    normalised = rule_id.strip().upper()
+
+    if normalised not in _RULE_CATALOGUE:
+        # Give a helpful suggestion if the dimension exists but the number doesn't
+        try:
+            dim = normalised.split("-")[1]
+        except IndexError:
+            dim = None
+
+        if dim and any(k.startswith(f"SPL-{dim}") for k in _RULE_CATALOGUE):
+            matching = [k for k in _RULE_CATALOGUE if k.startswith(f"SPL-{dim}")]
+            click.echo(
+                click.style(f"Unknown rule: {rule_id!r}", fg="red"),
+                err=True,
+            )
+            click.echo(
+                f"Rules in dimension {dim}: {', '.join(matching)}",
+                err=True,
+            )
+        else:
+            click.echo(
+                click.style(f"Unknown rule: {rule_id!r}", fg="red"),
+                err=True,
+            )
+            click.echo(
+                "Run 'spark-perf-lint rules' to see all available rule IDs.",
+                err=True,
+            )
+        sys.exit(1)
+
+    sev, desc = _RULE_CATALOGUE[normalised]
+    dim_code = normalised.split("-")[1]
+    _, dim_label = _DIMENSION_META.get(dim_code, ("", dim_code))
+
+    if output_format == "json":
+        import json
+
+        click.echo(
+            json.dumps(
+                {
+                    "rule_id": normalised,
+                    "dimension": dim_code,
+                    "dimension_label": dim_label,
+                    "default_severity": sev,
+                    "description": desc,
+                    "detail": "Not yet implemented — coming in Phase 3 (knowledge base wiring).",
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if output_format == "markdown":
+        click.echo(f"## {normalised}\n")
+        click.echo(f"**Dimension** : {dim_code} · {dim_label}  ")
+        click.echo(f"**Severity**  : {sev}  ")
+        click.echo(f"**Summary**   : {desc}\n")
+        click.echo(
+            "> Full rule documentation (Spark internals, before/after examples, "
+            "decision matrix) is not yet implemented — coming in Phase 3."
+        )
+        return
+
+    # Default: plain text
+    click.echo("")
+    click.echo(
+        click.style(f"  {normalised}", bold=True, fg="bright_cyan")
+        + "  "
+        + click.style(f"[{sev}]", fg=_SEVERITY_COLORS.get(sev, "white"), bold=True)
+    )
+    click.echo(click.style("  " + "─" * 60, fg="bright_black"))
+    click.echo(f"  Dimension : {dim_code} · {dim_label}")
+    click.echo(f"  Summary   : {desc}")
+    click.echo("")
+    click.echo(
+        click.style(
+            "  Full documentation (Spark internals, before/after code examples, "
+            "decision\n  matrix context) is not yet implemented — "
+            "coming in Phase 3 (knowledge base wiring).",
+            fg="yellow",
+        )
+    )
+    click.echo("")
