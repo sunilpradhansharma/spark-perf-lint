@@ -1,0 +1,754 @@
+# =============================================================================
+# .spark-perf-lint.yaml — Default Configuration for spark-perf-lint
+# =============================================================================
+# Drop this file into the root of any PySpark project to configure the linter.
+# All values shown here are defaults. Uncomment and modify as needed.
+#
+# Rule IDs follow the pattern: SPL-D{dimension}-{number}
+#   D01: Cluster Configuration     D07: I/O Format
+#   D02: Shuffle                   D08: Adaptive Query Execution (AQE)
+#   D03: Joins                     D09: UDF Code Quality
+#   D04: Partitioning              D10: Catalyst Optimizer
+#   D05: Data Skew                 D11: Monitoring & Observability
+#   D06: Caching
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# GENERAL — Top-level scan behavior
+# -----------------------------------------------------------------------------
+general:
+  # Minimum severity level to include in output.
+  # Options: "INFO" | "WARNING" | "CRITICAL"
+  # Default: "INFO" (show everything)
+  severity_threshold: INFO
+
+  # Severity levels that cause a non-zero exit code (fail the pre-commit hook
+  # or CI check). List one or more: ["CRITICAL"], ["WARNING", "CRITICAL"], etc.
+  # Default: ["CRITICAL"]
+  fail_on:
+    - CRITICAL
+
+  # Output format(s) to generate. Multiple formats can be listed.
+  # Options: "terminal" | "json" | "markdown" | "github_pr"
+  # Default: ["terminal"]
+  report_format:
+    - terminal
+
+  # Maximum number of findings to report per scan. 0 = unlimited.
+  # Useful in CI to avoid extremely noisy output on large codebases.
+  # Default: 0 (unlimited)
+  max_findings: 0
+
+
+# -----------------------------------------------------------------------------
+# RULES — Enable or disable individual rules or entire dimensions
+# -----------------------------------------------------------------------------
+rules:
+  # --- Dimension D01: Cluster Configuration ---
+  # Detects misconfigured executor/driver memory, core counts, and
+  # SparkSession settings that lead to under- or over-provisioned clusters.
+  d01_cluster_config:
+    enabled: true
+    rules:
+      SPL-D01-001: true   # Executor memory below recommended minimum (4g)
+      SPL-D01-002: true   # Driver memory below recommended minimum (2g)
+      SPL-D01-003: true   # executor.cores not set (defaults to 1, usually wrong)
+      SPL-D01-004: true   # spark.cores.max not set for standalone/YARN coarse mode
+      SPL-D01-005: true   # spark.default.parallelism not set explicitly
+      SPL-D01-006: true   # Memory fraction + memoryOverhead > available RAM
+      SPL-D01-007: true   # Hardcoded master URL (use --master at submit time)
+      SPL-D01-008: true   # SparkSession created without appName
+
+  # --- Dimension D02: Shuffle ---
+  # Detects shuffle anti-patterns: wrong partition counts, missing configs,
+  # unnecessary data movement across the network.
+  d02_shuffle:
+    enabled: true
+    rules:
+      SPL-D02-001: true   # spark.sql.shuffle.partitions left at default (200)
+      SPL-D02-002: true   # groupByKey used instead of reduceByKey/aggregateByKey
+      SPL-D02-003: true   # sortByKey without a preceding partitionBy
+      SPL-D02-004: true   # repartition() called immediately before a write
+      SPL-D02-005: true   # coalesce() called with value > current partition count
+      SPL-D02-006: true   # Shuffle without compression enabled
+      SPL-D02-007: true   # Multiple wide transformations without checkpoint
+
+  # --- Dimension D03: Joins ---
+  # Identifies join strategies that cause excessive shuffle or OOM errors.
+  d03_joins:
+    enabled: true
+    rules:
+      SPL-D03-001: true   # Cartesian product (cross join) detected
+      SPL-D03-002: true   # Large-to-large join without broadcast hint
+      SPL-D03-003: true   # Broadcast hint on table exceeding broadcast threshold
+      SPL-D03-004: true   # Join on string columns without Bloom filter
+      SPL-D03-005: true   # Multiple joins on same DataFrame without caching
+      SPL-D03-006: true   # Skewed join without salting or AQE skew join enabled
+      SPL-D03-007: true   # Join before filter (filter pushdown opportunity)
+
+  # --- Dimension D04: Partitioning ---
+  # Detects partition count mismatches, small-file problems, and missing
+  # partition pruning opportunities.
+  d04_partitioning:
+    enabled: true
+    rules:
+      SPL-D04-001: true   # Partition count > max_partition_count
+      SPL-D04-002: true   # Partition count < min_partition_count
+      SPL-D04-003: true   # repartition() with no argument (uses default parallelism)
+      SPL-D04-004: true   # Writing without partitionBy on large datasets
+      SPL-D04-005: true   # partitionBy on high-cardinality column (small files)
+      SPL-D04-006: true   # coalesce(1) or repartition(1) to single partition
+      SPL-D04-007: true   # Reading partitioned data without partition filter
+
+  # --- Dimension D05: Data Skew ---
+  # Identifies patterns that produce heavily skewed data distributions,
+  # causing stragglers and task failures.
+  d05_skew:
+    enabled: true
+    rules:
+      SPL-D05-001: true   # groupBy on low-cardinality column (likely skew)
+      SPL-D05-002: true   # join key contains null values (null skew)
+      SPL-D05-003: true   # No salting before join on skewed key
+      SPL-D05-004: true   # Window function with unbounded partition (skew risk)
+      SPL-D05-005: true   # collect() / toPandas() on unaggregated large dataset
+
+  # --- Dimension D06: Caching ---
+  # Finds incorrect, missing, or redundant cache/persist calls.
+  d06_caching:
+    enabled: true
+    rules:
+      SPL-D06-001: true   # DataFrame cached but never unpersisted (memory leak)
+      SPL-D06-002: true   # DataFrame cached but used only once
+      SPL-D06-003: true   # cache() used instead of persist(StorageLevel) for large data
+      SPL-D06-004: true   # Repeated action on same DataFrame without cache
+      SPL-D06-005: true   # cache() called after a write (pointless)
+      SPL-D06-006: true   # StorageLevel.DISK_ONLY used (use Parquet write instead)
+
+  # --- Dimension D07: I/O Format ---
+  # Enforces columnar formats, compression, and predicate pushdown patterns.
+  d07_io_format:
+    enabled: true
+    rules:
+      SPL-D07-001: true   # Reading CSV without explicit schema (full scan)
+      SPL-D07-002: true   # Writing in CSV or JSON format (use Parquet/Delta)
+      SPL-D07-003: true   # Reading Parquet without predicate pushdown filter
+      SPL-D07-004: true   # No compression codec set for output
+      SPL-D07-005: true   # Using wholeTextFiles() on large dataset
+      SPL-D07-006: true   # Reading with inferSchema=True in production code
+      SPL-D07-007: true   # Writing without specifying mode (default overwrites)
+
+  # --- Dimension D08: Adaptive Query Execution (AQE) ---
+  # Checks for missing or misconfigured AQE settings (Spark 3.0+).
+  d08_aqe:
+    enabled: true
+    rules:
+      SPL-D08-001: true   # spark.sql.adaptive.enabled not set to true
+      SPL-D08-002: true   # AQE skew join not enabled
+      SPL-D08-003: true   # AQE coalesce partitions not enabled
+      SPL-D08-004: true   # advisoryPartitionSizeInBytes not tuned from default
+      SPL-D08-005: true   # AQE enabled but local shuffle reader disabled
+
+  # --- Dimension D09: UDF Code Quality ---
+  # Analyzes UDF implementations for performance and correctness issues.
+  d09_udf_code:
+    enabled: true
+    rules:
+      SPL-D09-001: true   # Python UDF used where pandas UDF (vectorized) could be used
+      SPL-D09-002: true   # UDF not registered with return type annotation
+      SPL-D09-003: true   # UDF contains DataFrame or SparkContext reference (not serializable)
+      SPL-D09-004: true   # UDF complexity exceeds max_udf_complexity threshold
+      SPL-D09-005: true   # Lambda used as UDF (not debuggable, not reusable)
+      SPL-D09-006: true   # UDF applied inside a loop (should be vectorized)
+      SPL-D09-007: true   # UDF output used as join key (prevents predicate pushdown)
+
+  # --- Dimension D10: Catalyst Optimizer ---
+  # Detects patterns that prevent the Catalyst optimizer from generating
+  # efficient physical plans.
+  d10_catalyst:
+    enabled: true
+    rules:
+      SPL-D10-001: true   # select("*") prevents column pruning
+      SPL-D10-002: true   # Python object used in withColumn (breaks optimization)
+      SPL-D10-003: true   # Filter after groupBy instead of before (late filter)
+      SPL-D10-004: true   # explode() without subsequent filter (combinatorial explosion)
+      SPL-D10-005: true   # withColumn in a loop (creates deeply nested plan)
+      SPL-D10-006: true   # Chained filter() calls that could be merged
+      SPL-D10-007: true   # Non-deterministic function in join condition
+
+  # --- Dimension D11: Monitoring & Observability ---
+  # Ensures jobs are instrumented for debugging and SLA tracking.
+  d11_monitoring:
+    enabled: true
+    rules:
+      SPL-D11-001: true   # No SparkListener or accumulator instrumentation
+      SPL-D11-002: true   # spark.eventLog.enabled not set to true
+      SPL-D11-003: true   # No try/except around Spark actions (silent failures)
+      SPL-D11-004: true   # spark.ui.enabled set to false in non-local mode
+      SPL-D11-005: true   # No logging framework used in job entry point
+
+
+# -----------------------------------------------------------------------------
+# THRESHOLDS — Numeric limits that drive rule decisions
+# -----------------------------------------------------------------------------
+thresholds:
+  # Maximum DataFrame size (MB) eligible for broadcast join.
+  # Corresponds to spark.sql.autoBroadcastJoinThreshold.
+  # Rule: SPL-D03-002, SPL-D03-003
+  # Default: 10 (Spark's built-in default is also 10MB)
+  broadcast_threshold_mb: 10
+
+  # Upper bound for spark.sql.shuffle.partitions before flagging over-partitioning.
+  # Rule: SPL-D02-001, SPL-D04-001
+  # Default: 2000
+  max_shuffle_partitions: 2000
+
+  # Lower bound for spark.sql.shuffle.partitions before flagging under-partitioning.
+  # Rule: SPL-D02-001, SPL-D04-002
+  # Default: 10
+  min_shuffle_partitions: 10
+
+  # Target partition size in MB. Used to assess whether repartition() values
+  # are reasonable given the dataset size hint in comments or config.
+  # Rule: SPL-D04-003, SPL-D04-005
+  # Default: 128 (MB) — Spark's recommended target
+  target_partition_size_mb: 128
+
+  # Maximum number of cached DataFrames allowed without a corresponding
+  # unpersist() call in the same scope.
+  # Rule: SPL-D06-001
+  # Default: 5
+  max_cache_without_unpersist: 5
+
+  # Skew ratio (max partition rows / median partition rows) that triggers
+  # a WARNING. Requires runtime data; used in Tier 3 only.
+  # Rule: SPL-D05-001
+  # Default: 5.0 (one partition is 5x the median)
+  skew_ratio_warning: 5.0
+
+  # Skew ratio that triggers a CRITICAL finding.
+  # Rule: SPL-D05-001
+  # Default: 10.0
+  skew_ratio_critical: 10.0
+
+  # Maximum total partition count across all DataFrames in a job before
+  # flagging potential overhead from too many small tasks.
+  # Rule: SPL-D04-001
+  # Default: 10000
+  max_partition_count: 10000
+
+  # Minimum partition count. A job with fewer partitions than this likely
+  # under-utilizes the cluster.
+  # Rule: SPL-D04-002
+  # Default: 2
+  min_partition_count: 2
+
+  # Maximum cyclomatic complexity score for a UDF body before flagging.
+  # Complexity is computed via McCabe's algorithm on the UDF's AST.
+  # Rule: SPL-D09-004
+  # Default: 10
+  max_udf_complexity: 10
+
+  # Minimum executor memory (GB) before flagging under-provisioning.
+  # Rule: SPL-D01-001
+  # Default: 4
+  min_executor_memory_gb: 4
+
+  # Minimum driver memory (GB) before flagging under-provisioning.
+  # Rule: SPL-D01-002
+  # Default: 2
+  min_driver_memory_gb: 2
+
+  # Maximum number of executor cores before flagging over-allocation
+  # (too many cores per executor hurts GC).
+  # Rule: SPL-D01-003
+  # Default: 5
+  max_executor_cores: 5
+
+  # Minimum number of executor cores.
+  # Rule: SPL-D01-003
+  # Default: 2
+  min_executor_cores: 2
+
+  # Minimum number of withColumn() chained calls before flagging as a loop risk.
+  # Rule: SPL-D10-005
+  # Default: 10
+  max_with_column_chain: 10
+
+  # Maximum number of chained filter() calls before suggesting a merge.
+  # Rule: SPL-D10-006
+  # Default: 3
+  max_chained_filters: 3
+
+
+# -----------------------------------------------------------------------------
+# SEVERITY_OVERRIDE — Override the default severity of specific rules
+# -----------------------------------------------------------------------------
+# Use this to tune signal-to-noise ratio for your organization.
+# Example: promote SPL-D03-001 to CRITICAL, demote SPL-D07-007 to INFO.
+#
+# Valid values: "CRITICAL" | "WARNING" | "INFO"
+severity_override: {}
+# Examples (uncomment to use):
+#   SPL-D03-001: CRITICAL    # Cartesian product is always critical for us
+#   SPL-D02-001: WARNING     # Relax shuffle partition default to warning
+#   SPL-D07-007: INFO        # Write mode check is just informational here
+#   SPL-D11-001: WARNING     # Monitoring is important but not blocking
+
+
+# -----------------------------------------------------------------------------
+# IGNORE — Skip files, directories, or specific rules
+# -----------------------------------------------------------------------------
+ignore:
+  # Glob patterns for files to exclude from scanning.
+  # Supports standard glob syntax: *, **, ?, [seq]
+  files:
+    - "**/*_test.py"          # Test files often use intentional anti-patterns
+    - "**/conftest.py"        # pytest configuration
+    - "**/migrations/*.py"    # Schema migration scripts
+
+  # Specific rule IDs to suppress globally across all files.
+  # Prefer severity_override or per-file suppression comments where possible.
+  rules: []
+  # Examples:
+  #   - SPL-D11-001   # We use a custom telemetry framework, not SparkListener
+  #   - SPL-D07-002   # Legacy CSV pipeline, migration in progress
+
+  # Directory paths (relative to repo root) to exclude entirely.
+  directories:
+    - ".venv"
+    - "venv"
+    - "build"
+    - "dist"
+    - ".eggs"
+    - "notebooks"             # Exploratory notebooks are not production code
+
+
+# -----------------------------------------------------------------------------
+# SPARK_CONFIG_AUDIT — Expected SparkSession configuration values
+# -----------------------------------------------------------------------------
+# When enabled, the linter checks that SparkSession.builder configs in your
+# code match the expected values defined here. Mismatches become findings.
+# Set expected_value to null to assert the config is merely *present*.
+#
+# All ~75 parameters across D01 (cluster), D02 (shuffle), D08 (AQE).
+spark_config_audit:
+  enabled: false   # Set to true to enforce config standards across your org
+
+  configs:
+    # --- Executor Resources (D01) ---
+    spark.executor.memory:
+      expected_value: "8g"
+      severity: WARNING
+      note: "Minimum recommended for production workloads"
+
+    spark.executor.memoryOverhead:
+      expected_value: "2g"
+      severity: WARNING
+      note: "Off-heap overhead; 10-15% of executor memory"
+
+    spark.executor.cores:
+      expected_value: null    # Assert it is set; any value accepted
+      severity: WARNING
+      note: "Must be set explicitly; never rely on default of 1"
+
+    spark.executor.instances:
+      expected_value: null
+      severity: INFO
+      note: "For fixed-size clusters; omit when using dynamic allocation"
+
+    # --- Driver Resources (D01) ---
+    spark.driver.memory:
+      expected_value: "4g"
+      severity: WARNING
+
+    spark.driver.memoryOverhead:
+      expected_value: "1g"
+      severity: INFO
+
+    spark.driver.maxResultSize:
+      expected_value: "2g"
+      severity: WARNING
+      note: "Prevents OOM from large collect() results"
+
+    spark.driver.cores:
+      expected_value: null
+      severity: INFO
+
+    # --- Dynamic Allocation (D01) ---
+    spark.dynamicAllocation.enabled:
+      expected_value: "true"
+      severity: WARNING
+
+    spark.dynamicAllocation.minExecutors:
+      expected_value: null
+      severity: INFO
+
+    spark.dynamicAllocation.maxExecutors:
+      expected_value: null
+      severity: WARNING
+      note: "Cap max executors to control cloud costs"
+
+    spark.dynamicAllocation.initialExecutors:
+      expected_value: null
+      severity: INFO
+
+    spark.dynamicAllocation.executorIdleTimeout:
+      expected_value: "60s"
+      severity: INFO
+
+    spark.dynamicAllocation.schedulerBacklogTimeout:
+      expected_value: "1s"
+      severity: INFO
+
+    spark.shuffle.service.enabled:
+      expected_value: "true"
+      severity: CRITICAL
+      note: "Required for dynamic allocation"
+
+    spark.shuffle.service.port:
+      expected_value: null
+      severity: INFO
+
+    # --- Serialization (D01) ---
+    spark.serializer:
+      expected_value: "org.apache.spark.serializer.KryoSerializer"
+      severity: WARNING
+      note: "Kryo is 10x faster than Java serializer"
+
+    spark.kryo.registrationRequired:
+      expected_value: "false"
+      severity: INFO
+      note: "Set true only after registering all classes"
+
+    spark.kryo.unsafe:
+      expected_value: "true"
+      severity: INFO
+
+    spark.kryoserializer.buffer.max:
+      expected_value: "512m"
+      severity: WARNING
+      note: "Increase if seeing buffer overflow errors"
+
+    spark.kryoserializer.buffer:
+      expected_value: "64m"
+      severity: INFO
+
+    # --- Compression (D01, D02) ---
+    spark.io.compression.codec:
+      expected_value: "lz4"
+      severity: INFO
+      note: "lz4 for speed; zstd for better ratio; snappy is the default"
+
+    spark.rdd.compress:
+      expected_value: "true"
+      severity: INFO
+
+    spark.broadcast.compress:
+      expected_value: "true"
+      severity: WARNING
+
+    spark.shuffle.compress:
+      expected_value: "true"
+      severity: WARNING
+
+    spark.shuffle.spill.compress:
+      expected_value: "true"
+      severity: INFO
+
+    # --- Network & Timeout (D01) ---
+    spark.network.timeout:
+      expected_value: "800s"
+      severity: WARNING
+      note: "Default 120s too short for large shuffles"
+
+    spark.rpc.askTimeout:
+      expected_value: "600s"
+      severity: INFO
+
+    spark.rpc.lookupTimeout:
+      expected_value: "600s"
+      severity: INFO
+
+    spark.storage.blockManagerHeartbeatTimeoutMs:
+      expected_value: "300000"
+      severity: INFO
+
+    spark.executor.heartbeatInterval:
+      expected_value: "20s"
+      severity: INFO
+
+    spark.files.fetchTimeout:
+      expected_value: "120s"
+      severity: INFO
+
+    # --- Speculation (D01) ---
+    spark.speculation:
+      expected_value: "false"
+      severity: INFO
+      note: "Speculation can cause duplicate writes; disable for idempotency"
+
+    spark.speculation.multiplier:
+      expected_value: "3"
+      severity: INFO
+
+    spark.speculation.quantile:
+      expected_value: "0.9"
+      severity: INFO
+
+    # --- Memory Management (D01) ---
+    spark.memory.fraction:
+      expected_value: "0.8"
+      severity: INFO
+      note: "Fraction of JVM heap for Spark execution + storage"
+
+    spark.memory.storageFraction:
+      expected_value: "0.3"
+      severity: INFO
+
+    spark.memory.offHeap.enabled:
+      expected_value: "true"
+      severity: INFO
+      note: "Enable for workloads with many large objects"
+
+    spark.memory.offHeap.size:
+      expected_value: null
+      severity: INFO
+
+    # --- Shuffle (D02) ---
+    spark.sql.shuffle.partitions:
+      expected_value: null   # AQE will manage this; assert it's explicitly set
+      severity: WARNING
+      note: "Do not leave at default 200 unless AQE is enabled"
+
+    spark.shuffle.sort.bypassMergeThreshold:
+      expected_value: "400"
+      severity: INFO
+
+    spark.shuffle.file.buffer:
+      expected_value: "1m"
+      severity: INFO
+      note: "Larger buffer reduces disk I/O during shuffle write"
+
+    spark.shuffle.unsafe.file.output.buffer:
+      expected_value: "5m"
+      severity: INFO
+
+    spark.reducer.maxSizeInFlight:
+      expected_value: "96m"
+      severity: INFO
+      note: "Amount of shuffle data fetched simultaneously per reducer"
+
+    spark.shuffle.io.maxRetries:
+      expected_value: "10"
+      severity: WARNING
+      note: "Increase retries for flaky network environments"
+
+    spark.shuffle.io.retryWait:
+      expected_value: "60s"
+      severity: INFO
+
+    spark.shuffle.io.numConnectionsPerPeer:
+      expected_value: "1"
+      severity: INFO
+
+    spark.shuffle.registration.timeout:
+      expected_value: "120000"
+      severity: INFO
+
+    # --- SQL & Catalyst (D10) ---
+    spark.sql.autoBroadcastJoinThreshold:
+      expected_value: "10485760"   # 10MB in bytes
+      severity: WARNING
+      note: "Tune based on cluster memory; -1 disables auto-broadcast"
+
+    spark.sql.broadcastTimeout:
+      expected_value: "600"
+      severity: WARNING
+      note: "Default 300s too short for large broadcasts"
+
+    spark.sql.files.maxPartitionBytes:
+      expected_value: "134217728"  # 128MB in bytes
+      severity: INFO
+
+    spark.sql.files.openCostInBytes:
+      expected_value: "4194304"    # 4MB
+      severity: INFO
+
+    spark.sql.inMemoryColumnarStorage.compressed:
+      expected_value: "true"
+      severity: INFO
+
+    spark.sql.inMemoryColumnarStorage.batchSize:
+      expected_value: "10000"
+      severity: INFO
+
+    spark.sql.codegen.wholeStage:
+      expected_value: "true"
+      severity: WARNING
+      note: "Whole-stage codegen is key to Spark's vectorized execution"
+
+    spark.sql.codegen.fallback:
+      expected_value: "true"
+      severity: INFO
+
+    spark.sql.execution.arrow.pyspark.enabled:
+      expected_value: "true"
+      severity: WARNING
+      note: "Required for pandas UDF (vectorized UDF) performance"
+
+    spark.sql.execution.arrow.maxRecordsPerBatch:
+      expected_value: "10000"
+      severity: INFO
+
+    # --- AQE (D08) ---
+    spark.sql.adaptive.enabled:
+      expected_value: "true"
+      severity: CRITICAL
+      note: "AQE is the single highest-ROI Spark 3 feature; always enable"
+
+    spark.sql.adaptive.coalescePartitions.enabled:
+      expected_value: "true"
+      severity: WARNING
+
+    spark.sql.adaptive.coalescePartitions.minPartitionNum:
+      expected_value: null
+      severity: INFO
+
+    spark.sql.adaptive.advisoryPartitionSizeInBytes:
+      expected_value: "134217728"  # 128MB
+      severity: WARNING
+      note: "Target post-coalesce partition size"
+
+    spark.sql.adaptive.skewJoin.enabled:
+      expected_value: "true"
+      severity: WARNING
+
+    spark.sql.adaptive.skewJoin.skewedPartitionFactor:
+      expected_value: "5"
+      severity: INFO
+
+    spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes:
+      expected_value: "268435456"  # 256MB
+      severity: INFO
+
+    spark.sql.adaptive.localShuffleReader.enabled:
+      expected_value: "true"
+      severity: INFO
+
+    spark.sql.adaptive.fetchShuffleBlocksInBatch:
+      expected_value: "true"
+      severity: INFO
+
+    spark.sql.adaptive.optimizeSkewsInRebalancePartitions.enabled:
+      expected_value: "true"
+      severity: INFO
+
+    spark.sql.adaptive.nonEmptyPartitionRatioForBroadcastJoin:
+      expected_value: "0.2"
+      severity: INFO
+
+    # --- Event Log & Monitoring (D11) ---
+    spark.eventLog.enabled:
+      expected_value: "true"
+      severity: WARNING
+      note: "Required for Spark History Server and post-mortem debugging"
+
+    spark.eventLog.dir:
+      expected_value: null
+      severity: WARNING
+      note: "Point to HDFS or S3 path accessible by history server"
+
+    spark.eventLog.compress:
+      expected_value: "true"
+      severity: INFO
+
+    spark.ui.enabled:
+      expected_value: "true"
+      severity: INFO
+
+    spark.ui.retainedJobs:
+      expected_value: "1000"
+      severity: INFO
+
+    spark.ui.retainedStages:
+      expected_value: "1000"
+      severity: INFO
+
+
+# -----------------------------------------------------------------------------
+# LLM — Tier 2 context-aware analysis via Claude API
+# -----------------------------------------------------------------------------
+llm:
+  # Set to true to enable Tier 2 LLM analysis.
+  # Requires the "llm" optional dependency group: pip install spark-perf-lint[llm]
+  # Default: false
+  enabled: false
+
+  # LLM provider. Currently only "anthropic" is supported.
+  # Default: "anthropic"
+  provider: anthropic
+
+  # Claude model to use for analysis.
+  # Recommended: claude-opus-4-6 for deep analysis, claude-haiku-4-5-20251001 for speed.
+  # Default: "claude-sonnet-4-6"
+  model: claude-sonnet-4-6
+
+  # Environment variable name that holds the Anthropic API key.
+  # The key itself is never stored in this config file.
+  # Default: "ANTHROPIC_API_KEY"
+  api_key_env_var: ANTHROPIC_API_KEY
+
+  # Maximum tokens in the LLM response per finding.
+  # Default: 1024
+  max_tokens: 1024
+
+  # Number of findings to batch into a single LLM call (reduces API calls).
+  # Default: 5
+  batch_size: 5
+
+  # Only send findings at or above this severity to the LLM.
+  # Options: "INFO" | "WARNING" | "CRITICAL"
+  # Default: "WARNING"
+  min_severity_for_llm: WARNING
+
+  # Maximum LLM calls per scan run (cost control).
+  # 0 = unlimited
+  # Default: 20
+  max_llm_calls: 20
+
+
+# -----------------------------------------------------------------------------
+# OBSERVABILITY — Tracing and run recording
+# -----------------------------------------------------------------------------
+observability:
+  # Enable tracing of scan runs, rule firings, and LLM calls.
+  # Default: false
+  enabled: false
+
+  # Tracing backend to use.
+  # Options: "file" | "langsmith"
+  #   file:       Writes JSON trace files to output_dir (no external deps)
+  #   langsmith:  Sends traces to LangSmith (requires LANGCHAIN_API_KEY env var)
+  # Default: "file"
+  backend: file
+
+  # Directory for file-based trace output. Relative to repo root.
+  # Default: ".spark-perf-lint-traces"
+  output_dir: .spark-perf-lint-traces
+
+  # Verbosity of trace data.
+  # Options: "minimal" | "standard" | "verbose"
+  #   minimal:   Run metadata and finding counts only
+  #   standard:  Findings with rule IDs, severities, and file locations
+  #   verbose:   Full payloads including AST nodes, LLM prompts/responses
+  # Default: "standard"
+  trace_level: standard
+
+  # LangSmith project name (only used when backend = "langsmith").
+  # Default: "spark-perf-lint"
+  langsmith_project: spark-perf-lint
+
+  # Environment variable holding the LangSmith API key.
+  # Default: "LANGCHAIN_API_KEY"
+  langsmith_api_key_env_var: LANGCHAIN_API_KEY
