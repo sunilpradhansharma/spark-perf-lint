@@ -48,6 +48,11 @@ select = ["E", "F", "W", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "slow: slow performance tests (may take several seconds)",
+    "tier2: requires a live LLM API key (Anthropic)",
+    "tier3: requires a running Spark runtime",
+]
 
 [tool.mypy]
 python_version = "3.10"
