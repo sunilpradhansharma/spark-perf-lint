@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -29,9 +28,7 @@ from spark_perf_lint.config import CONFIG_FILENAME, ConfigError, LintConfig
 # ---------------------------------------------------------------------------
 
 _SEVERITY_CHOICES = click.Choice(["CRITICAL", "WARNING", "INFO"], case_sensitive=False)
-_FORMAT_CHOICES = click.Choice(
-    ["terminal", "json", "markdown", "github-pr"], case_sensitive=False
-)
+_FORMAT_CHOICES = click.Choice(["terminal", "json", "markdown", "github-pr"], case_sensitive=False)
 
 
 # =============================================================================
@@ -97,8 +94,7 @@ def main(ctx: click.Context) -> None:
     type=_FORMAT_CHOICES,
     multiple=True,
     help=(
-        "Output format(s). Can be repeated: --format terminal --format json. "
-        "Overrides config."
+        "Output format(s). Can be repeated: --format terminal --format json. " "Overrides config."
     ),
     metavar="FORMAT",
 )
@@ -124,10 +120,7 @@ def main(ctx: click.Context) -> None:
     "--rule",
     "rules",
     default=None,
-    help=(
-        "Scan only these rule IDs. Comma-separated, "
-        "e.g. 'SPL-D03-001,SPL-D08-002'."
-    ),
+    help=("Scan only these rule IDs. Comma-separated, " "e.g. 'SPL-D03-001,SPL-D08-002'."),
     metavar="RULE_IDS",
 )
 @click.option(
@@ -153,13 +146,13 @@ def main(ctx: click.Context) -> None:
 )
 def scan(
     paths: tuple[Path, ...],
-    config_path: Optional[Path],
-    severity_threshold: Optional[str],
+    config_path: Path | None,
+    severity_threshold: str | None,
     fail_on: tuple[str, ...],
     output_format: tuple[str, ...],
-    output_path: Optional[Path],
-    dimensions: Optional[str],
-    rules: Optional[str],
+    output_path: Path | None,
+    dimensions: str | None,
+    rules: str | None,
     show_fix: bool,
     verbose: bool,
     quiet: bool,
@@ -199,7 +192,7 @@ def scan(
             import yaml  # lazy import — only needed here
 
             raw_yaml = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-            from spark_perf_lint.config import _deep_merge, _DEFAULTS
+            from spark_perf_lint.config import _DEFAULTS, _deep_merge
 
             merged = _deep_merge(_deep_merge({}, _DEFAULTS), raw_yaml)
             if cli_overrides:
@@ -207,8 +200,10 @@ def scan(
             LintConfig._validate(merged)
             config = LintConfig(raw=merged, config_file_path=config_path)
         else:
-            start_dir = paths[0].parent if (paths and paths[0].is_file()) else (
-                paths[0] if paths else Path.cwd()
+            start_dir = (
+                paths[0].parent
+                if (paths and paths[0].is_file())
+                else (paths[0] if paths else Path.cwd())
             )
             config = LintConfig.load(start_dir=start_dir, cli_overrides=cli_overrides or None)
     except ConfigError as exc:
@@ -290,22 +285,22 @@ _RULE_CATALOGUE: dict[str, tuple[str, str]] = {
     "SPL-D01-005": ("WARNING", "spark.default.parallelism not set explicitly"),
     "SPL-D01-006": ("CRITICAL", "Memory fraction + memoryOverhead > available RAM"),
     "SPL-D01-007": ("WARNING", "Hardcoded master URL"),
-    "SPL-D01-008": ("INFO",    "SparkSession created without appName"),
+    "SPL-D01-008": ("INFO", "SparkSession created without appName"),
     # D02 — Shuffle
     "SPL-D02-001": ("WARNING", "spark.sql.shuffle.partitions left at default (200)"),
-    "SPL-D02-002": ("CRITICAL","groupByKey used instead of reduceByKey/aggregateByKey"),
+    "SPL-D02-002": ("CRITICAL", "groupByKey used instead of reduceByKey/aggregateByKey"),
     "SPL-D02-003": ("WARNING", "sortByKey without a preceding partitionBy"),
     "SPL-D02-004": ("WARNING", "repartition() called immediately before a write"),
     "SPL-D02-005": ("WARNING", "coalesce() called with value > current partition count"),
-    "SPL-D02-006": ("INFO",    "Shuffle without compression enabled"),
+    "SPL-D02-006": ("INFO", "Shuffle without compression enabled"),
     "SPL-D02-007": ("WARNING", "Multiple wide transformations without checkpoint"),
     # D03 — Joins
-    "SPL-D03-001": ("CRITICAL","Cartesian product (cross join) detected"),
+    "SPL-D03-001": ("CRITICAL", "Cartesian product (cross join) detected"),
     "SPL-D03-002": ("WARNING", "Large-to-large join without broadcast hint"),
     "SPL-D03-003": ("WARNING", "Broadcast hint on table exceeding broadcast threshold"),
-    "SPL-D03-004": ("INFO",    "Join on string columns without Bloom filter"),
+    "SPL-D03-004": ("INFO", "Join on string columns without Bloom filter"),
     "SPL-D03-005": ("WARNING", "Multiple joins on same DataFrame without caching"),
-    "SPL-D03-006": ("CRITICAL","Skewed join without salting or AQE skew join enabled"),
+    "SPL-D03-006": ("CRITICAL", "Skewed join without salting or AQE skew join enabled"),
     "SPL-D03-007": ("WARNING", "Join before filter (filter pushdown opportunity)"),
     # D04 — Partitioning
     "SPL-D04-001": ("WARNING", "Partition count > max_partition_count"),
@@ -313,57 +308,57 @@ _RULE_CATALOGUE: dict[str, tuple[str, str]] = {
     "SPL-D04-003": ("WARNING", "repartition() with no argument"),
     "SPL-D04-004": ("WARNING", "Writing without partitionBy on large datasets"),
     "SPL-D04-005": ("WARNING", "partitionBy on high-cardinality column (small files)"),
-    "SPL-D04-006": ("CRITICAL","coalesce(1) or repartition(1) to single partition"),
-    "SPL-D04-007": ("INFO",    "Reading partitioned data without partition filter"),
+    "SPL-D04-006": ("CRITICAL", "coalesce(1) or repartition(1) to single partition"),
+    "SPL-D04-007": ("INFO", "Reading partitioned data without partition filter"),
     # D05 — Data Skew
     "SPL-D05-001": ("WARNING", "groupBy on low-cardinality column (likely skew)"),
     "SPL-D05-002": ("WARNING", "Join key contains null values (null skew)"),
-    "SPL-D05-003": ("CRITICAL","No salting before join on skewed key"),
+    "SPL-D05-003": ("CRITICAL", "No salting before join on skewed key"),
     "SPL-D05-004": ("WARNING", "Window function with unbounded partition (skew risk)"),
-    "SPL-D05-005": ("CRITICAL","collect() / toPandas() on unaggregated large dataset"),
+    "SPL-D05-005": ("CRITICAL", "collect() / toPandas() on unaggregated large dataset"),
     # D06 — Caching
     "SPL-D06-001": ("WARNING", "DataFrame cached but never unpersisted (memory leak)"),
-    "SPL-D06-002": ("INFO",    "DataFrame cached but used only once"),
+    "SPL-D06-002": ("INFO", "DataFrame cached but used only once"),
     "SPL-D06-003": ("WARNING", "cache() used instead of persist(StorageLevel) for large data"),
     "SPL-D06-004": ("WARNING", "Repeated action on same DataFrame without cache"),
-    "SPL-D06-005": ("INFO",    "cache() called after a write (pointless)"),
+    "SPL-D06-005": ("INFO", "cache() called after a write (pointless)"),
     "SPL-D06-006": ("WARNING", "StorageLevel.DISK_ONLY used (use Parquet write instead)"),
     # D07 — I/O Format
     "SPL-D07-001": ("WARNING", "Reading CSV without explicit schema (full scan)"),
-    "SPL-D07-002": ("CRITICAL","Writing in CSV or JSON format (use Parquet/Delta)"),
+    "SPL-D07-002": ("CRITICAL", "Writing in CSV or JSON format (use Parquet/Delta)"),
     "SPL-D07-003": ("WARNING", "Reading Parquet without predicate pushdown filter"),
     "SPL-D07-004": ("WARNING", "No compression codec set for output"),
     "SPL-D07-005": ("WARNING", "Using wholeTextFiles() on large dataset"),
     "SPL-D07-006": ("WARNING", "Reading with inferSchema=True in production code"),
-    "SPL-D07-007": ("INFO",    "Writing without specifying mode (default overwrites)"),
+    "SPL-D07-007": ("INFO", "Writing without specifying mode (default overwrites)"),
     # D08 — AQE
-    "SPL-D08-001": ("CRITICAL","spark.sql.adaptive.enabled not set to true"),
+    "SPL-D08-001": ("CRITICAL", "spark.sql.adaptive.enabled not set to true"),
     "SPL-D08-002": ("WARNING", "AQE skew join not enabled"),
     "SPL-D08-003": ("WARNING", "AQE coalesce partitions not enabled"),
-    "SPL-D08-004": ("INFO",    "advisoryPartitionSizeInBytes not tuned from default"),
+    "SPL-D08-004": ("INFO", "advisoryPartitionSizeInBytes not tuned from default"),
     "SPL-D08-005": ("WARNING", "AQE enabled but local shuffle reader disabled"),
     # D09 — UDF Code Quality
     "SPL-D09-001": ("WARNING", "Python UDF used where pandas UDF (vectorized) could be used"),
     "SPL-D09-002": ("WARNING", "UDF not registered with return type annotation"),
-    "SPL-D09-003": ("CRITICAL","UDF contains DataFrame or SparkContext reference"),
+    "SPL-D09-003": ("CRITICAL", "UDF contains DataFrame or SparkContext reference"),
     "SPL-D09-004": ("WARNING", "UDF complexity exceeds max_udf_complexity threshold"),
-    "SPL-D09-005": ("INFO",    "Lambda used as UDF (not debuggable, not reusable)"),
+    "SPL-D09-005": ("INFO", "Lambda used as UDF (not debuggable, not reusable)"),
     "SPL-D09-006": ("WARNING", "UDF applied inside a loop (should be vectorized)"),
     "SPL-D09-007": ("WARNING", "UDF output used as join key (prevents predicate pushdown)"),
     # D10 — Catalyst Optimizer
     "SPL-D10-001": ("WARNING", "select('*') prevents column pruning"),
     "SPL-D10-002": ("WARNING", "Python object used in withColumn (breaks optimization)"),
     "SPL-D10-003": ("WARNING", "Filter after groupBy instead of before (late filter)"),
-    "SPL-D10-004": ("CRITICAL","explode() without subsequent filter (combinatorial explosion)"),
+    "SPL-D10-004": ("CRITICAL", "explode() without subsequent filter (combinatorial explosion)"),
     "SPL-D10-005": ("WARNING", "withColumn in a loop (creates deeply nested plan)"),
-    "SPL-D10-006": ("INFO",    "Chained filter() calls that could be merged"),
-    "SPL-D10-007": ("CRITICAL","Non-deterministic function in join condition"),
+    "SPL-D10-006": ("INFO", "Chained filter() calls that could be merged"),
+    "SPL-D10-007": ("CRITICAL", "Non-deterministic function in join condition"),
     # D11 — Monitoring & Observability
     "SPL-D11-001": ("WARNING", "No SparkListener or accumulator instrumentation"),
     "SPL-D11-002": ("WARNING", "spark.eventLog.enabled not set to true"),
     "SPL-D11-003": ("WARNING", "No try/except around Spark actions (silent failures)"),
-    "SPL-D11-004": ("INFO",    "spark.ui.enabled set to false in non-local mode"),
-    "SPL-D11-005": ("INFO",    "No logging framework used in job entry point"),
+    "SPL-D11-004": ("INFO", "spark.ui.enabled set to false in non-local mode"),
+    "SPL-D11-005": ("INFO", "No logging framework used in job entry point"),
 }
 
 _SEVERITY_COLORS: dict[str, str] = {
@@ -398,8 +393,8 @@ _SEVERITY_COLORS: dict[str, str] = {
     help="Output format.",
 )
 def rules(
-    dimension_filter: Optional[str],
-    severity_filter: Optional[str],
+    dimension_filter: str | None,
+    severity_filter: str | None,
     output_format: str,
 ) -> None:
     """List all available rules with IDs, dimensions, and default severities.
@@ -508,15 +503,12 @@ def init(force: bool, minimal: bool) -> None:
         dest.write_text(bundled.read_text(encoding="utf-8"), encoding="utf-8")
         click.echo(
             click.style(f"Created {dest}", fg="green", bold=True)
-            + f"  (copied from bundled defaults)"
+            + "  (copied from bundled defaults)"
         )
     else:
         # Write a concise minimal stub
         _write_minimal_config(dest)
-        click.echo(
-            click.style(f"Created {dest}", fg="green", bold=True)
-            + "  (minimal config)"
-        )
+        click.echo(click.style(f"Created {dest}", fg="green", bold=True) + "  (minimal config)")
 
     click.echo(
         "\nEdit the file to customise thresholds, enable/disable rules, and "

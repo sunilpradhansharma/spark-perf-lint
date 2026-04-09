@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-
 # =============================================================================
 # Enumerations
 # =============================================================================
@@ -253,13 +252,9 @@ class Finding:
                 or if ``line_number`` is less than 1.
         """
         if not self.rule_id.startswith("SPL-D"):
-            raise ValueError(
-                f"rule_id must start with 'SPL-D', got {self.rule_id!r}"
-            )
+            raise ValueError(f"rule_id must start with 'SPL-D', got {self.rule_id!r}")
         if self.line_number < 1:
-            raise ValueError(
-                f"line_number must be >= 1, got {self.line_number}"
-            )
+            raise ValueError(f"line_number must be >= 1, got {self.line_number}")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise this finding to a plain dictionary.

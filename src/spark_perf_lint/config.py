@@ -25,7 +25,6 @@ import yaml
 
 from spark_perf_lint.types import EffortLevel, Severity  # noqa: F401 (re-exported)
 
-
 # =============================================================================
 # Built-in defaults
 # =============================================================================
@@ -102,7 +101,7 @@ _DEFAULTS: dict[str, Any] = {
 # Variables not listed here are ignored.
 _ENV_VAR_MAP: dict[str, tuple[str, str]] = {
     "SPARK_PERF_LINT_SEVERITY_THRESHOLD": ("general", "severity_threshold"),
-    "SPARK_PERF_LINT_FAIL_ON": ("general", "fail_on"),           # comma-separated
+    "SPARK_PERF_LINT_FAIL_ON": ("general", "fail_on"),  # comma-separated
     "SPARK_PERF_LINT_REPORT_FORMAT": ("general", "report_format"),  # comma-separated
     "SPARK_PERF_LINT_MAX_FINDINGS": ("general", "max_findings"),
     "SPARK_PERF_LINT_LLM_ENABLED": ("llm", "enabled"),
@@ -229,9 +228,7 @@ def _coerce_bool(value: str) -> bool:
         return True
     if normalised in {"false", "0", "no"}:
         return False
-    raise ConfigError(
-        f"Expected a boolean value (true/false/1/0/yes/no), got {value!r}"
-    )
+    raise ConfigError(f"Expected a boolean value (true/false/1/0/yes/no), got {value!r}")
 
 
 def _apply_env_vars(config: dict[str, Any]) -> dict[str, Any]:
@@ -261,10 +258,10 @@ def _apply_env_vars(config: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(existing, int):
             try:
                 value = int(raw)
-            except ValueError:
+            except ValueError as exc:
                 raise ConfigError(
                     f"Environment variable {env_key} must be an integer, got {raw!r}"
-                )
+                ) from exc
         elif isinstance(existing, list):
             # Comma-separated string → list of stripped strings
             value = [item.strip() for item in raw.split(",") if item.strip()]
@@ -329,7 +326,7 @@ class LintConfig:
         cls,
         start_dir: Path | None = None,
         cli_overrides: dict[str, Any] | None = None,
-    ) -> "LintConfig":
+    ) -> LintConfig:
         """Discover, load, merge, and validate configuration.
 
         Applies the four-layer priority stack:
@@ -375,7 +372,7 @@ class LintConfig:
         return cls(raw=merged, config_file_path=config_file_path)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "LintConfig":
+    def from_dict(cls, data: dict[str, Any]) -> LintConfig:
         """Construct from an explicit dictionary (useful in tests).
 
         Merges *data* on top of built-in defaults so tests only need to
@@ -420,9 +417,7 @@ class LintConfig:
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError as exc:
-            raise ConfigError(
-                f"Config file {path} is not valid YAML:\n  {exc}"
-            ) from exc
+            raise ConfigError(f"Config file {path} is not valid YAML:\n  {exc}") from exc
 
         if data is None:
             return {}
@@ -480,21 +475,15 @@ class LintConfig:
         # max_findings
         mf = general.get("max_findings", 0)
         if not isinstance(mf, int) or mf < 0:
-            raise ConfigError(
-                f"general.max_findings must be a non-negative integer, got {mf!r}"
-            )
+            raise ConfigError(f"general.max_findings must be a non-negative integer, got {mf!r}")
 
         # thresholds — all must be positive numbers
         thresholds = cfg.get("thresholds", {})
         for key, val in thresholds.items():
             if not isinstance(val, (int, float)):
-                raise ConfigError(
-                    f"thresholds.{key} must be a number, got {val!r}"
-                )
+                raise ConfigError(f"thresholds.{key} must be a number, got {val!r}")
             if val <= 0:
-                raise ConfigError(
-                    f"thresholds.{key} must be > 0, got {val!r}"
-                )
+                raise ConfigError(f"thresholds.{key} must be > 0, got {val!r}")
 
         # skew ratio ordering
         skew_warn = thresholds.get("skew_ratio_warning", 5.0)
@@ -620,8 +609,7 @@ class LintConfig:
         thresholds = self.raw.get("thresholds", {})
         if name not in thresholds:
             raise KeyError(
-                f"Unknown threshold {name!r}. "
-                f"Known thresholds: {sorted(thresholds.keys())}"
+                f"Unknown threshold {name!r}. " f"Known thresholds: {sorted(thresholds.keys())}"
             )
         return float(thresholds[name])
 
@@ -654,11 +642,11 @@ class LintConfig:
             name = str(overrides[rule_id]).upper()
             try:
                 return Severity[name]
-            except KeyError:
+            except KeyError as exc:
                 raise ConfigError(
                     f"severity_override[{rule_id!r}] = {overrides[rule_id]!r} is not valid. "
                     f"Must be one of: {sorted(_VALID_SEVERITY_NAMES)}"
-                )
+                ) from exc
         return Severity.WARNING  # callers should substitute their own default
 
     def has_severity_override(self, rule_id: str) -> bool:
