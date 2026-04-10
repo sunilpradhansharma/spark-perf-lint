@@ -808,3 +808,197 @@ class TestOutputFormat:
         assert (
             "Traceback (most recent call last)" not in result.stdout
         ), "A Python traceback leaked into the hook output."
+
+
+# ---------------------------------------------------------------------------
+# Real git workflow — subprocess end-to-end
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run a git command inside *repo*, returning the CompletedProcess."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_ok(repo: Path, *args: str) -> str:
+    """Run a git command and assert it succeeds; return combined output."""
+    r = _git(repo, *args)
+    assert r.returncode == 0, f"git {' '.join(args)} failed:\n{r.stderr}"
+    return r.stdout + r.stderr
+
+
+@pytest.mark.slow
+class TestRealGitWorkflow:
+    """End-to-end test that drives a real git repository with actual hooks.
+
+    Uses subprocess to invoke git directly so the test exercises the same
+    code path a developer would experience on the command line:
+
+    1. Fresh repo with pre-commit hook installed (``repo: local`` config)
+    2. Commit with CRITICAL anti-patterns → hook BLOCKS (exit 1, no commit)
+    3. Fix the anti-patterns → hook PASSES (exit 0, commit recorded)
+    4. ``--no-verify`` bypass → commit recorded regardless of findings
+
+    The pre-commit config uses ``language: system`` so the already-installed
+    ``spark-perf-lint`` binary is invoked without creating a new virtualenv.
+    """
+
+    _PRE_COMMIT_CONFIG = """\
+repos:
+  - repo: local
+    hooks:
+      - id: spark-perf-lint
+        name: Spark Performance Linter
+        entry: spark-perf-lint scan
+        language: system
+        types: [python]
+        pass_filenames: true
+        args:
+          - '--fail-on'
+          - 'CRITICAL'
+          - '--severity-threshold'
+          - 'CRITICAL'
+"""
+
+    _BAD_FILE = """\
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+
+spark = (
+    SparkSession.builder
+    .appName("bad_pipeline")
+    .config("spark.sql.adaptive.enabled", "false")
+    .getOrCreate()
+)
+orders = spark.read.parquet("/data/orders")
+customers = spark.read.parquet("/data/customers")
+# CRITICAL: cartesian product
+result = orders.crossJoin(customers)
+result.write.parquet("/data/output")
+"""
+
+    _FIXED_FILE = """\
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+
+spark = (
+    SparkSession.builder
+    .appName("good_pipeline")
+    .getOrCreate()
+)
+orders = spark.read.parquet("/data/orders")
+customers = spark.read.parquet("/data/customers")
+result = orders.join(F.broadcast(customers), on="customer_id", how="inner")
+result.write.parquet("/data/output")
+"""
+
+    @pytest.fixture()
+    def git_repo(self, tmp_path: Path) -> Path:
+        """Create a fresh git repo with pre-commit installed."""
+        repo = tmp_path / "test_repo"
+        repo.mkdir()
+
+        _git_ok(repo, "init")
+        _git_ok(repo, "config", "user.email", "test@example.com")
+        _git_ok(repo, "config", "user.name", "Test User")
+
+        # Initial commit so HEAD exists
+        (repo / "README.md").write_text("# test\n")
+        _git_ok(repo, "add", "README.md")
+        _git_ok(repo, "commit", "-m", "init")
+
+        # Install pre-commit config
+        (repo / ".pre-commit-config.yaml").write_text(self._PRE_COMMIT_CONFIG)
+
+        # Install the git hook
+        r = subprocess.run(
+            ["pre-commit", "install"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, f"pre-commit install failed:\n{r.stderr}"
+
+        return repo
+
+    def test_hook_blocks_commit_with_critical_findings(self, git_repo: Path) -> None:
+        """A file with CRITICAL anti-patterns must prevent the commit."""
+        (git_repo / "pipeline.py").write_text(self._BAD_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+
+        result = _git(git_repo, "commit", "-m", "add bad pipeline")
+
+        assert result.returncode != 0, (
+            "Pre-commit hook should have blocked this commit.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # The bad commit must NOT appear in git log
+        log = _git_ok(git_repo, "log", "--oneline")
+        assert "add bad pipeline" not in log, (
+            "Blocked commit should not appear in git log.\nlog:\n" + log
+        )
+
+    def test_hook_allows_commit_after_fix(self, git_repo: Path) -> None:
+        """After fixing CRITICAL anti-patterns the commit must succeed."""
+        # Stage bad file first (hook blocks it, but file is not in history)
+        (git_repo / "pipeline.py").write_text(self._BAD_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+        _git(git_repo, "commit", "-m", "bad — should be blocked")  # intentionally ignored
+
+        # Now write the fixed version and stage it
+        (git_repo / "pipeline.py").write_text(self._FIXED_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+
+        result = _git(git_repo, "commit", "-m", "fix: good pipeline")
+
+        assert result.returncode == 0, (
+            "Fixed file should allow the commit.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        log = _git_ok(git_repo, "log", "--oneline")
+        assert "fix: good pipeline" in log, "Fixed commit must appear in log.\n" + log
+
+    def test_no_verify_bypasses_hook(self, git_repo: Path) -> None:
+        """``git commit --no-verify`` must bypass the hook and succeed."""
+        (git_repo / "pipeline.py").write_text(self._BAD_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+
+        result = _git(git_repo, "commit", "--no-verify", "-m", "bypass: --no-verify")
+
+        assert result.returncode == 0, (
+            "--no-verify should allow the commit regardless of findings.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        log = _git_ok(git_repo, "log", "--oneline")
+        assert "bypass: --no-verify" in log, "--no-verify commit must appear in log.\n" + log
+
+    def test_commit_history_is_correct(self, git_repo: Path) -> None:
+        """Full workflow: blocked → fixed → bypassed produces the right log."""
+        # 1. Blocked commit (bad file)
+        (git_repo / "pipeline.py").write_text(self._BAD_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+        blocked = _git(git_repo, "commit", "-m", "blocked bad pipeline")
+        assert blocked.returncode != 0, "Bad commit must be blocked"
+
+        # 2. Fixed commit (passes hook)
+        (git_repo / "pipeline.py").write_text(self._FIXED_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+        fixed = _git(git_repo, "commit", "-m", "fix: good pipeline")
+        assert fixed.returncode == 0, "Fixed commit must succeed"
+
+        # 3. Bypass commit (--no-verify)
+        (git_repo / "pipeline.py").write_text(self._BAD_FILE)
+        _git_ok(git_repo, "add", "pipeline.py")
+        bypass = _git(git_repo, "commit", "--no-verify", "-m", "bypass: --no-verify")
+        assert bypass.returncode == 0, "--no-verify commit must succeed"
+
+        # Verify final log: blocked commit absent, fixed and bypass present
+        log = _git_ok(git_repo, "log", "--oneline")
+        assert "blocked bad pipeline" not in log, "Blocked commit leaked into log"
+        assert "fix: good pipeline" in log, "Fixed commit missing from log"
+        assert "bypass: --no-verify" in log, "Bypassed commit missing from log"
