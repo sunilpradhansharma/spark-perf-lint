@@ -15,6 +15,7 @@ overridden without repeating unrelated settings.
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import os
 import subprocess
@@ -348,8 +349,9 @@ class LintConfig:
         """
         start_dir = start_dir or Path.cwd()
 
-        # Layer 1: built-in defaults
-        merged = _deep_merge({}, _DEFAULTS)
+        # Layer 1: built-in defaults — deep-copy so env-var overlay never
+        # mutates the module-level _DEFAULTS dict through shallow references.
+        merged = copy.deepcopy(_DEFAULTS)
 
         # Layer 2: YAML file
         config_file_path: Path | None = None
