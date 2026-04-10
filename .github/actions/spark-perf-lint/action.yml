@@ -1,0 +1,275 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# spark-perf-lint — Reusable GitHub Composite Action
+#
+# Scans PySpark code for performance anti-patterns and posts findings as:
+#   • Inline PR annotations  (::error / ::warning / ::notice workflow commands)
+#   • Job summary            ($GITHUB_STEP_SUMMARY Markdown table)
+#   • PR review comment      (created or updated via the GitHub REST API)
+#
+# Tier 2 LLM analysis (Claude) is enabled only when BOTH:
+#   - inputs.llm_enabled == 'true'
+#   - ANTHROPIC_API_KEY environment variable is non-empty
+#
+# Minimum calling-workflow configuration:
+#
+#   permissions:
+#     contents: read
+#     pull-requests: write   # required to post the PR review comment
+#
+#   steps:
+#     - uses: actions/checkout@v4
+#     - uses: ./.github/actions/spark-perf-lint
+#       env:
+#         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}  # optional
+#       with:
+#         severity: WARNING
+#         fail_on: CRITICAL
+#         llm_enabled: "true"
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: spark-perf-lint
+description: >
+  Apache Spark performance linter — static analysis (Tier 1) with optional
+  Claude LLM enrichment (Tier 2). Posts inline annotations and a PR summary
+  comment. Requires actions/checkout before this action runs.
+
+# ─── Inputs ──────────────────────────────────────────────────────────────────
+
+inputs:
+  severity:
+    description: >
+      Minimum severity level to include in findings and annotations.
+      Accepted values: INFO | WARNING | CRITICAL (case-insensitive).
+    required: false
+    default: "WARNING"
+
+  config:
+    description: >
+      Repo-relative path to a .spark-perf-lint.yaml config file.
+      When omitted, the action looks for .spark-perf-lint.yaml in the
+      workspace root (standard project config discovery).
+    required: false
+    default: ""
+
+  paths:
+    description: >
+      Space-separated file or directory paths to scan.
+      Directories are walked recursively; non-.py files are skipped.
+    required: false
+    default: "."
+
+  fail_on:
+    description: >
+      Comma-separated severity level(s) that cause the action to exit
+      with a non-zero code and fail the workflow step.
+      Use 'none' to report findings without ever failing the step.
+      Examples: 'CRITICAL'  |  'WARNING,CRITICAL'  |  'none'
+    required: false
+    default: "CRITICAL"
+
+  llm_enabled:
+    description: >
+      Set to 'true' to enable Tier 2 LLM analysis (Claude).
+      Analysis only runs when ANTHROPIC_API_KEY is also set in the
+      environment — if the secret is absent, a warning is emitted and
+      Tier 1 results are reported normally.
+    required: false
+    default: "false"
+
+  python_version:
+    description: "Python version used to install and run the linter."
+    required: false
+    default: "3.11"
+
+# ─── Outputs ─────────────────────────────────────────────────────────────────
+
+outputs:
+  findings-count:
+    description: "Total findings at or above the severity threshold."
+    value: ${{ steps.parse.outputs.findings_count }}
+
+  critical-count:
+    description: "Number of CRITICAL severity findings."
+    value: ${{ steps.parse.outputs.critical_count }}
+
+  passed:
+    description: >
+      'true' when no findings triggered the fail_on severity levels;
+      'false' otherwise. Useful for downstream conditional steps.
+    value: ${{ steps.parse.outputs.passed }}
+
+# ─── Implementation ───────────────────────────────────────────────────────────
+
+runs:
+  using: composite
+
+  steps:
+
+    # ── Step 1: Python environment ────────────────────────────────────────────
+    - name: Set up Python ${{ inputs.python_version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+        cache: pip
+
+    # ── Step 2: Install spark-perf-lint ───────────────────────────────────────
+    # Include the [llm] extra only when Tier 2 analysis is requested *and*
+    # ANTHROPIC_API_KEY is available — avoids pulling in the anthropic SDK
+    # on every run and keeps install times low.
+    - name: Install spark-perf-lint
+      shell: bash
+      run: |
+        if [[ "${{ inputs.llm_enabled }}" == "true" && -n "${ANTHROPIC_API_KEY}" ]]; then
+          echo "Installing spark-perf-lint with LLM extra..."
+          pip install --quiet "spark-perf-lint[llm]"
+        else
+          echo "Installing spark-perf-lint (Tier 1 only)..."
+          pip install --quiet "spark-perf-lint"
+        fi
+      env:
+        ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
+
+    # ── Step 3: Assemble common CLI flags ─────────────────────────────────────
+    # Builds two flag strings written to GITHUB_OUTPUT:
+    #   common — shared by both scan passes (severity, config, fail-on)
+    #   llm    — '--llm' when enabled + API key present; else ''
+    - name: Assemble scan flags
+      id: flags
+      shell: bash
+      run: |
+        COMMON_FLAGS="--severity-threshold ${{ inputs.severity }}"
+
+        # Optional config file
+        if [[ -n "${{ inputs.config }}" ]]; then
+          COMMON_FLAGS="${COMMON_FLAGS} --config ${{ inputs.config }}"
+        fi
+
+        # fail-on levels  (skipped entirely when fail_on == "none")
+        FAIL_ON_INPUT="${{ inputs.fail_on }}"
+        if [[ "${FAIL_ON_INPUT,,}" != "none" ]]; then
+          for SEV in ${FAIL_ON_INPUT//,/ }; do
+            COMMON_FLAGS="${COMMON_FLAGS} --fail-on ${SEV^^}"
+          done
+        fi
+
+        # LLM flag — only when both requested and key is available
+        LLM_FLAG=""
+        if [[ "${{ inputs.llm_enabled }}" == "true" ]]; then
+          if [[ -n "${ANTHROPIC_API_KEY}" ]]; then
+            LLM_FLAG="--llm"
+            echo "Tier 2 LLM analysis enabled."
+          else
+            echo "::warning title=spark-perf-lint::llm_enabled=true but ANTHROPIC_API_KEY is not set — Tier 2 analysis skipped."
+          fi
+        fi
+
+        echo "common=${COMMON_FLAGS}" >> "${GITHUB_OUTPUT}"
+        echo "llm=${LLM_FLAG}"        >> "${GITHUB_OUTPUT}"
+      env:
+        ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
+
+    # ── Step 4: Scan pass A — JSON report (for action outputs) ───────────────
+    # Produces a machine-readable scan-results.json consumed by the parse step.
+    # Always exits 0 so a findings-present result does not abort here; the
+    # github-pr pass (step 5) controls the workflow exit code.
+    - name: Scan — JSON report
+      id: scan_json
+      shell: bash
+      run: |
+        spark-perf-lint scan ${{ inputs.paths }} \
+          ${{ steps.flags.outputs.common }} \
+          --format json \
+          --output "${SPL_RESULTS_FILE}" \
+          --quiet \
+          || true
+      env:
+        SPL_RESULTS_FILE: ${{ runner.temp }}/spl-scan.json
+        ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
+
+    # ── Step 5: Scan pass B — GitHub PR annotations + review comment ─────────
+    # Emits ::error/::warning/::notice workflow commands for inline PR diff
+    # annotations, writes the job summary to $GITHUB_STEP_SUMMARY, and posts
+    # or updates a collapsible PR comment via the GitHub REST API.
+    #
+    # Tier 2 LLM enrichment runs here (not in pass A) so API calls happen
+    # only once.  The enriched cross-file insights and executive summary are
+    # printed to the Actions log.
+    #
+    # Requires:
+    #   env.GITHUB_TOKEN       — for PR comment API calls (pull-requests: write)
+    #   env.ANTHROPIC_API_KEY  — for LLM analysis (optional)
+    - name: Scan — GitHub PR annotations + review comment
+      id: scan_pr
+      shell: bash
+      run: |
+        SCAN_EXIT=0
+        spark-perf-lint scan ${{ inputs.paths }} \
+          ${{ steps.flags.outputs.common }} \
+          ${{ steps.flags.outputs.llm }} \
+          --format github-pr \
+          || SCAN_EXIT=$?
+
+        echo "exit_code=${SCAN_EXIT}" >> "${GITHUB_OUTPUT}"
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+        ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
+
+    # ── Step 6: Parse JSON results → action outputs ───────────────────────────
+    # Reads the JSON produced by pass A to populate the three action outputs.
+    # Falls back to zero counts when the file is absent or malformed.
+    - name: Parse scan results
+      id: parse
+      shell: python3 {0}
+      env:
+        SPL_RESULTS_FILE: ${{ runner.temp }}/spl-scan.json
+        SPL_SCAN_EXIT: ${{ steps.scan_pr.outputs.exit_code }}
+        FAIL_ON_INPUT: ${{ inputs.fail_on }}
+      run: |
+        import json, os, pathlib
+
+        results_file = pathlib.Path(os.environ["SPL_RESULTS_FILE"])
+        total, critical = 0, 0
+
+        try:
+            with results_file.open() as fh:
+                report = json.load(fh)
+            total    = int(report["summary"]["total"])
+            critical = int(report["scan"]["critical_count"])
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            print(f"::warning title=spark-perf-lint::Could not parse results file: {exc}")
+
+        # 'passed' mirrors whether the github-pr scan exited cleanly.
+        # When fail_on == 'none' the scan always exits 0, so passed is always true.
+        scan_exit   = int(os.environ.get("SPL_SCAN_EXIT", "0") or "0")
+        fail_on_raw = os.environ.get("FAIL_ON_INPUT", "CRITICAL")
+        if fail_on_raw.lower() == "none":
+            passed = "true"
+        else:
+            passed = "false" if scan_exit != 0 else "true"
+
+        github_output = os.environ.get("GITHUB_OUTPUT", "")
+        if github_output:
+            with open(github_output, "a") as out:
+                print(f"findings_count={total}",    file=out)
+                print(f"critical_count={critical}", file=out)
+                print(f"passed={passed}",           file=out)
+
+        status_icon = "✅" if passed == "true" else "❌"
+        print(
+            f"{status_icon} spark-perf-lint: {total} finding(s) "
+            f"({critical} CRITICAL) — passed={passed}"
+        )
+
+    # ── Step 7: Propagate the scan exit code ──────────────────────────────────
+    # Fails the workflow step when findings match fail_on severity levels.
+    # When fail_on == 'none' this step always succeeds regardless of findings.
+    - name: Fail on severity threshold
+      shell: bash
+      run: |
+        FAIL_ON_INPUT="${{ inputs.fail_on }}"
+        if [[ "${FAIL_ON_INPUT,,}" == "none" ]]; then
+          echo "fail_on=none — findings reported but step always passes."
+          exit 0
+        fi
+        exit ${{ steps.scan_pr.outputs.exit_code }}
