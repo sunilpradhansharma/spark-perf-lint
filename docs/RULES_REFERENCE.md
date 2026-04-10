@@ -2081,3 +2081,1638 @@ result = facts.join(big_dim, "region_id").join(small_dim, "product_id")
 - **SPL-D03-006** — Multiple joins without repartition; CBO is the preferred fix for large-dimension chains
 - **SPL-D10-002** — CBO not enabled for complex queries; D10 counterpart with deeper Catalyst context
 - **SPL-D10-003** — Join reordering disabled; extends this rule with join reorder configuration details
+
+---
+
+## D04 · Partitioning
+
+Partition count and partition strategy determine how evenly Spark distributes work across the
+cluster. A single `repartition(1)` call can serialize an entire dataset through one task;
+partitioning by a high-cardinality column can produce millions of tiny files. These rules catch
+both extremes — too few partitions, too many, and the wrong column choices.
+
+---
+
+### SPL-D04-001 — repartition(1) Bottleneck
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | CRITICAL |
+| **Effort** | Minor code change |
+| **Impact** | Full parallelism lost; single-core execution for the entire dataset |
+
+**Description**
+
+`repartition(1)` triggers a full shuffle and then funnels the entire dataset through a single
+reducer task, reducing a multi-hundred-core cluster to one active core for that stage and all
+downstream stages.
+
+**What it detects**
+
+Any call to `.repartition(1)`.
+
+```python
+# Triggers SPL-D04-001
+df.repartition(1).write.parquet("s3://bucket/out")
+```
+
+**Why it matters**
+
+`repartition(1)` performs a hash shuffle of the entire dataset into exactly one output partition.
+Every row from every executor crosses the network to reach the single designated reducer task.
+That task must then process the entire dataset serially: sort it, write it, or pass it to
+downstream operations. On a 100-executor cluster processing 100 GB, 99 executors contribute
+their data and then sit idle while one executor does all the remaining work. If that single task
+fails, the full dataset must be reshuffled from scratch. Even when the intent is to produce a
+single output file, `coalesce(1)` is always cheaper because it avoids the upfront shuffle.
+
+**How to fix**
+
+```python
+# Wrong: full shuffle to one partition — 99% of cluster sits idle
+df.repartition(1).write.parquet("s3://bucket/out")
+
+# Right: let Spark use natural parallelism — multiple output files
+df.write.parquet("s3://bucket/out")
+
+# If a single output file is required (e.g., legacy system constraint):
+# Use coalesce(1) — no shuffle; merges partitions locally
+df.coalesce(1).write.parquet("s3://bucket/out")
+```
+
+**Config options**
+
+No Spark configuration affects this rule. The fix is a code change.
+
+**Related rules**
+
+- **SPL-D04-002** — coalesce(1) bottleneck; the cheaper single-file alternative
+- **SPL-D04-004** — Repartition with very low partition count; repartition(2–9) has the same problem at smaller scale
+- **SPL-D02-006** — Shuffle followed by coalesce; coalesce after a shuffle creates similar imbalance
+
+---
+
+### SPL-D04-002 — coalesce(1) Bottleneck
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | All subsequent stages run single-threaded; long-tail straggler |
+
+**Description**
+
+`coalesce(1)` merges all partitions onto a single task without a shuffle. When placed before
+further transformations it destroys parallelism for every downstream stage. It is only
+acceptable as the very last step before writing a single output file.
+
+**What it detects**
+
+Any call to `.coalesce(1)`.
+
+```python
+# Triggers SPL-D04-002
+df.coalesce(1).groupBy("key").count()   # single-partition aggregation
+```
+
+**Why it matters**
+
+Unlike `repartition(1)`, `coalesce(1)` avoids an upfront shuffle by merging existing partitions
+in-place. The result is identical: one enormous partition processed by a single executor core.
+Any transformation applied after `coalesce(1)` — filter, join, aggregation, window function —
+is entirely single-threaded. The only legitimate use of `coalesce(1)` is as the final step
+before a write that must produce one output file (a legacy ingestion requirement). Even then,
+it should appear after all transformations are complete so that upstream stages retain full
+parallelism.
+
+**How to fix**
+
+```python
+# Wrong: coalesce(1) before a transformation — kills parallelism
+df.coalesce(1).groupBy("key").count()
+
+# Right: remove coalesce — let the aggregation run in parallel
+df.groupBy("key").count()
+
+# Only acceptable pattern: coalesce(1) as the very last step before write
+df.filter("status = 'active'").groupBy("key").count().coalesce(1).write.csv("output/")
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D04-001** — repartition(1); the shuffle-based equivalent with identical symptoms
+- **SPL-D04-005** — Coalesce before write — unbalanced files; the milder variant of this pattern
+- **SPL-D02-006** — Shuffle followed by coalesce; coalesce after a shuffle is a related anti-pattern
+
+---
+
+### SPL-D04-003 — Repartition With Very High Partition Count
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Driver OOM; millions of shuffle files; slow task scheduling |
+
+**Description**
+
+`repartition(n)` where `n` exceeds 10,000. Tens of thousands of partitions cause excessive
+task-scheduler overhead on the driver, millions of small shuffle files on disk, and slow
+speculative-execution scans.
+
+**What it detects**
+
+Any `.repartition(N)` call where `N` is a numeric literal greater than 10,000.
+
+```python
+# Triggers SPL-D04-003
+df.repartition(50_000)
+```
+
+**Why it matters**
+
+Each Spark partition maps to one task. With 50,000 tasks in a single stage, the driver must
+track the status of every task, schedule retries, and run speculative-execution scans — all
+O(n) operations over the task count. Each shuffle map task also writes one file per reducer
+partition: 50,000 tasks writing to 200 reducers produces 10 million shuffle files per stage.
+Object stores (S3, GCS) and HDFS both show significant latency degradation beyond a few hundred
+thousand files in one directory. The practical target is 128–256 MB of input data per partition,
+which for most workloads means partition counts in the hundreds to low thousands.
+
+**How to fix**
+
+```python
+# Wrong: 50,000 partitions — driver overwhelmed, millions of shuffle files
+df.repartition(50_000)
+
+# Right: target 128–256 MB per partition
+# For a 50 GB dataset: 50,000 MB / 128 MB ≈ 400 partitions
+df.repartition(400)
+
+# With AQE enabled, start slightly high and let coalescing bring it down:
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "128m")
+df.repartition(1000)  # AQE coalesces down to ~400
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.enabled` | `true` | AQE coalesces over-partitioned shuffle output |
+| `spark.sql.adaptive.advisoryPartitionSizeInBytes` | `67108864`–`134217728` (64–128 MB) | Target post-coalesce partition size |
+
+| Lint Threshold | Default | Description |
+|---|---|---|
+| `thresholds.max_repartition_count` | `10000` | Override in `.spark-perf-lint.yaml` |
+
+**Related rules**
+
+- **SPL-D04-004** — Repartition with very low partition count; the opposite extreme
+- **SPL-D08-001** — AQE disabled; AQE is the recommended mitigation for over-partitioning
+- **SPL-D07-005** — Small file problem on write; over-partitioned DataFrames produce many small output files
+
+---
+
+### SPL-D04-004 — Repartition With Very Low Partition Count
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Cluster cores sit idle; up to 25× slower than optimal parallelism |
+
+**Description**
+
+`repartition(n)` where `n` is between 2 and 9 caps parallelism for all downstream stages to
+at most `n` concurrent tasks, leaving the rest of the cluster idle.
+
+**What it detects**
+
+Any `.repartition(N)` call where `N` is a numeric literal in the range 2–9 (inclusive).
+
+```python
+# Triggers SPL-D04-004 (n=4, likely a 100+ core cluster)
+df.repartition(4).groupBy("key").agg(sum("val"))
+```
+
+**Why it matters**
+
+Repartitioning to a very small number of partitions permanently caps parallelism for the
+repartitioned DataFrame and all downstream stages derived from it. On a 100-core cluster,
+`repartition(4)` means at most 4 tasks run simultaneously — 96% of the cluster is idle for
+the duration. This commonly occurs when developers test on a small local machine and hardcode
+a partition count that matches their laptop's core count, then deploy to a large cluster without
+changing the value.
+
+**How to fix**
+
+```python
+# Wrong: 4 partitions on a 100-core cluster — 96% idle
+df.repartition(4).groupBy("key").agg(sum("val"))
+
+# Right: scale to cluster size — 2–3x total executor cores
+df.repartition(200).groupBy("key").agg(sum("val"))
+
+# If the DataFrame is genuinely tiny (< 100 MB), remove repartition entirely:
+df.groupBy("key").agg(sum("val"))  # let Spark determine parallelism naturally
+```
+
+**Config options**
+
+| Lint Threshold | Default | Description |
+|---|---|---|
+| `thresholds.min_repartition_count` | `10` | Override in `.spark-perf-lint.yaml` |
+
+**Related rules**
+
+- **SPL-D04-001** — repartition(1); the extreme single-task case
+- **SPL-D04-003** — Repartition with very high count; the opposite extreme
+- **SPL-D01-010** — Default shuffle partitions unchanged; the source of many low-partition defaults
+
+---
+
+### SPL-D04-005 — Coalesce Before Write — Unbalanced Output Files
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Unbalanced output files; downstream reader performance degradation |
+
+**Description**
+
+`coalesce(n)` is used before a write operation (parquet, orc, csv, etc.) with `n > 1`. Because
+`coalesce` merges partitions without redistribution, the resulting files are unbalanced —
+some are large, some are small — degrading downstream reader performance.
+
+**What it detects**
+
+A `coalesce(N)` call (where `N > 1`) that is chained or immediately precedes a `.write` call.
+
+```python
+# Triggers SPL-D04-005
+df.coalesce(20).write.parquet("s3://bucket/data")
+```
+
+**Why it matters**
+
+`coalesce(n)` merges consecutive existing partitions without shuffling. If the original 200
+partitions have uneven data distribution (common after joins and aggregations), the coalesced
+partitions are also uneven — some coalesced partitions may hold 10× more data than others.
+Downstream readers (Spark, Presto, Athena) split files by block boundaries, not by
+Spark-partition boundaries. A very large file forces one reader task to process the full file
+sequentially while other tasks finish their small files and sit idle. On object storage (S3, GCS),
+a mix of huge and tiny files also degrades prefix-listing performance.
+
+**How to fix**
+
+```python
+# Wrong: unbalanced files due to coalesce merging uneven partitions
+df.coalesce(20).write.parquet("s3://bucket/data")
+
+# Right: repartition produces evenly-sized output files at the cost of one shuffle
+df.repartition(20).write.parquet("s3://bucket/data")
+
+# Alternative: set shuffle.partitions to the target file count so
+# the upstream shuffle already produces the desired number of partitions
+spark.conf.set("spark.sql.shuffle.partitions", "20")
+df.groupBy("key").agg(sum("val")).write.parquet("s3://bucket/data")
+```
+
+**Config options**
+
+No Spark configuration affects this rule directly.
+
+**Related rules**
+
+- **SPL-D04-002** — coalesce(1) bottleneck; the single-file extreme of this pattern
+- **SPL-D04-006** — Missing partitionBy on write; complement — how data is laid out on disk
+- **SPL-D02-006** — Shuffle followed by coalesce; same imbalance concern in a transformation chain
+
+---
+
+### SPL-D04-006 — Missing partitionBy on Write
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Full table scans on every query; no partition pruning possible |
+
+**Description**
+
+Writing to a columnar format (parquet, orc, delta) without a `partitionBy()` clause places all
+data in a single directory. Queries that filter on date, region, or status must scan every file
+rather than pruning to a relevant subset.
+
+**What it detects**
+
+A `.write` chain ending in `.parquet()`, `.orc()`, or `.save()` that does not include a
+`.partitionBy()` call.
+
+```python
+# Triggers SPL-D04-006
+df.write.mode("overwrite").parquet("s3://bucket/events")
+```
+
+**Why it matters**
+
+Partition pruning is one of the highest-impact Spark read optimizations. A 10 TB table
+partitioned by `date` (3 years of data ≈ 1,095 partitions) and filtered on a single day
+reduces the scan from 10 TB to ~9 GB — a 1,000× reduction before a single row is deserialized.
+Without `partitionBy`, every query must open, read, and decode every file in the output directory,
+regardless of the filter condition. The Spark query planner cannot eliminate files it has no
+metadata for.
+
+**How to fix**
+
+```python
+# Wrong: no partition strategy — full scan on every query
+df.write.mode("overwrite").parquet("s3://bucket/events")
+
+# Right: partition by low-cardinality query dimensions
+df.write.partitionBy("date", "region").mode("overwrite").parquet("s3://bucket/events")
+
+# Good partition column choices: date, year/month, region, status, event_type
+# Bad partition column choices: user_id, order_id, timestamp (too many values — see SPL-D04-007)
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D04-007** — Over-partitioning — high-cardinality column; don't partition by user_id or UUID
+- **SPL-D04-009** — Partition column not used in query filters; the read-side complement to this write-side rule
+- **SPL-D07-001** — CSV/JSON for analytical workload; columnar formats are required for partition pruning
+
+---
+
+### SPL-D04-007 — Over-Partitioning — High-Cardinality Partition Column
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Millions of tiny files; driver OOM on partition listing; high storage cost |
+
+**Description**
+
+`partitionBy()` is called with a high-cardinality column (name contains `_id`, `_at`, `_uuid`,
+`_key`, or `_ts`). Partitioning by millions of distinct values creates millions of directories
+and files — the classic small-files problem.
+
+**What it detects**
+
+A `.partitionBy(col)` call where `col` matches a high-cardinality naming pattern
+(`*_id`, `*_at`, `*_uuid`, `*_key`, `*_ts`).
+
+```python
+# Triggers SPL-D04-007 — user_id has millions of distinct values
+df.write.partitionBy("user_id").parquet("s3://bucket/events")
+```
+
+**Why it matters**
+
+Each distinct partition column value becomes a directory. With 10 million distinct `user_id`
+values, `partitionBy("user_id")` creates 10 million directories. Spark's partition discovery
+(the `LIST` operation on S3/GCS/ADLS that finds all files) must enumerate all 10 million
+directories on every read — a sequential operation that can take tens of minutes and consume
+significant driver memory. Object storage providers charge per LIST/PUT operation, so millions
+of tiny files also dramatically increase storage costs. The Spark driver assembles the full
+file list in memory, causing OOM for very high cardinality cases.
+
+**How to fix**
+
+```python
+# Wrong: high-cardinality partition key — millions of tiny files
+df.write.partitionBy("user_id").parquet("s3://bucket/events")
+
+# Right: use a lower-cardinality equivalent
+df.write.partitionBy("date", "region").parquet("s3://bucket/events")
+
+# If user_id-level access patterns are required, use bucketing instead:
+df.write.bucketBy(256, "user_id").sortBy("user_id").saveAsTable("events")
+# Bucketing co-locates the data without creating per-value directories
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.sources.partitionOverwriteMode` | `dynamic` — only overwrites touched partitions, not all |
+
+**Related rules**
+
+- **SPL-D04-006** — Missing partitionBy; the opposite problem — no partitioning at all
+- **SPL-D04-008** — Missing bucketBy; bucketing is the correct tool for high-cardinality join keys
+- **SPL-D07-005** — Small file problem on write; high-cardinality partitioning is a primary cause
+
+---
+
+### SPL-D04-008 — Missing bucketBy for Repeatedly Joined Tables
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | INFO |
+| **Effort** | Major refactor |
+| **Impact** | Every join on this table requires a full shuffle; 0 shuffles with bucketing |
+
+**Description**
+
+`saveAsTable()` is called without `bucketBy()`. For tables that are repeatedly joined on the
+same key, bucketing pre-distributes rows by join key hash so that subsequent joins require no
+shuffle at all.
+
+**What it detects**
+
+A `.saveAsTable()` call in a write chain that does not include a `.bucketBy()` call.
+
+```python
+# Triggers SPL-D04-008
+df.write.mode("overwrite").saveAsTable("fact_orders")
+```
+
+**Why it matters**
+
+`bucketBy(n, "join_key")` writes exactly `n` files, where each file contains rows whose
+`join_key` hashes to the same bucket. When two bucketed tables share the same bucket count and
+the same join key, Spark can detect the pre-partitioned co-location at query time and replace
+the sort-merge join with a bucket join — no shuffle, no sort stage. For a fact table that is
+joined dozens of times per day in separate jobs, the amortised shuffle savings across all joins
+far exceed the one-time cost of writing a bucketed table. The tradeoff: bucketed tables must be
+written to a Hive-compatible Metastore location (`saveAsTable`), not a plain `parquet` path.
+
+**How to fix**
+
+```python
+# Wrong: no bucketing — every join triggers a full shuffle
+df.write.mode("overwrite").saveAsTable("fact_orders")
+
+# Right: bucket by the join key — subsequent joins on order_id skip the shuffle
+df.write \
+    .bucketBy(256, "order_id") \
+    .sortBy("order_id") \
+    .mode("overwrite") \
+    .saveAsTable("fact_orders")
+
+# When joining two bucketed tables with the same bucket count and key:
+spark.conf.set("spark.sql.sources.bucketing.enabled", "true")
+orders = spark.table("fact_orders")       # 256 buckets on order_id
+items = spark.table("order_items")        # 256 buckets on order_id
+result = orders.join(items, "order_id")   # zero shuffle — bucket join
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.sources.bucketing.enabled` | `true` (default) | Must be enabled for bucket join optimization |
+| `spark.sql.bucketing.coalesceBucketsInJoin.enabled` | `true` | Allows joining tables with different bucket counts |
+
+**Related rules**
+
+- **SPL-D04-007** — High-cardinality partition column; bucketing is the correct alternative for high-cardinality keys
+- **SPL-D03-002** — Missing broadcast hint; broadcast is the other shuffle-elimination strategy
+- **SPL-D03-006** — Multiple joins without repartition; bucketed tables eliminate shuffle for all joins on the key
+
+---
+
+### SPL-D04-009 — Partition Column Not Used in Query Filters
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Full table scan instead of partition-pruned scan; 10–1000× more data read |
+
+**Description**
+
+A read from storage flows directly into an expensive operation (groupBy, distinct, orderBy, agg)
+without a `filter()` or `where()` on the likely partition column. The entire table is scanned
+when only a fraction of it may be needed.
+
+**What it detects**
+
+A read terminal (`parquet`, `csv`, `json`, `orc`, `table`, `load`) that chains directly into
+a shuffle operation (`groupBy`, `distinct`, `orderBy`, `agg`) without an intermediate `filter()`
+or `where()`.
+
+```python
+# Triggers SPL-D04-009
+spark.read.parquet("s3://datalake/events").groupBy("user_id").count()
+```
+
+**Why it matters**
+
+A partitioned Parquet table stores its directory structure on disk: `events/date=2024-01-01/`,
+`events/date=2024-01-02/`, etc. When Spark sees `filter('date = "2024-01-01"')`, it lists only
+the matching directory — partition pruning. Without a filter on the partition column, Spark must
+list every directory, open every file, and decode every row group before the groupBy can begin.
+On a 3-year history table with 365×3 = 1,095 date partitions, a missing date filter scans
+1,095× more data than needed.
+
+**How to fix**
+
+```python
+# Wrong: full table scan
+spark.read.parquet("s3://datalake/events").groupBy("user_id").count()
+
+# Right: filter on the partition column before the expensive operation
+(
+    spark.read.parquet("s3://datalake/events")
+    .filter('date = "2024-01-01"')          # partition pruning: 1/1095 directories scanned
+    .groupBy("user_id").count()
+)
+
+# Verify pruning is active: check "Input" bytes in Spark UI stage details
+# or run df.explain() and confirm PartitionFilters in the FileScan node
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.parquet.filterPushdown` | `true` (default); must be enabled for partition pruning to work |
+| `spark.sql.orc.filterPushdown` | `true` (default) |
+
+**Related rules**
+
+- **SPL-D04-006** — Missing partitionBy on write; without `partitionBy` on write, pruning cannot occur on read
+- **SPL-D03-004** — Join without prior filter; the same pattern for join inputs specifically
+- **SPL-D07-003** — select("*"); no column pruning compounds the cost of a full table scan
+
+---
+
+### SPL-D04-010 — Repartition by Column Different From Join Key
+
+| | |
+|---|---|
+| **Dimension** | D04 Partitioning |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Two full shuffles instead of one; 2× shuffle I/O for that stage |
+
+**Description**
+
+`repartition('col_a')` is followed by `join(other, 'col_b')` where `col_a ≠ col_b`. The
+repartition shuffle is immediately invalidated by the join shuffle, making the repartition call
+pure wasted I/O.
+
+**What it detects**
+
+A `repartition(col)` call followed within 5 lines by a `join()` call, detected when the
+repartition column name and the join key differ.
+
+```python
+# Triggers SPL-D04-010 — repartitions by user_id, but joins on order_id
+df.repartition("user_id").join(other, "order_id")
+```
+
+**Why it matters**
+
+A sort-merge join always performs its own shuffle to co-locate matching keys. If the preceding
+`repartition` used a different column, it distributed rows by a hash that the join immediately
+discards — the join must re-shuffle every row by `order_id` regardless of how they were
+partitioned going in. The result: two full shuffles of the dataset where one would suffice.
+The only scenario where a pre-join `repartition` saves work is when the repartition key
+equals the join key and Spark's exchange-reuse optimization detects the match — but that
+detection is more reliably triggered by letting the join perform its own shuffle.
+
+**How to fix**
+
+```python
+# Wrong: repartition by user_id, then join on order_id — 2 shuffles
+df.repartition("user_id").join(other, "order_id")
+
+# Right: remove the repartition — join shuffles on order_id automatically
+df.join(other, "order_id")
+
+# If you specifically need to pre-partition by the join key (e.g., to reuse the
+# partitioning for multiple subsequent joins), repartition by the SAME column:
+df_partitioned = df.repartition("order_id")
+result1 = df_partitioned.join(a, "order_id")   # exchange reuse may eliminate shuffle
+result2 = df_partitioned.join(b, "order_id")   # second join reuses same partitioning
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.exchange.reuse` | `true` (default); enables Spark to detect and reuse identical shuffle plans |
+
+**Related rules**
+
+- **SPL-D02-003** — Unnecessary repartition before join; the same-key variant of this problem
+- **SPL-D03-006** — Multiple joins without repartition; when pre-partitioning IS the right fix
+
+---
+
+## D05 · Data Skew
+
+Data skew occurs when one partition holds disproportionately more data than others. The entire
+stage waits for the slowest ("straggler") task — every other executor core sits idle once its
+balanced partitions finish. These rules detect join keys, groupBy columns, and window partitions
+that structurally produce skewed output.
+
+---
+
+### SPL-D05-001 — Join on Low-Cardinality Column
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | One task processes the dominant group; rest of cluster sits idle |
+
+**Description**
+
+`join()` is called on a column whose name suggests low cardinality (`status`, `type`, `is_*`,
+`flag`, `category`). All rows sharing the dominant value are routed to a single reduce task,
+creating a straggler that holds up the entire stage.
+
+**What it detects**
+
+A `join()` call where the join key is a single column whose name matches a low-cardinality
+naming pattern.
+
+```python
+# Triggers SPL-D05-001
+result = df.join(other, "status")   # if 80% have status='active', one task gets 80% of data
+```
+
+**Why it matters**
+
+Hash partitioning routes all rows with the same key value to the same reduce task. If 80% of
+a 10-billion-row table has `status = 'active'`, the task for the `'active'` partition processes
+8 billion rows while the 199 other tasks process an average of 10 million rows each. The stage
+wall time is determined by the slowest task — 200 tasks completing in 1 minute each, except the
+one that takes 40 minutes. AQE's skew join handling (Spark 3+) can automatically detect and
+split such partitions, but only when `spark.sql.adaptive.skewJoin.enabled = true`.
+
+**How to fix**
+
+```python
+# Wrong: all 'active' rows go to one task
+result = df.join(other, "status")
+
+# Right option 1: add a secondary high-cardinality key to spread load
+result = df.join(other, ["status", "user_id"])
+
+# Right option 2: enable AQE skew join handling (lowest-effort fix)
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+result = df.join(other, "status")   # AQE auto-splits the skewed partition
+
+# Right option 3: filter before joining to reduce the dominant group
+result = df.filter("status != 'active'").join(other, "status")
+active_result = df.filter("status = 'active'").join(broadcast(other_active), "status")
+final = result.union(active_result)
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.skewJoin.enabled` | `true` | Automatic skew partition splitting |
+| `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` | `268435456` (256 MB) | Partition is skewed if above this size |
+| `spark.sql.adaptive.skewJoin.skewedPartitionFactor` | `5` | And above `factor × median partition size` |
+
+**Related rules**
+
+- **SPL-D05-002** — GroupBy on low-cardinality column; the aggregation variant of this problem
+- **SPL-D05-003** — AQE skew join disabled; enable AQE as the first mitigation step
+- **SPL-D08-004** — AQE skew join disabled with skew-prone joins; D08 counterpart
+
+---
+
+### SPL-D05-002 — GroupBy on Low-Cardinality Column Without Secondary Key
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | WARNING |
+| **Effort** | Major refactor |
+| **Impact** | Dominant group task runs 10–100× longer than median; straggler stage |
+
+**Description**
+
+`groupBy()` uses only low-cardinality columns (`status`, `type`, `is_*`). All rows with the
+dominant value are aggregated by a single task. Unlike join skew, AQE cannot automatically
+split an aggregation partition — the fix requires a two-phase aggregation.
+
+**What it detects**
+
+A `groupBy()` call where all column arguments match a low-cardinality naming pattern.
+
+```python
+# Triggers SPL-D05-002
+df.groupBy("status").agg(count("*"))
+```
+
+**Why it matters**
+
+`groupBy("status")` routes all rows with the same status to the same reducer task for final
+aggregation. If 90% of rows are `status = 'active'`, that task holds 90% of the dataset in
+memory while sorting and aggregating. Unlike join skew (which AQE's skew join handles by
+splitting partitions and re-running them), aggregation skew cannot be split mid-execution —
+the partial sums from all input partitions for a given key must arrive at the same reducer.
+The two-phase aggregation pattern introduces an artificial sub-key (a random bucket number)
+to distribute the first aggregation pass, then removes it in the second pass.
+
+**How to fix**
+
+```python
+# Wrong: all 'active' rows → single reducer task
+df.groupBy("status").agg(count("*"))
+
+# Right: two-phase aggregation distributes the skewed key across N buckets
+from pyspark.sql.functions import rand, floor, col, sum as spark_sum, count
+
+N = 10  # number of sub-buckets
+result = (
+    df
+    # Phase 1: aggregate within (status, bucket) — distributes 'active' across 10 tasks
+    .withColumn("bucket", floor(rand() * N).cast("int"))
+    .groupBy("status", "bucket")
+    .agg(count("*").alias("partial_count"))
+    # Phase 2: sum the partial counts — now only 10 tasks for 'active' instead of 1
+    .groupBy("status")
+    .agg(spark_sum("partial_count").alias("total_count"))
+)
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.adaptive.enabled` | AQE helps with post-shuffle partition merging but does NOT split aggregation skew |
+
+**Related rules**
+
+- **SPL-D05-001** — Join on low-cardinality column; join skew is addressable by AQE; agg skew is not
+- **SPL-D05-006** — Window function partitioned by skew-prone column; window functions have the same structural problem
+- **SPL-D08-004** — AQE skew join; AQE handles join skew but not aggregation skew
+
+---
+
+### SPL-D05-003 — AQE Skew Join Handling Disabled
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | WARNING |
+| **Effort** | Config only |
+| **Impact** | Skewed partitions are not split; one task processes majority of data |
+
+**Description**
+
+`spark.sql.adaptive.skewJoin.enabled` is explicitly set to `false`. This disables the AQE
+feature that automatically detects and splits oversized shuffle partitions during joins, leaving
+skew to cause straggler tasks with no automatic mitigation.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.skewJoin.enabled", "false")` call.
+
+```python
+# Triggers SPL-D05-003
+spark = SparkSession.builder.config("spark.sql.adaptive.skewJoin.enabled", "false").getOrCreate()
+```
+
+**Why it matters**
+
+AQE's skew join optimization monitors actual partition sizes after each shuffle stage and,
+when it detects a partition that is both above `skewedPartitionThresholdInBytes` and above
+`skewedPartitionFactor × median partition size`, it automatically splits that partition and
+runs multiple tasks against it. This is the lowest-effort fix for join skew — zero code
+changes required. Disabling it forces every skewed join to run as a straggler, with the
+dominant partition always blocking stage completion.
+
+**How to fix**
+
+```python
+# Wrong: skew join handling disabled
+spark = SparkSession.builder.config("spark.sql.adaptive.skewJoin.enabled", "false").getOrCreate()
+
+# Right: remove the override — enabled by default when AQE is on
+spark = (
+    SparkSession.builder
+    .config("spark.sql.adaptive.enabled", "true")
+    # skewJoin.enabled defaults to true when adaptive.enabled is true
+    .getOrCreate()
+)
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.skewJoin.enabled` | `true` (default with AQE) | Remove the `false` override |
+| `spark.sql.adaptive.enabled` | `true` | Required parent setting |
+
+**Related rules**
+
+- **SPL-D08-004** — AQE skew join disabled with skew-prone joins; D08 counterpart that fires when skew-prone patterns are also present
+- **SPL-D05-001** — Join on low-cardinality column; AQE skew join is the first mitigation
+- **SPL-D05-004** — AQE skew threshold too high; even with skew join enabled, a high threshold can miss skew
+
+---
+
+### SPL-D05-004 — AQE Skew Threshold Too High
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | INFO |
+| **Effort** | Config only |
+| **Impact** | Moderate skew (below threshold) silently degrades stage performance |
+
+**Description**
+
+`spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` is set above 1 GB. The AQE
+skew detection threshold is so high that moderately skewed partitions (256 MB–1 GB) are not
+split, allowing them to become stragglers.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", X)` call where `X`
+parses to more than 1 GB.
+
+```python
+# Triggers SPL-D05-004 (2 GB > 1 GB limit)
+spark = SparkSession.builder.config(
+    "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "2g"
+).getOrCreate()
+```
+
+**Why it matters**
+
+AQE's skew detection uses two conditions: a partition is skewed only when it is **both** above
+the byte threshold **and** above `skewedPartitionFactor × median partition size`. Setting the
+threshold to 2 GB means that a 1.5 GB partition that is 10× larger than the median (256 MB ×
+`factor=5` = 1.28 GB threshold exceeded, but 2 GB threshold not exceeded) is not split. That
+1.5 GB partition will be processed by a single task while all other 200 MB partitions finish
+in parallel. The default of 256 MB is calibrated for a target partition size of ~64–128 MB.
+
+**How to fix**
+
+```python
+# Wrong: threshold too high — 256 MB–2 GB skewed partitions not detected
+spark = SparkSession.builder.config(
+    "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "2g"
+).getOrCreate()
+
+# Right: use the default (256 MB) or lower for better skew detection
+spark = (
+    SparkSession.builder
+    .config("spark.sql.adaptive.enabled", "true")
+    # Remove the threshold override, or set it explicitly to the default:
+    .config("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "268435456")  # 256 MB
+    .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
+    .getOrCreate()
+)
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` | `268435456` (256 MB, default) | Lower = more aggressive skew detection |
+| `spark.sql.adaptive.skewJoin.skewedPartitionFactor` | `5` (default) | Both conditions must be met |
+
+**Related rules**
+
+- **SPL-D05-003** — AQE skew join disabled; ensure skew handling is enabled before tuning thresholds
+- **SPL-D08-005** — AQE skew factor too aggressive; the opposite extreme — factor set too low
+
+---
+
+### SPL-D05-005 — Missing Salting Pattern for Known Skewed Keys
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | INFO |
+| **Effort** | Major refactor |
+| **Impact** | 'Whale' keys cause one reducer to handle O(N) more rows than average |
+
+**Description**
+
+`join()` is performed on a column name suggesting user, customer, or product IDs
+(`user_id`, `customer_id`, `product_id`, etc.) without any `rand()` / `explode()` salting
+pattern. ID columns frequently follow power-law distributions where a handful of 'whale' values
+generate millions of rows.
+
+**What it detects**
+
+A `join()` on a column whose name contains `user_id`, `customer_id`, or `product_id`, where no
+`rand()` call appears in the vicinity (suggesting no salting has been applied).
+
+```python
+# Triggers SPL-D05-005
+df.join(events, "user_id")   # user_id may be heavily skewed toward power users
+```
+
+**Why it matters**
+
+In e-commerce and social platforms, the top 0.1% of users generate 20–50% of all events. When
+joining a user profile table against an events table on `user_id`, the reducer task for a
+'whale' user ID may receive 100× more rows than the average task. AQE's skew join can handle
+this automatically in many cases, but when the skew is extreme (a single user with 100 million
+events) even post-split tasks are unbalanced. Salting distributes one logical key across N
+physical keys by appending a random bucket number, spreading the rows across N tasks.
+
+**How to fix**
+
+```python
+from pyspark.sql.functions import rand, floor, col, explode, array, lit
+
+# Enable AQE skew join first — handles most cases automatically
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+
+# If AQE is insufficient, implement salting:
+N = 10  # salt factor — spread each skewed key across 10 tasks
+
+# Salt the large (potentially skewed) side: assign a random bucket
+events_salted = events.withColumn("salt", floor(rand() * N).cast("int"))
+
+# Explode the small side: replicate each row N times with each bucket value
+users_salted = users.withColumn(
+    "salt", explode(array([lit(i) for i in range(N)]))
+)
+
+# Join on (user_id, salt) — each 'whale' user's rows now spread across N tasks
+result = events_salted.join(users_salted, ["user_id", "salt"]).drop("salt")
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.skewJoin.enabled` | `true` | Try AQE before implementing manual salting |
+
+**Related rules**
+
+- **SPL-D05-001** — Join on low-cardinality column; salting works for both low-cardinality and power-law keys
+- **SPL-D05-003** — AQE skew join disabled; enable AQE as the first, simpler mitigation
+- **SPL-D05-007** — Null-heavy join key; nulls accumulate in one partition similar to skewed keys
+
+---
+
+### SPL-D05-006 — Window Function Partitioned by Skew-Prone Column
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Executor OOM for dominant partition; entire stage blocked by straggler |
+
+**Description**
+
+`Window.partitionBy()` uses a low-cardinality column (`status`, `type`, `is_*`). All rows with
+the dominant value are buffered on one executor for the window computation, risking OOM. Unlike
+join skew, AQE cannot split window partitions.
+
+**What it detects**
+
+A `Window.partitionBy(col)` call where `col` matches a low-cardinality naming pattern.
+
+```python
+# Triggers SPL-D05-006
+w = Window.partitionBy("status").orderBy("ts")
+df.withColumn("rank", rank().over(w))
+```
+
+**Why it matters**
+
+Window functions (`rank`, `lag`, `sum over window`) must buffer all rows for a given partition
+on a single executor task because the computation requires seeing all rows together. Unlike a
+join (where AQE can split skewed partitions and re-run sub-partitions), a window function cannot
+be split mid-execution — the entire `status = 'active'` partition must fit in one executor's
+memory. If 90% of rows have `status = 'active'`, that single executor task must hold 90% of the
+dataset in memory simultaneously, causing OOM for any non-trivial dataset size.
+
+**How to fix**
+
+```python
+from pyspark.sql.window import Window
+from pyspark.sql.functions import rank
+
+# Wrong: 90% of rows → single executor memory
+w = Window.partitionBy("status").orderBy("ts")
+df.withColumn("rank", rank().over(w))
+
+# Right: add a secondary high-cardinality column to partition more finely
+w = Window.partitionBy("status", "user_id").orderBy("ts")
+df.withColumn("rank", rank().over(w))
+# Now each (status, user_id) pair is one partition — balanced across executors
+
+# If global rank within status is required (cannot add secondary key):
+# Consider a two-pass approach: partition-level rank followed by merge
+```
+
+**Config options**
+
+No Spark configuration mitigates window partition skew. AQE skew join handles joins, not windows.
+
+**Related rules**
+
+- **SPL-D05-001** — Join on low-cardinality column; same structural skew, different operation
+- **SPL-D05-002** — GroupBy on low-cardinality column; similar aggregation skew
+- **SPL-D03-007** — Self-join that could be window function; replacing self-joins with windows can introduce this skew
+
+---
+
+### SPL-D05-007 — Null-Heavy Join Key
+
+| | |
+|---|---|
+| **Dimension** | D05 Data Skew |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | All null-key rows hash to same partition; straggler task on null bucket |
+
+**Description**
+
+`join()` is called on a column whose name suggests it commonly contains nulls (`parent_id`,
+`foreign_id`, `optional_*`, `nullable_*`) without a prior `isNotNull()` filter or `dropna()`.
+Null values hash to the same partition, creating a straggler task.
+
+**What it detects**
+
+A `join()` on a column whose name contains `parent_id`, `foreign_id`, or `optional_`, where
+no `isNotNull()`, `dropna()`, or `fillna()` call appears in the 5 preceding lines.
+
+```python
+# Triggers SPL-D05-007
+df.join(other, "parent_id")   # parent_id is null for root-level records
+```
+
+**Why it matters**
+
+In Spark, `NULL != NULL` in most join contexts (NULLs do not match each other in inner joins).
+However, `hash(NULL)` is a constant — typically 0 or a fixed value — so all null-key rows are
+routed to the same hash partition. In a tree-structured dataset where all root nodes have
+`parent_id = NULL`, the root's partition may contain millions of rows while all other partitions
+contain tens of rows. The null-key task takes 1000× longer than every other task and holds up
+the entire stage.
+
+**How to fix**
+
+```python
+# Wrong: null parent_ids all route to the same partition
+df.join(other, "parent_id")
+
+# Right option 1: filter nulls before joining (if null keys are not needed in output)
+df.filter(col("parent_id").isNotNull()).join(other, "parent_id")
+
+# Right option 2: handle nulls in a separate pass
+non_null = df.filter(col("parent_id").isNotNull()).join(other, "parent_id")
+null_rows = df.filter(col("parent_id").isNull())
+result = non_null.union(null_rows.withColumn("parent_name", lit(None)))
+```
+
+**Config options**
+
+No Spark configuration mitigates null-key skew directly. Enable AQE skew join as a partial
+mitigation (`spark.sql.adaptive.skewJoin.enabled = true`).
+
+**Related rules**
+
+- **SPL-D05-001** — Join on low-cardinality column; null skew is structurally identical
+- **SPL-D03-009** — Left join without null handling; nulls from the join output vs. nulls in the join key
+
+---
+
+## D06 · Caching
+
+Caching (`cache()`, `persist()`, `checkpoint()`) is a powerful optimization for reused DataFrames
+but a source of memory leaks and wasted compute when misused. These rules catch the most common
+caching anti-patterns: caching without cleanup, caching single-use DataFrames, and caching
+before filters that would have reduced the cached size.
+
+---
+
+### SPL-D06-001 — cache() Without unpersist()
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Executor memory leak; evicts other cached data; OOM in long-running jobs |
+
+**Description**
+
+`cache()` or `persist()` is called without a corresponding `unpersist()` anywhere in the file.
+Cached blocks remain pinned in executor memory for the lifetime of the SparkContext, accumulating
+across stages and jobs until the executor runs out of storage memory.
+
+**What it detects**
+
+Any file where `cache()` or `persist()` calls outnumber `unpersist()` calls (more caches than
+releases).
+
+```python
+# Triggers SPL-D06-001
+df_cached = df.join(other, "id").cache()
+result = df_cached.groupBy("cat").count()
+# df_cached.unpersist() — never called; memory pinned until SparkContext ends
+```
+
+**Why it matters**
+
+Spark's storage memory fraction (default: 50% of `spark.executor.memory`) is shared across all
+cached DataFrames. Each `cache()` call pins a portion of this budget until `unpersist()` is
+called or the SparkContext terminates. In a job that caches several DataFrames across multiple
+stages without unpersisting, the storage budget fills up. When full, Spark evicts older cached
+partitions using an LRU policy — but evicted partitions must be recomputed from scratch on the
+next access, negating the benefit of caching. In long-running Spark Streaming jobs or notebooks
+that run many cells, this becomes a gradual memory leak.
+
+**How to fix**
+
+```python
+# Right: cache for multi-use, unpersist when done
+df_cached = df.join(other, "id").cache()
+
+result1 = df_cached.groupBy("cat").count()
+result2 = df_cached.filter("status = 'active'").agg(sum("amount"))
+
+df_cached.unpersist()   # release storage memory explicitly
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.cleaner.periodicGC.interval` | Controls GC frequency for unreferenced cached blocks |
+| `spark.memory.storageFraction` | Fraction of memory reserved for cached data |
+
+**Related rules**
+
+- **SPL-D06-002** — cache() used only once; if only used once, don't cache at all
+- **SPL-D06-003** — cache() inside loop; per-iteration caches accumulate fastest
+- **SPL-D06-006** — Reused DataFrame without cache; the inverse problem — missing cache
+
+---
+
+### SPL-D06-002 — cache() Used Only Once
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Unnecessary serialization pass; wastes executor memory for no benefit |
+
+**Description**
+
+A DataFrame is cached but then used only once afterward. Caching is only beneficial when a
+DataFrame is consumed multiple times — otherwise the cache write is pure overhead.
+
+**What it detects**
+
+A variable that is assigned from a `cache()` or `persist()` call and then referenced only once
+in subsequent code.
+
+```python
+# Triggers SPL-D06-002 — cached but only counted once
+df_cached = df.join(other, "id").cache()
+result = df_cached.count()   # single use — cache wasted
+```
+
+**Why it matters**
+
+`cache()` adds an extra pass through the data: Spark must materialize the DataFrame, serialize
+it, and write it to executor memory (and optionally disk). This serialization pass itself takes
+time and memory proportional to the cached data size. When the DataFrame is used only once
+after caching, this overhead is pure waste — the job would have been faster without the
+`cache()` call, because the single downstream action would read directly from the source without
+the intermediate serialization step.
+
+**How to fix**
+
+```python
+# Wrong: cache with single use — slower than no cache
+df_cached = df.join(other, "id").cache()
+result = df_cached.count()
+
+# Right: remove cache if used only once
+result = df.join(other, "id").count()
+
+# Cache is correct when used 2+ times:
+df_cached = df.join(other, "id").cache()
+result1 = df_cached.count()                          # use 1
+result2 = df_cached.filter("status = 'a'").collect() # use 2
+df_cached.unpersist()
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D06-001** — cache() without unpersist(); unnecessary cache that is never cleaned up
+- **SPL-D06-006** — Reused DataFrame without cache; the symmetric problem — multi-use without cache
+
+---
+
+### SPL-D06-003 — cache() Inside Loop
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | CRITICAL |
+| **Effort** | Major refactor |
+| **Impact** | OOM after O(N) iterations; executor memory accumulates without release |
+
+**Description**
+
+`cache()` or `persist()` is called inside a `for` or `while` loop without a matching
+`unpersist()` within the same loop iteration. Each iteration pins a new set of partitions in
+executor memory, accumulating until the executor runs out of storage memory.
+
+**What it detects**
+
+A `cache()` or `persist()` call that is nested inside a loop body.
+
+```python
+# Triggers SPL-D06-003
+for epoch in range(100):
+    df = model.transform(df).cache()
+    loss = df.agg(mean("loss")).collect()
+    # previous iteration's cached data never released — memory fills after ~10 iterations
+```
+
+**Why it matters**
+
+Each loop iteration creates a new cached RDD representing the current state of `df`. Without
+`unpersist()`, the previous iteration's cached data remains pinned. After N iterations,
+N versions of the transformed DataFrame are cached simultaneously. For ML training loops where
+each iteration adds a new layer of transformations, both the lineage tree and the cached memory
+grow with each step. On a 16 GB executor with 8 GB storage fraction, a 1 GB transformed
+DataFrame fills memory after 8 iterations, causing subsequent caches to evict earlier ones —
+which then get recomputed from scratch on the next access, defeating the entire purpose.
+
+**How to fix**
+
+```python
+# Right option 1: unpersist at the start of each iteration
+df_cached = df.cache()
+for epoch in range(100):
+    prev = df_cached
+    df_cached = model.transform(df_cached).cache()
+    prev.unpersist()   # release previous iteration's memory
+    loss = df_cached.agg(mean("loss")).collect()
+
+# Right option 2: use checkpoint() for iterative algorithms
+# checkpoint() writes to HDFS and truncates the growing lineage tree
+spark.sparkContext.setCheckpointDir("hdfs://checkpoints/")
+for epoch in range(100):
+    df = model.transform(df).checkpoint()
+    loss = df.agg(mean("loss")).collect()
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.memory.storageFraction` | Fraction of executor heap for cached data; raise to reduce eviction rate |
+
+**Related rules**
+
+- **SPL-D06-001** — cache() without unpersist(); the per-iteration leak is the same root cause
+- **SPL-D06-008** — checkpoint vs cache misuse; checkpoint is often the correct choice for iterative loops
+- **SPL-D03-008** — Join inside loop; loops and Spark operations are a recurring anti-pattern class
+
+---
+
+### SPL-D06-004 — cache() Before Filter
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Caches N rows but only M < N are used; wastes (N−M)/N of cache memory |
+
+**Description**
+
+`cache()` is called before `filter()` or `where()`, caching the full unfiltered dataset. Moving
+the filter before the cache reduces the cached size proportional to the filter selectivity.
+
+**What it detects**
+
+A method chain where `cache()` (or `persist()`) appears before `filter()` or `where()` in the
+same chain.
+
+```python
+# Triggers SPL-D06-004
+df.cache().filter("active = true").groupBy("status").count()
+```
+
+**Why it matters**
+
+When `cache()` precedes `filter()`, Spark caches every row of the DataFrame including rows that
+will be immediately discarded by the filter. If `active = true` applies to 10% of rows, 90% of
+the cached memory holds data that will never be accessed again. The filter runs on every
+downstream action against the cached data, re-scanning and discarding the 90% of cached rows
+each time. Moving `filter()` before `cache()` reduces the cached size by 90%, leaving 90% more
+storage memory available for other DataFrames.
+
+**How to fix**
+
+```python
+# Wrong: caches 100% of rows, uses only 10%
+df.cache().filter("active = true").groupBy("status").count()
+
+# Right: filter first, cache only what will be used
+df.filter("active = true").cache().groupBy("status").count()
+
+# With unpersist:
+active_cached = df.filter("active = true").cache()
+result1 = active_cached.groupBy("status").count()
+result2 = active_cached.agg(sum("revenue"))
+active_cached.unpersist()
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D06-001** — cache() without unpersist(); don't forget to release the filtered cache
+- **SPL-D03-004** — Join without prior filter; the same push-filter-early principle for joins
+- **SPL-D04-009** — Partition column not used in filters; combining partition pruning with pre-cache filtering maximizes savings
+
+---
+
+### SPL-D06-005 — MEMORY_ONLY Storage Level for Potentially Large Datasets
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Silent partition eviction leads to full recomputation under memory pressure |
+
+**Description**
+
+`persist(StorageLevel.MEMORY_ONLY)` is used. When executor storage memory is exhausted, Spark
+silently evicts `MEMORY_ONLY` partitions, which must then be recomputed from scratch on the
+next access. `MEMORY_AND_DISK` provides a disk fallback that prevents silent recomputation.
+
+**What it detects**
+
+Any `.persist(StorageLevel.MEMORY_ONLY)` call.
+
+```python
+# Triggers SPL-D06-005
+from pyspark import StorageLevel
+df.persist(StorageLevel.MEMORY_ONLY)
+```
+
+**Why it matters**
+
+`MEMORY_ONLY` is also the default for `df.cache()` in the RDD API. When the executor's storage
+fraction fills up, Spark evicts partitions using an LRU policy — but with `MEMORY_ONLY`,
+evicted partitions are simply dropped. The next action that needs those partitions re-executes
+the full lineage from the source, which may include expensive shuffles and joins that were
+precisely why you cached in the first place. This eviction is silent: the job continues without
+an error, but suddenly runs much slower. `MEMORY_AND_DISK` spills evicted partitions to disk
+instead of dropping them, guaranteeing they are available on the next access without full
+recomputation.
+
+**How to fix**
+
+```python
+from pyspark import StorageLevel
+
+# Wrong: evicted partitions are silently dropped and recomputed
+df.persist(StorageLevel.MEMORY_ONLY)
+
+# Right: disk fallback prevents silent recomputation
+df.persist(StorageLevel.MEMORY_AND_DISK)
+
+# For Kryo-serialized storage (smaller footprint, slightly slower deserialization):
+df.persist(StorageLevel.MEMORY_AND_DISK_SER)
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.memory.storageFraction` | Increase (e.g. `0.7`) to reduce eviction frequency |
+| `spark.serializer` | Set to Kryo (SPL-D01-001) to reduce memory footprint for `_SER` storage levels |
+
+**Related rules**
+
+- **SPL-D01-001** — Missing Kryo serializer; Kryo + `MEMORY_AND_DISK_SER` is the most memory-efficient caching combination
+- **SPL-D06-001** — cache() without unpersist(); memory pressure from leaked caches causes the evictions this rule addresses
+
+---
+
+### SPL-D06-006 — Reused DataFrame Without Cache
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | N downstream uses trigger N full pipeline recomputations instead of 1 |
+
+**Description**
+
+A DataFrame built from an expensive operation (join, groupBy, aggregation) is used as the input
+for multiple downstream actions or transformations without being cached. Each downstream use
+re-executes the full lineage from the source.
+
+**What it detects**
+
+A variable assigned from a chain containing a shuffle operation (`join`, `groupBy`, `agg`,
+`distinct`, `orderBy`) that is referenced in 2+ subsequent method calls without an intervening
+`cache()` or `persist()`.
+
+```python
+# Triggers SPL-D06-006
+df_agg = df.groupBy("id").agg(sum("v"))    # expensive aggregation
+result1 = df_agg.join(lookup, "id")        # triggers full recompute of df_agg
+total = df_agg.count()                      # triggers another full recompute
+```
+
+**Why it matters**
+
+Spark DataFrames are lazy: each action triggers re-execution of the full lineage. If `df_agg`
+was built from a 10-minute join + aggregation and is used in 3 downstream actions, Spark
+re-runs that 10-minute computation 3 times — 30 minutes total instead of 10. The extra 20
+minutes is pure waste. Adding `cache()` after the aggregation materializes the result once and
+serves all 3 downstream actions from the cached copy in executor memory.
+
+**How to fix**
+
+```python
+# Right: cache after the expensive computation
+df_agg = df.groupBy("id").agg(sum("v")).cache()
+
+result1 = df_agg.join(lookup, "id")        # reads from cache
+total = df_agg.count()                      # reads from cache
+report = df_agg.filter("v > 100").show()   # reads from cache
+
+df_agg.unpersist()   # release when all downstream uses are complete
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D06-001** — cache() without unpersist(); adding cache() introduces the leak risk
+- **SPL-D06-002** — cache() used only once; the inverse — cache present but unnecessary
+- **SPL-D02-007** — Multiple shuffles in sequence; caching between shuffles truncates lineage
+
+---
+
+### SPL-D06-007 — cache() After repartition
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Unnecessary cache write after an already-expensive shuffle |
+
+**Description**
+
+`cache()` is called immediately after `repartition()`. This is only justified when the
+repartitioned DataFrame is consumed 2+ times — otherwise the cache write is overhead after an
+already-expensive shuffle.
+
+**What it detects**
+
+A `cache()` or `persist()` call that appears in a chain or within 2 lines after `repartition()`.
+
+```python
+# Triggers SPL-D06-007
+df2 = df.repartition(200).cache()   # cached — but is it used more than once?
+```
+
+**Why it matters**
+
+`repartition()` already performs a full shuffle — a costly write+network+read cycle. Immediately
+caching the result adds a second serialization pass to write the shuffled data to executor
+storage memory. If `df2` is only used once, this extra pass is pure overhead on top of an
+already expensive operation. The rule fires as an INFO to prompt the developer to confirm
+whether the cache is justified by multiple downstream uses.
+
+**How to fix**
+
+```python
+# If the repartitioned DataFrame is used only once — remove cache()
+df2 = df.repartition(200)
+result = df2.write.parquet("output/")   # single use — no cache needed
+
+# If used 2+ times — cache is correct and this finding can be suppressed
+# Add a comment to document the multi-use intent:
+df2 = df.repartition(200).cache()   # cached: used by both train and validate splits
+train = df2.filter("split = 'train'")
+validate = df2.filter("split = 'validate'")
+df2.unpersist()
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D06-002** — cache() used only once; same underlying concern
+- **SPL-D06-001** — cache() without unpersist(); if cache is justified, add unpersist()
+- **SPL-D02-006** — Shuffle followed by coalesce; repartition + coalesce is a related anti-pattern
+
+---
+
+### SPL-D06-008 — checkpoint vs cache Misuse
+
+| | |
+|---|---|
+| **Dimension** | D06 Caching |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Unnecessary disk write + checkpoint dir overhead in non-iterative pipelines |
+
+**Description**
+
+`checkpoint()` is used in non-iterative code. Checkpointing writes data to HDFS and truncates
+the DAG lineage — it is designed for iterative algorithms where lineage grows unboundedly.
+For non-iterative pipelines, `cache()` achieves the same reuse benefit without the HDFS write.
+
+**What it detects**
+
+A `checkpoint()` call that does not appear inside a `for` or `while` loop body.
+
+```python
+# Triggers SPL-D06-008
+df_intermediate = df.join(other, "id").checkpoint()   # no loop — HDFS write unnecessary
+```
+
+**Why it matters**
+
+`checkpoint()` performs two operations: (1) it materializes the DataFrame by triggering an
+action that writes every partition to the configured checkpoint directory (HDFS or a cloud
+storage path), and (2) it truncates the lineage graph so Spark forgets how to recompute the
+DataFrame. Operation 1 is a full write to durable storage — significantly slower than
+`cache()`, which writes to executor memory. Operation 2 is beneficial only in iterative
+algorithms where the lineage grows with each iteration (ML training, PageRank). In a linear
+pipeline with no loops, the lineage does not grow unboundedly and `cache()` is always faster.
+
+**How to fix**
+
+```python
+# Wrong for non-iterative pipelines: HDFS write with no lineage-growth benefit
+df_intermediate = df.join(other, "id").checkpoint()
+
+# Right: cache() is faster and sufficient for fixed-depth lineage
+df_intermediate = df.join(other, "id").cache()
+result = df_intermediate.groupBy("cat").count()
+df_intermediate.unpersist()
+
+# checkpoint() IS correct inside iterative loops where lineage grows:
+spark.sparkContext.setCheckpointDir("hdfs://checkpoints/")
+for iteration in range(100):
+    model = update(model, df)
+    df = model.transform(df).checkpoint()  # truncates growing lineage tree
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.checkpoint.compress` | `true` — compress checkpoint data to reduce HDFS write size |
+
+**Related rules**
+
+- **SPL-D06-003** — cache() inside loop; checkpoint() is the correct replacement for cache() inside loops
+- **SPL-D06-001** — cache() without unpersist(); cache() introduced by this fix needs cleanup
+- **SPL-D06-005** — MEMORY_ONLY storage level; if memory pressure is the concern, use MEMORY_AND_DISK instead of checkpoint()
