@@ -28,11 +28,11 @@ Benchmark summary
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-
 
 # =============================================================================
 # Internal helpers
@@ -94,9 +94,6 @@ def _plan_summary(df: DataFrame) -> str:
         A short string identifying the dominant operator, e.g.
         ``"BroadcastHashJoin"`` or ``"SortMergeJoin"``.
     """
-    import io
-
-    buf = io.StringIO()
     # explain() prints to stdout; capture via explain(True) string form
     plan_text = df._jdf.queryExecution().simpleString()  # type: ignore[attr-defined]
 
@@ -234,9 +231,12 @@ def benchmark_partition_counts(
         Example::
 
             [
-                {"n_partitions": 50,  "elapsed_s": 2.1, "actual_partitions": 50,  "skew_ratio": 1.0},
-                {"n_partitions": 200, "elapsed_s": 3.4, "actual_partitions": 200, "skew_ratio": 1.2},
-                {"n_partitions": 800, "elapsed_s": 6.8, "actual_partitions": 800, "skew_ratio": 1.0},
+                {"n_partitions": 50,  "elapsed_s": 2.1, "actual_partitions": 50,
+                 "skew_ratio": 1.0},
+                {"n_partitions": 200, "elapsed_s": 3.4, "actual_partitions": 200,
+                 "skew_ratio": 1.2},
+                {"n_partitions": 800, "elapsed_s": 6.8, "actual_partitions": 800,
+                 "skew_ratio": 1.0},
             ]
     """
     results: list[dict[str, Any]] = []
@@ -254,9 +254,7 @@ def benchmark_partition_counts(
         skew_ratio = 1.0
         try:
             partition_counts_df = (
-                result_df.withColumn("_pid", F.spark_partition_id())
-                .groupBy("_pid")
-                .count()
+                result_df.withColumn("_pid", F.spark_partition_id()).groupBy("_pid").count()
             )
             stats = partition_counts_df.agg(
                 F.max("count").alias("max_count"),
@@ -326,9 +324,12 @@ def benchmark_cache_strategies(
         Example::
 
             [
-                {"strategy": "none",           "action_1_s": 3.2, "action_2_s": 3.1, "action_3_s": 3.2, "total_s": 9.5, "skipped": False},
-                {"strategy": "cache",          "action_1_s": 3.5, "action_2_s": 0.4, "action_3_s": 0.4, "total_s": 4.3, "skipped": False},
-                {"strategy": "persist_memory", "action_1_s": 3.6, "action_2_s": 0.3, "action_3_s": 0.3, "total_s": 4.2, "skipped": False},
+                {"strategy": "none",    "action_1_s": 3.2, "action_2_s": 3.1,
+                 "action_3_s": 3.2, "total_s": 9.5,  "skipped": False},
+                {"strategy": "cache",   "action_1_s": 3.5, "action_2_s": 0.4,
+                 "action_3_s": 0.4, "total_s": 4.3,  "skipped": False},
+                {"strategy": "persist_memory", "action_1_s": 3.6, "action_2_s": 0.3,
+                 "action_3_s": 0.3, "total_s": 4.2,  "skipped": False},
             ]
     """
     from pyspark import StorageLevel
@@ -347,7 +348,6 @@ def benchmark_cache_strategies(
     results: list[dict[str, Any]] = []
 
     for strategy in strategies:
-        skipped = False
         cached_df: DataFrame | None = None
 
         try:
@@ -365,13 +365,14 @@ def benchmark_cache_strategies(
 
             elif strategy == "checkpoint":
                 sc = spark.sparkContext
-                if not sc._jvm.org.apache.spark.SparkContext.getOrCreate().getCheckpointDir().isDefined():  # type: ignore[attr-defined]
+                cp_dir = sc._jvm.org.apache.spark.SparkContext.getOrCreate().getCheckpointDir()  # type: ignore[attr-defined]
+                if not cp_dir.isDefined():
                     import warnings
 
                     warnings.warn(
-                        f"benchmark_cache_strategies: strategy='checkpoint' skipped — "
-                        f"no checkpoint directory configured.  Call "
-                        f"spark.sparkContext.setCheckpointDir('/tmp/checkpoints') first.",
+                        "benchmark_cache_strategies: strategy='checkpoint' skipped — "
+                        "no checkpoint directory configured.  Call "
+                        "spark.sparkContext.setCheckpointDir('/tmp/checkpoints') first.",
                         stacklevel=2,
                     )
                     results.append(

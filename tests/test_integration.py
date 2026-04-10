@@ -16,11 +16,9 @@ Five test classes:
 
 from __future__ import annotations
 
-import io
 import json
 import re
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml
@@ -68,12 +66,20 @@ def _critical_ids(report: AuditReport) -> set[str]:
 def _dim_critical_ids(report: AuditReport, dim: str) -> set[str]:
     """CRITICAL findings whose rule_id starts with SPL-{dim}."""
     prefix = f"SPL-{dim}-"
-    return {f.rule_id for f in report.findings if f.rule_id.startswith(prefix) and f.severity == Severity.CRITICAL}
+    return {
+        f.rule_id
+        for f in report.findings
+        if f.rule_id.startswith(prefix) and f.severity == Severity.CRITICAL
+    }
 
 
 def _dim_warning_ids(report: AuditReport, dim: str) -> set[str]:
     prefix = f"SPL-{dim}-"
-    return {f.rule_id for f in report.findings if f.rule_id.startswith(prefix) and f.severity == Severity.WARNING}
+    return {
+        f.rule_id
+        for f in report.findings
+        if f.rule_id.startswith(prefix) and f.severity == Severity.WARNING
+    }
 
 
 # ===========================================================================
@@ -226,9 +232,7 @@ class TestGoodCodeFixtures:
         """Target-dimension rules produce no CRITICAL findings in good code."""
         report = _scan_file(_GOOD / filename)
         crits = _dim_critical_ids(report, dim)
-        assert not crits, (
-            f"{filename}: expected no CRITICAL {dim} findings, got {crits}"
-        )
+        assert not crits, f"{filename}: expected no CRITICAL {dim} findings, got {crits}"
 
     def test_good_config_no_d01_findings(self) -> None:
         report = _scan_file(_GOOD / "good_config.py")
@@ -376,8 +380,10 @@ class TestConfigOverrides:
             [
                 "scan",
                 str(_BAD / "bad_config.py"),
-                "--severity-threshold", "CRITICAL",
-                "--format", "json",
+                "--severity-threshold",
+                "CRITICAL",
+                "--format",
+                "json",
             ],
         )
         data = json.loads(r.output)
@@ -404,9 +410,7 @@ class TestConfigOverrides:
         report_capped = _scan_file(_BAD / "bad_joins.py", config_capped)
         assert len(report_uncapped.findings) > len(report_capped.findings)
 
-    def test_ignore_file_glob_skips_file_in_directory_scan(
-        self, tmp_path: Path
-    ) -> None:
+    def test_ignore_file_glob_skips_file_in_directory_scan(self, tmp_path: Path) -> None:
         """A file matching ignore.files is excluded from directory scans."""
         # Copy bad_config.py into tmp_path under a name matching the glob.
         src = (_BAD / "bad_config.py").read_text(encoding="utf-8")
@@ -440,9 +444,7 @@ class TestConfigOverrides:
             "general": {"severity_threshold": "INFO"},
             "rules": {"d01_cluster_config": {"enabled": False}},
         }
-        (tmp_path / ".spark-perf-lint.yaml").write_text(
-            yaml.dump(config_data), encoding="utf-8"
-        )
+        (tmp_path / ".spark-perf-lint.yaml").write_text(yaml.dump(config_data), encoding="utf-8")
         # Write bad_config.py into tmp_path
         src = (_BAD / "bad_config.py").read_text(encoding="utf-8")
         job_file = tmp_path / "job.py"
@@ -646,8 +648,7 @@ class TestExitCodes:
         config_file.write_text("general:\n  severity_threshold: INVALID_LEVEL\n")
         plain = tmp_path / "job.py"
         plain.write_text(
-            "from pyspark.sql import SparkSession\n"
-            "spark = SparkSession.builder.getOrCreate()\n"
+            "from pyspark.sql import SparkSession\n" "spark = SparkSession.builder.getOrCreate()\n"
         )
         code = self._exit_code(str(plain), "--config", str(config_file))
         assert code == 2
@@ -656,8 +657,10 @@ class TestExitCodes:
         """--fail-on can be repeated: --fail-on CRITICAL --fail-on WARNING."""
         code = self._exit_code(
             str(_BAD / "bad_config.py"),
-            "--fail-on", "CRITICAL",
-            "--fail-on", "WARNING",
+            "--fail-on",
+            "CRITICAL",
+            "--fail-on",
+            "WARNING",
         )
         # bad_config.py has WARNINGs → exit 1
         assert code == 1
@@ -672,8 +675,10 @@ class TestExitCodes:
         # bad_config.py: no CRITICALs → fail_on=CRITICAL → exit 0
         code = self._exit_code(
             str(_BAD / "bad_config.py"),
-            "--severity-threshold", "CRITICAL",
-            "--fail-on", "CRITICAL",
+            "--severity-threshold",
+            "CRITICAL",
+            "--fail-on",
+            "CRITICAL",
         )
         assert code == 0
 
@@ -791,10 +796,10 @@ class TestCLICommands:
 
     def test_init_minimal_creates_smaller_file(self, tmp_path: Path) -> None:
         with self._runner.isolated_filesystem(temp_dir=tmp_path):
-            r_full = self._runner.invoke(main, ["init"])
+            self._runner.invoke(main, ["init"])
             full_size = len(Path(".spark-perf-lint.yaml").read_text())
             Path(".spark-perf-lint.yaml").unlink()
-            r_minimal = self._runner.invoke(main, ["init", "--minimal"])
+            self._runner.invoke(main, ["init", "--minimal"])
             minimal_size = len(Path(".spark-perf-lint.yaml").read_text())
         assert minimal_size <= full_size
 
@@ -833,8 +838,10 @@ class TestCLICommands:
     def test_scan_dimension_filter_d03_accepted(self) -> None:
         """--dimension D03 is accepted without error and D03 findings appear."""
         code, output = self._run(
-            "scan", str(_BAD / "bad_joins.py"),
-            "--dimension", "D03",
+            "scan",
+            str(_BAD / "bad_joins.py"),
+            "--dimension",
+            "D03",
         )
         # Option is accepted cleanly (no Click UsageError → not exit 2)
         assert code in (0, 1)
@@ -843,8 +850,10 @@ class TestCLICommands:
 
     def test_scan_severity_threshold_warning_hides_info(self) -> None:
         code, output = self._run(
-            "scan", str(_BAD / "bad_config.py"),
-            "--severity-threshold", "WARNING",
+            "scan",
+            str(_BAD / "bad_config.py"),
+            "--severity-threshold",
+            "WARNING",
         )
         # INFO-level rule IDs should not appear in output
         plain = _strip(output)
@@ -885,9 +894,9 @@ class TestCLICommands:
         for i in range(len(findings) - 1):
             a = severity_order[findings[i]["severity"]]
             b = severity_order[findings[i + 1]["severity"]]
-            assert a <= b, (
-                f"Findings not sorted: {findings[i]['severity']} before {findings[i+1]['severity']}"
-            )
+            assert (
+                a <= b
+            ), f"Findings not sorted: {findings[i]['severity']} before {findings[i+1]['severity']}"
 
     def test_scan_nonexistent_path_fails(self) -> None:
         """Passing a non-existent path causes Click to report an error."""

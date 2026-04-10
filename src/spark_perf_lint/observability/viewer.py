@@ -224,22 +224,26 @@ def _render_html(
         pct = int(100 * count / max(file_max, 1))
         short = fp.split("/")[-1] if "/" in fp else fp
         file_rows += (
-            f'<tr>'
+            f"<tr>"
             f'<td class="file-path" title="{_esc(fp)}">{_esc(short)}</td>'
-            f'<td><div class="bar-wrap"><div class="bar bar-file" style="width:{pct}%"></div></div></td>'
+            f'<td><div class="bar-wrap"><div class="bar bar-file" style="width:{pct}%"></div></div></td>'  # noqa: E501
             f'<td class="dim-count">{count}</td>'
-            f'</tr>\n'
+            f"</tr>\n"
         )
     if not file_rows:
-        file_rows = '<tr><td colspan="3" class="empty-row">No file stats available (requires trace_level: standard or verbose)</td></tr>'
+        file_rows = '<tr><td colspan="3" class="empty-row">No file stats available (requires trace_level: standard or verbose)</td></tr>'  # noqa: E501
 
     if not dim_rows:
         dim_rows = '<tr><td colspan="3" class="empty-row">No findings across all traces</td></tr>'
 
-    no_traces_banner = "" if traces else (
-        '<div class="no-traces">No trace files found in <code>'
-        + _esc(trace_dir)
-        + '</code>. Enable observability and run a scan first.</div>'
+    no_traces_banner = (
+        ""
+        if traces
+        else (
+            '<div class="no-traces">No trace files found in <code>'
+            + _esc(trace_dir)
+            + "</code>. Enable observability and run a scan first.</div>"
+        )
     )
 
     return _HTML_TEMPLATE.format(
@@ -283,7 +287,9 @@ def _esc(text: str) -> str:
 # =============================================================================
 
 
-def generate_report(trace_dir: Path, output_path: Path, title: str = "spark-perf-lint Trace Report") -> int:
+def generate_report(
+    trace_dir: Path, output_path: Path, title: str = "spark-perf-lint Trace Report"
+) -> int:
     """Load traces from *trace_dir* and write an HTML report to *output_path*.
 
     Args:
@@ -364,7 +370,8 @@ h2 {{ font-size: 1.05rem; font-weight: 600; color: var(--text); margin: 28px 0 1
 
 /* ── Trend chart ── */
 #trend-svg {{ width: 100%; height: 180px; display: block; }}
-.trend-legend {{ display: flex; gap: 20px; margin-top: 10px; font-size: 0.8rem; color: var(--muted); }}
+.trend-legend {{ display: flex; gap: 20px; margin-top: 10px;
+               font-size: 0.8rem; color: var(--muted); }}
 .legend-dot {{ display: inline-block; width: 10px; height: 10px;
                border-radius: 50%; margin-right: 5px; }}
 .no-trend {{ color: var(--muted); font-size: 0.85rem; padding: 20px 0; text-align: center; }}
@@ -403,7 +410,8 @@ h2 {{ font-size: 1.05rem; font-weight: 600; color: var(--text); margin: 28px 0 1
 .bar-wrap {{ background: var(--border); border-radius: 4px; height: 16px; min-width: 40px; }}
 .bar {{ height: 100%; border-radius: 4px; background: var(--bar-dim); min-width: 2px; }}
 .bar-file {{ background: var(--bar-file); }}
-.dim-count {{ color: var(--muted); text-align: right; width: 48px; font-variant-numeric: tabular-nums; }}
+.dim-count {{ color: var(--muted); text-align: right; width: 48px;
+             font-variant-numeric: tabular-nums; }}
 .empty-row {{ color: var(--muted); font-size: 0.85rem; padding: 16px 0; text-align: center; }}
 
 /* ── Layouts ── */

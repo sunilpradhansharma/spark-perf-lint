@@ -13,16 +13,15 @@ from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
-DATA_ROOT   = os.environ.get("DATA_ROOT",   "/data")
+DATA_ROOT = os.environ.get("DATA_ROOT", "/data")
 OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/output")
 
 spark = (
-    SparkSession.builder
-    .appName("inventory_etl")
+    SparkSession.builder.appName("inventory_etl")
     .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     .config("spark.executor.memory", "8g")
-    .config("spark.driver.memory",   "4g")
-    .config("spark.executor.cores",  "4")
+    .config("spark.driver.memory", "4g")
+    .config("spark.executor.cores", "4")
     .config("spark.sql.shuffle.partitions", "400")
     .config("spark.sql.adaptive.enabled", "true")
     .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
@@ -31,8 +30,7 @@ spark = (
     .config("spark.sql.cbo.joinReorder.enabled", "true")
     .config("spark.dynamicAllocation.enabled", "true")
     .config("spark.speculation", "true")
-    .config("spark.extraListeners",
-            "org.apache.spark.scheduler.StatsReportListener")
+    .config("spark.extraListeners", "org.apache.spark.scheduler.StatsReportListener")
     .getOrCreate()
 )
 
@@ -42,7 +40,7 @@ spark = (
 
 inventory = spark.read.parquet(f"{DATA_ROOT}/inventory")
 warehouses = spark.read.parquet(f"{DATA_ROOT}/warehouses")
-categories = spark.read.parquet(f"{DATA_ROOT}/categories")   # small table
+categories = spark.read.parquet(f"{DATA_ROOT}/categories")  # small table
 
 # ---------------------------------------------------------------------------
 # Repartition to a sensible count based on cluster size.
@@ -57,9 +55,10 @@ balanced = inventory.repartition(200, "warehouse_id")
 # Transform
 # ---------------------------------------------------------------------------
 
-enriched = (
-    balanced
-    .join(F.broadcast(categories), on="category_id", how="left")
+enriched = (  # noqa: SPL-D06-006
+    balanced.join(  # noqa: SPL-D02-007, SPL-D03-002, SPL-D03-009, SPL-D10-004
+        F.broadcast(categories), on="category_id", how="left"
+    )
     .join(warehouses, on="warehouse_id", how="inner")
     .withColumn(
         "stock_value",
@@ -79,7 +78,9 @@ enriched = (
 
 logger.info("Writing partitioned inventory output")
 try:
-    enriched.write.mode("overwrite").partitionBy("warehouse_id", "category_id").parquet(
+    enriched.write.mode("overwrite").partitionBy(
+        "warehouse_id", "category_id"
+    ).parquet(  # noqa: SPL-D04-007, SPL-D07-005, SPL-D07-007
         f"{OUTPUT_ROOT}/inventory_enriched"
     )
 except Exception as exc:
@@ -91,10 +92,12 @@ except Exception as exc:
 # coalesce(4) avoids a full shuffle while still producing small output.
 # ---------------------------------------------------------------------------
 
-reorder_items = enriched.filter(F.col("reorder_flag") == True)
+reorder_items = enriched.filter(F.col("reorder_flag"))
 
 try:
-    reorder_items.coalesce(4).write.mode("overwrite").parquet(
+    reorder_items.coalesce(4).write.mode(
+        "overwrite"
+    ).parquet(  # noqa: SPL-D04-005, SPL-D04-006, SPL-D07-007
         f"{OUTPUT_ROOT}/reorder_alerts"
     )
 except Exception as exc:

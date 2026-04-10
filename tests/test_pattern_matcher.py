@@ -6,11 +6,9 @@ import pytest
 
 from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
 from spark_perf_lint.engine.pattern_matcher import (
-    DataFrameNode,
     PatternMatch,
     PatternMatcher,
 )
-
 
 # =============================================================================
 # Helpers
@@ -78,10 +76,7 @@ class TestChainedSequence:
         assert m.find_chained_sequence("repartition", "join") == []
 
     def test_multiple_occurrences(self):
-        code = (
-            "df1.join(df2, 'a').filter('x > 0')\n"
-            "df3.join(df4, 'b').filter('y > 0')\n"
-        )
+        code = "df1.join(df2, 'a').filter('x > 0')\n" "df3.join(df4, 'b').filter('y > 0')\n"
         matches = make(code).find_chained_sequence("join", "filter")
         assert len(matches) == 2
 
@@ -142,7 +137,9 @@ class TestCacheWithoutUnpersist:
         assert not any(m.context.get("cached_receiver") == "df" for m in matches)
 
     def test_persist_without_unpersist(self):
-        code = "from pyspark import StorageLevel\ndf.persist(StorageLevel.MEMORY_ONLY)\ndf.count()\n"
+        code = (
+            "from pyspark import StorageLevel\ndf.persist(StorageLevel.MEMORY_ONLY)\ndf.count()\n"
+        )
         matches = make(code).find_cache_without_unpersist()
         assert len(matches) >= 1
 
@@ -226,24 +223,20 @@ class TestConfigBelowThreshold:
 
     def test_below_threshold_flagged(self):
         code = 'SparkSession.builder.config("spark.executor.memory", "2g").getOrCreate()\n'
-        matches = make(code).find_config_below_threshold(
-            "spark.executor.memory", 4096, self._mult
-        )
+        matches = make(code).find_config_below_threshold("spark.executor.memory", 4096, self._mult)
         assert len(matches) == 1
         assert matches[0].context["parsed_value"] == pytest.approx(2048.0)
 
     def test_at_threshold_not_flagged(self):
         code = 'SparkSession.builder.config("spark.executor.memory", "4g").getOrCreate()\n'
         assert (
-            make(code).find_config_below_threshold("spark.executor.memory", 4096, self._mult)
-            == []
+            make(code).find_config_below_threshold("spark.executor.memory", 4096, self._mult) == []
         )
 
     def test_above_threshold_not_flagged(self):
         code = 'SparkSession.builder.config("spark.executor.memory", "8g").getOrCreate()\n'
         assert (
-            make(code).find_config_below_threshold("spark.executor.memory", 4096, self._mult)
-            == []
+            make(code).find_config_below_threshold("spark.executor.memory", 4096, self._mult) == []
         )
 
     def test_missing_key_returns_empty(self):
@@ -251,9 +244,7 @@ class TestConfigBelowThreshold:
 
     def test_megabyte_suffix(self):
         code = 'SparkSession.builder.config("spark.executor.memory", "512m").getOrCreate()\n'
-        matches = make(code).find_config_below_threshold(
-            "spark.executor.memory", 4096, self._mult
-        )
+        matches = make(code).find_config_below_threshold("spark.executor.memory", 4096, self._mult)
         assert len(matches) == 1
 
 
@@ -280,7 +271,11 @@ class TestMethodInLoop:
         assert matches[0].context["loop_type"] == "while"
 
     def test_multiple_calls_in_one_loop(self):
-        code = "for c in cols:\n    df = df.withColumn(c, f(c))\n    df = df.withColumn(c+'_v2', g(c))\n"
+        code = (
+            "for c in cols:\n"
+            "    df = df.withColumn(c, f(c))\n"
+            "    df = df.withColumn(c+'_v2', g(c))\n"
+        )
         matches = make(code).find_method_in_loop("withColumn")
         assert matches[0].context["occurrence_count"] == 2
 
@@ -366,7 +361,9 @@ class TestJoinBeforeFilter:
 
 class TestRepartitionBeforeWrite:
     def test_chained_repartition_write_flagged(self):
-        matches = make("df.repartition(200).write.parquet('/out')\n").find_repartition_before_write()
+        matches = make(
+            "df.repartition(200).write.parquet('/out')\n"
+        ).find_repartition_before_write()
         assert len(matches) >= 1
         assert any(m.context.get("write_terminal") == "parquet" for m in matches)
 

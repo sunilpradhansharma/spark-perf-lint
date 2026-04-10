@@ -9,12 +9,10 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 spark = (
-    SparkSession.builder
-    .appName("order_fulfilment_analytics")
+    SparkSession.builder.appName("order_fulfilment_analytics")
     # SPL-D03-003: broadcast auto-threshold disabled — forces sort-merge joins
     # even for tiny lookup tables.                                    [CRITICAL]
-    .config("spark.sql.autoBroadcastJoinThreshold", "-1")
-    .getOrCreate()
+    .config("spark.sql.autoBroadcastJoinThreshold", "-1").getOrCreate()
 )
 
 # ---------------------------------------------------------------------------
@@ -22,9 +20,9 @@ spark = (
 # ---------------------------------------------------------------------------
 
 customers = spark.read.parquet("/data/customers")
-orders    = spark.read.parquet("/data/orders")
-products  = spark.read.parquet("/data/products")
-regions   = spark.read.parquet("/data/regions")
+orders = spark.read.parquet("/data/orders")
+products = spark.read.parquet("/data/products")
+regions = spark.read.parquet("/data/regions")
 
 # ---------------------------------------------------------------------------
 # Build a region-product matrix
@@ -71,7 +69,8 @@ for region in region_ids:
     regional_summaries.append(summary)
 
 # Reduce the per-region DataFrames into a single result
-from functools import reduce
+from functools import reduce  # noqa: E402
+
 final = reduce(lambda a, b: a.union(b), regional_summaries)
 
 final.write.mode("overwrite").parquet("/output/regional_order_summary")

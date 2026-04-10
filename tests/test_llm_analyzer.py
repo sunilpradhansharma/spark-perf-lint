@@ -11,10 +11,8 @@ All Claude API calls are mocked; no anthropic package or API key required.
 
 from __future__ import annotations
 
-import time
-from dataclasses import replace
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,7 +23,6 @@ from spark_perf_lint.llm.provider import ClaudeLLMProvider, LLMProvider
 from spark_perf_lint.types import (
     AuditReport,
     Dimension,
-    EffortLevel,
     Finding,
     Severity,
     SparkConfigEntry,
@@ -560,7 +557,7 @@ class TestLLMAnalyzerEnrichFindings:
             _finding(severity=Severity.CRITICAL, line_number=30),
         ]
         result = analyzer.enrich_findings(findings)
-        assert result[0].llm_insight is None   # INFO skipped
+        assert result[0].llm_insight is None  # INFO skipped
         assert result[1].llm_insight is not None  # WARNING enriched
         assert result[2].llm_insight is not None  # CRITICAL enriched
         assert mock_provider.complete.call_count == 2
@@ -594,9 +591,7 @@ class TestLLMAnalyzerEnrichFindings:
 
     def test_respects_max_calls_budget(self) -> None:
         analyzer, mock_provider = self._analyzer(max_calls=3)
-        findings = [
-            _finding(line_number=i, severity=Severity.CRITICAL) for i in range(1, 10)
-        ]
+        findings = [_finding(line_number=i, severity=Severity.CRITICAL) for i in range(1, 10)]
         result = analyzer.enrich_findings(findings, max_calls=2)
         enriched = [f for f in result if f.llm_insight is not None]
         assert len(enriched) == 2
@@ -744,10 +739,10 @@ class TestLLMAnalyzerAnalyze:
         mock_provider.model = "claude-test"
         # 2 findings → 2 per-finding calls, then 1 cross-file call (fails), then exec summary
         mock_provider.complete.side_effect = [
-            "finding insight a",          # per-finding enrichment: a.py
-            "finding insight b",          # per-finding enrichment: b.py
+            "finding insight a",  # per-finding enrichment: a.py
+            "finding insight b",  # per-finding enrichment: b.py
             RuntimeError("cross-file API error"),  # cross-file analysis fails
-            "exec summary",               # exec summary succeeds
+            "exec summary",  # exec summary succeeds
         ]
         config = _llm_config()
         analyzer = LLMAnalyzer(config=config, provider=mock_provider)
@@ -843,7 +838,7 @@ class TestLLMAnalyzerGracefulDegradation:
         """When llm.enabled=False and no --llm flag, findings must be untouched."""
         config = _llm_config(enabled=False)
         mock_provider = MagicMock(spec=LLMProvider)
-        analyzer = LLMAnalyzer(config=config, provider=mock_provider)
+        LLMAnalyzer(config=config, provider=mock_provider)
 
         findings = [_finding(severity=Severity.CRITICAL, line_number=i) for i in range(1, 6)]
         # Simulate what the CLI does: only call analyze() if llm_enabled or --llm
@@ -854,9 +849,7 @@ class TestLLMAnalyzerGracefulDegradation:
 
         mock_provider.complete.assert_not_called()
         assert all(f.llm_insight is None for f in result.enriched_findings)
-        assert [f.rule_id for f in result.enriched_findings] == [
-            f.rule_id for f in findings
-        ]
+        assert [f.rule_id for f in result.enriched_findings] == [f.rule_id for f in findings]
 
 
 # =============================================================================
