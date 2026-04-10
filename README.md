@@ -178,26 +178,23 @@ jobs:
   'themeVariables': {
     'primaryColor': '#ffffff',
     'primaryTextColor': '#1e293b',
-    'primaryBorderColor': '#94a3b8',
     'lineColor': '#64748b',
-    'secondaryColor': '#f8fafc',
-    'tertiaryColor': '#ffffff',
-    'fontFamily': 'Segoe UI, Roboto, sans-serif',
+    'fontFamily': 'arial',
     'fontSize': '12px'
   }
 }}%%
 
 graph TD
     %% TIER 1
-    subgraph T1 ["T1: PRE-COMMIT (<1s)"]
+    subgraph T1 [T1: PRE-COMMIT]
         direction TB
-        A([PySpark Source File]) --- B[Python AST Parser]
-        B --> C{93 Rule Engine}
-        C --> D[/Finding Output/]
+        A([Source File]) --- B[AST Parser]
+        B --> C{Rule Engine}
+        C --> D[/Findings/]
     end
 
     %% TIER 2
-    subgraph T2 ["T2: CI / PR (Claude ~30s)"]
+    subgraph T2 [T2: CI / PR]
         direction TB
         E[Audit Report] --> F[[<b>LLM Analyzer</b>]]
         F --> G[Enrichment]
@@ -206,36 +203,30 @@ graph TD
     end
 
     %% TIER 3
-    subgraph T3 ["T3: DEEP AUDIT (Minutes)"]
+    subgraph T3 [T3: DEEP AUDIT]
         direction TB
         J((Spark Session))
-        J --> K[Plan Analyzer]
+        J --> K[Plan Analysis]
         J --> L[Data Gen]
         J --> M[Benchmarks]
-        K & L & M --> N([Jupyter Report])
+        K & L & M --> N([Report])
     end
 
-    %% FORCED VERTICAL ALIGNMENT (The Fix)
+    %% CONNECTIONS
     D -.-> E
     I -.-> J
 
     %% STYLING
-    style T1 fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px,rx:8
-    style T2 fill:#f5f3ff,stroke:#c7d2fe,stroke-width:1px,rx:8
-    style T3 fill:#f0fdf4,stroke:#a7f3d0,stroke-width:1px,rx:8
+    style T1 fill:#f8fafc,stroke:#cbd5e1,rx:10
+    style T2 fill:#f5f3ff,stroke:#c7d2fe,rx:10
+    style T3 fill:#f0fdf4,stroke:#a7f3d0,rx:10
 
-    %% Optimized Classes
-    classDef t1Node fill:#ffffff,stroke:#475569,stroke-width:1.5px,color:#1e293b,rx:5
-    classDef t2Node fill:#ffffff,stroke:#4338ca,stroke-width:1.5px,color:#1e293b,rx:5
-    classDef t2Focus fill:#4338ca,stroke:#312e81,stroke-width:1.5px,color:#ffffff,rx:5
-    classDef t3Node fill:#ffffff,stroke:#059669,stroke-width:1.5px,color:#1e293b,rx:5
-    classDef t3Focus fill:#059669,stroke:#064e3b,stroke-width:1.5px,color:#ffffff,rx:5
-
-    class A,B,C,D t1Node
-    class E,G,H,I t2Node
-    class F t2Focus
-    class K,L,M t3Node
-    class J,N t3Focus
+    classDef default fill:#ffffff,stroke:#475569,stroke-width:1px,color:#1e293b;
+    classDef focus fill:#4338ca,stroke:#312e81,stroke-width:2px,color:#ffffff;
+    classDef spark fill:#059669,stroke:#064e3b,stroke-width:2px,color:#ffffff;
+    
+    class F focus;
+    class J,N spark;
 ```
 
 <details>
