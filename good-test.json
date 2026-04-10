@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "tool": "spark-perf-lint",
+    "version": "0.1.0",
+    "generated_at": "2026-04-10T18:05:40.618720+00:00",
+    "config_source": "/Users/sucandra_dasa/Documents/Sucandra-Mac/github/spark-perf-lint/.spark-perf-lint.yaml",
+    "severity_threshold": "INFO",
+    "fail_on": [
+      "CRITICAL"
+    ]
+  },
+  "scan": {
+    "files_scanned": 10,
+    "duration_seconds": 0.02859,
+    "passed": true,
+    "critical_count": 0,
+    "warning_count": 0,
+    "info_count": 0
+  },
+  "summary": {
+    "total": 0,
+    "by_severity": {
+      "INFO": 0,
+      "WARNING": 0,
+      "CRITICAL": 0
+    },
+    "by_dimension": {
+      "D01_CLUSTER_CONFIG": 0,
+      "D02_SHUFFLE": 0,
+      "D03_JOINS": 0,
+      "D04_PARTITIONING": 0,
+      "D05_SKEW": 0,
+      "D06_CACHING": 0,
+      "D07_IO_FORMAT": 0,
+      "D08_AQE": 0,
+      "D09_UDF_CODE": 0,
+      "D10_CATALYST": 0,
+      "D11_MONITORING": 0
+    },
+    "by_effort": {
+      "CONFIG_ONLY": 0,
+      "MINOR_CODE_CHANGE": 0,
+      "MAJOR_REFACTOR": 0
+    }
+  },
+  "findings": [],
+  "config": {
+    "general": {
+      "severity_threshold": "INFO",
+      "fail_on": [
+        "CRITICAL"
+      ],
+      "report_format": [
+        "json"
+      ],
+      "max_findings": 0
+    },
+    "thresholds": {
+      "broadcast_threshold_mb": 10,
+      "max_shuffle_partitions": 2000,
+      "min_shuffle_partitions": 10,
+      "target_partition_size_mb": 128,
+      "max_cache_without_unpersist": 5,
+      "skew_ratio_warning": 5.0,
+      "skew_ratio_critical": 10.0,
+      "max_partition_count": 10000,
+      "min_partition_count": 2,
+      "max_udf_complexity": 10,
+      "min_executor_memory_gb": 4,
+      "min_driver_memory_gb": 2,
+      "max_executor_cores": 5,
+      "min_executor_cores": 2,
+      "max_with_column_chain": 10,
+      "max_chained_filters": 3
+    },
+    "severity_override": {}
+  }
+}
