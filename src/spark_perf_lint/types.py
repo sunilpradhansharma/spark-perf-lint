@@ -235,6 +235,7 @@ class Finding:
     estimated_impact: str = ""
     effort_level: EffortLevel = EffortLevel.MINOR_CODE_CHANGE
     references: list[str] = field(default_factory=list)
+    llm_insight: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -281,6 +282,7 @@ class Finding:
             "estimated_impact": self.estimated_impact,
             "effort_level": self.effort_level.name,
             "references": self.references,
+            "llm_insight": self.llm_insight,
         }
 
 

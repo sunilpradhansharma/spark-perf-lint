@@ -144,6 +144,16 @@ def main(ctx: click.Context) -> None:
     default=False,
     help="Only print findings; suppress header, footer, and progress output.",
 )
+@click.option(
+    "--llm/--no-llm",
+    "use_llm",
+    default=False,
+    help=(
+        "Enable Tier 2 LLM analysis (requires 'anthropic' package and "
+        "ANTHROPIC_API_KEY). Enriches findings with context-aware explanations "
+        "and produces a cross-file summary. Overrides the 'llm.enabled' config key."
+    ),
+)
 def scan(
     paths: tuple[Path, ...],
     config_path: Path | None,
@@ -156,6 +166,7 @@ def scan(
     show_fix: bool,
     verbose: bool,
     quiet: bool,
+    use_llm: bool,
 ) -> None:
     """Scan PATH(s) for Spark performance anti-patterns.
 
@@ -222,8 +233,22 @@ def scan(
         click.echo(click.style(f"Scan error: {exc}", fg="red"), err=True)
         sys.exit(2)
 
+    # --- Tier 2: LLM enrichment (optional) ---
+    llm_result = None
+    if use_llm or config.llm_enabled:
+        llm_result = _run_llm_analysis(report, config, verbose=verbose, quiet=quiet)
+        if llm_result is not None:
+            # Replace findings list with the enriched copy
+            import dataclasses
+
+            report = dataclasses.replace(report, findings=llm_result.enriched_findings)
+
     # --- Render output ---
     _render_report(report, config, output_path, show_fix, quiet, verbose)
+
+    # Print cross-file insights and executive summary below the main report
+    if llm_result is not None and not quiet:
+        _render_llm_extras(llm_result)
 
     # --- Exit code ---
     fail_severities = set(config.fail_on)
@@ -305,6 +330,84 @@ def _render_report(
             # GitHub PR reporter manages its own streams (stdout annotations,
             # $GITHUB_STEP_SUMMARY, and optional PR comment API call).
             gpr.run(annotations_file=None, post_comment=True, write_summary=True)
+
+
+def _run_llm_analysis(
+    report: Any,
+    config: LintConfig,
+    *,
+    verbose: bool,
+    quiet: bool,
+) -> Any | None:
+    """Run Tier 2 LLM analysis and return the ``LLMAnalysisResult``.
+
+    All errors are caught and surfaced as stderr messages so that a missing
+    API key or absent ``anthropic`` package never aborts the scan.
+
+    Returns ``None`` on any failure.
+    """
+    if not quiet:
+        click.echo(click.style("  Running Tier 2 LLM analysis…", fg="bright_black"))
+    try:
+        from spark_perf_lint.llm.analyzer import LLMAnalyzer
+
+        analyzer = LLMAnalyzer.from_config(config)
+        result = analyzer.analyze(report)
+
+        if result.errors and verbose:
+            for err in result.errors:
+                click.echo(click.style(f"  [LLM warning] {err}", fg="yellow"), err=True)
+        if not quiet:
+            click.echo(
+                click.style(
+                    f"  LLM analysis done — {result.calls_made} call(s), "
+                    f"model: {result.model}",
+                    fg="bright_black",
+                )
+            )
+        return result
+    except ImportError:
+        click.echo(
+            click.style(
+                "  LLM analysis skipped: 'anthropic' package not installed. "
+                "Run: pip install 'spark-perf-lint[llm]'",
+                fg="yellow",
+            ),
+            err=True,
+        )
+    except ValueError as exc:
+        click.echo(
+            click.style(f"  LLM analysis skipped: {exc}", fg="yellow"),
+            err=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        click.echo(
+            click.style(f"  LLM analysis failed: {exc}", fg="red"),
+            err=True,
+        )
+    return None
+
+
+def _render_llm_extras(llm_result: Any) -> None:
+    """Print cross-file insights and executive summary to stdout."""
+    if llm_result.cross_file_insights:
+        click.echo("")
+        click.echo(
+            click.style("  ── Cross-File Insights (Tier 2) ──", bold=True, fg="bright_cyan")
+        )
+        click.echo("")
+        for line in llm_result.cross_file_insights.splitlines():
+            click.echo(f"  {line}")
+        click.echo("")
+
+    if llm_result.executive_summary:
+        click.echo(
+            click.style("  ── Executive Summary (Tier 2) ──", bold=True, fg="bright_cyan")
+        )
+        click.echo("")
+        for line in llm_result.executive_summary.splitlines():
+            click.echo(f"  {line}")
+        click.echo("")
 
 
 # =============================================================================
