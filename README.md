@@ -31,7 +31,7 @@ Each finding carries a six-layer structure: what was found, why it hurts, a conc
 
 ## Quick Start
 
-🌐 **Explore the interactive site:** [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/) — browse all 93 rules, decision guides, and architecture diagrams in one place.
+**Explore the interactive site:** [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/) — browse all 93 rules, decision guides, and architecture diagrams in one place.
 
 ### a. Pre-commit hook (catches issues before every commit)
 
