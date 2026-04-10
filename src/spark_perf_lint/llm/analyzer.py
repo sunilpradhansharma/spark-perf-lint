@@ -161,9 +161,14 @@ class LLMAnalyzer:
         llm_cfg = self._config.raw.get("llm", {})
         max_calls: int = int(llm_cfg.get("max_llm_calls", 20))
 
+        try:
+            model = self._get_provider().model
+        except Exception:  # noqa: BLE001 — provider unavailable; degrade gracefully
+            model = ""
+
         result = LLMAnalysisResult(
             enriched_findings=list(report.findings),
-            model=self._get_provider().model,
+            model=model,
         )
 
         # Reserve 1 call each for cross-file and exec summary (if budget allows)
