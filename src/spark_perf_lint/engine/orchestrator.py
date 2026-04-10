@@ -37,6 +37,7 @@ from pathlib import Path
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, ParseError
 from spark_perf_lint.engine.file_scanner import FileScanner, ScanTarget
+from spark_perf_lint.observability.tracer import BaseTracer, TracerFactory
 from spark_perf_lint.rules.registry import RuleRegistry
 from spark_perf_lint.types import AuditReport, Finding, Severity
 
@@ -64,13 +65,25 @@ class ScanOrchestrator:
     reused across all scanned paths so the rule registry and configuration
     are resolved only once.
 
+    A ``BaseTracer`` is constructed automatically from the config when
+    ``observability.enabled = true``; a ``NullTracer`` is used otherwise so
+    the rest of the code never needs to branch on tracer presence.
+
     Args:
         config: Fully resolved ``LintConfig`` for this scan run.
+        tracer: Optional explicit tracer.  When ``None`` (the default),
+            ``TracerFactory.from_config(config)`` is called to select and
+            construct the correct backend.
     """
 
-    def __init__(self, config: LintConfig) -> None:
+    def __init__(
+        self,
+        config: LintConfig,
+        tracer: BaseTracer | None = None,
+    ) -> None:
         self._config = config
         self._registry = RuleRegistry.instance()
+        self._tracer: BaseTracer = tracer if tracer is not None else TracerFactory.from_config(config)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -83,6 +96,11 @@ class ScanOrchestrator:
         PySpark code are analysed.  Files matching ``ignore.files`` or inside
         ``ignore.directories`` are skipped.
 
+        When observability is enabled the scan is bracketed by
+        ``tracer.start_run`` / ``tracer.end_run`` calls and per-file stats
+        are forwarded via ``tracer.record_file``.  Tracer failures are caught
+        and logged so they never abort the scan.
+
         Args:
             paths: File or directory paths to scan.  Accepts strings or
                 ``Path`` objects.
@@ -94,6 +112,12 @@ class ScanOrchestrator:
         str_paths = [str(p) for p in paths]
         start = time.monotonic()
 
+        run_id = TracerFactory.new_run_id()
+        try:
+            self._tracer.start_run(run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tracer.start_run failed: %s", exc)
+
         targets, _summary = FileScanner.from_paths(str_paths, config=self._config)
         scannable = FileScanner.scannable(targets)
 
@@ -102,12 +126,20 @@ class ScanOrchestrator:
         findings = self._apply_cap(findings)
 
         elapsed = time.monotonic() - start
-        return AuditReport(
+        report = AuditReport(
             findings=findings,
             files_scanned=len(scannable),
             scan_duration_seconds=elapsed,
             config_used=self._config.raw,
         )
+
+        try:
+            self._tracer.record_findings(findings)
+            self._tracer.end_run(report)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tracer.end_run failed: %s", exc)
+
+        return report
 
     def scan_content(self, content: str, filename: str = "<string>") -> AuditReport:
         """Lint a source string directly, without touching the filesystem.
@@ -210,6 +242,9 @@ class ScanOrchestrator:
         Parse errors are logged as warnings and produce a synthetic INFO
         finding rather than aborting the whole scan.
 
+        Per-file timing is forwarded to the tracer via ``record_file`` after
+        every file, regardless of whether findings were produced.
+
         Args:
             target: A single file target with pre-loaded content.
             enabled_rules: Pre-computed rule list from the caller.  When
@@ -221,13 +256,18 @@ class ScanOrchestrator:
             All findings for *target*, or a single parse-error finding if
             the file cannot be parsed.
         """
+        file_start = time.monotonic()
+
         try:
             analyzer = ASTAnalyzer.from_source(target.content, filename=target.relative_path)
         except ParseError as exc:
             logger.warning("Parse error in %s: %s", target.relative_path, exc)
-            return [self._make_parse_error_finding(target.relative_path, exc)]
+            result = [self._make_parse_error_finding(target.relative_path, exc)]
+            self._emit_file_stat(target.relative_path, len(result), file_start)
+            return result
         except Exception as exc:  # noqa: BLE001 — broad catch: never abort the scan
             logger.error("Unexpected error parsing %s: %s", target.relative_path, exc)
+            self._emit_file_stat(target.relative_path, 0, file_start)
             return []
 
         if enabled_rules is None:
@@ -245,7 +285,31 @@ class ScanOrchestrator:
                     target.relative_path,
                     exc,
                 )
+
+        self._emit_file_stat(target.relative_path, len(findings), file_start)
         return findings
+
+    def _emit_file_stat(
+        self,
+        file_path: str,
+        finding_count: int,
+        file_start: float,
+    ) -> None:
+        """Forward per-file timing to the tracer; swallow tracer errors.
+
+        Args:
+            file_path: Repo-relative path of the file that was scanned.
+            finding_count: Number of findings produced for this file.
+            file_start: ``time.monotonic()`` value recorded before scanning.
+        """
+        try:
+            self._tracer.record_file(
+                file_path,
+                finding_count,
+                time.monotonic() - file_start,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Tracer.record_file failed for %s: %s", file_path, exc)
 
     @staticmethod
     def _sort_findings(findings: list[Finding]) -> list[Finding]:
@@ -317,5 +381,6 @@ class ScanOrchestrator:
         return (
             f"ScanOrchestrator("
             f"rules={len(self._registry)}, "
-            f"threshold={self._config.severity_threshold.name})"
+            f"threshold={self._config.severity_threshold.name}, "
+            f"tracer={self._tracer.__class__.__name__})"
         )
