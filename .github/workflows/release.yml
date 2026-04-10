@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# No concurrent releases — a tag push is already serialized.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: build
+  # Build sdist + wheel and upload them as artifacts for the publish jobs.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so setuptools-scm (if added later) can derive version.
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build frontend
+        run: pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Verify distributions
+        run: |
+          pip install twine
+          twine check dist/*
+          ls -lh dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: publish-pypi
+  # Upload to PyPI using the Trusted Publisher (OIDC) mechanism — no token
+  # needed in secrets when the environment is configured in PyPI project
+  # settings.  Falls back gracefully if the environment isn't set up yet.
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: pypi
+      url: https://pypi.org/project/spark-perf-lint/
+
+    permissions:
+      id-token: write   # required for OIDC Trusted Publisher
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted Publisher (OIDC) — no API token required when PyPI project
+        # is configured with this repo + workflow + environment name.
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 3: github-release
+  # Create a GitHub Release with auto-generated notes and attach the
+  # sdist + wheel as release assets.
+  # ─────────────────────────────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish-pypi
+
+    permissions:
+      contents: write   # required to create releases and upload assets
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "spark-perf-lint ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## Installation
+
+            ```bash
+            pip install spark-perf-lint==${{ steps.version.outputs.version }}
+            ```
+
+            ## What's Changed
+
+            See the auto-generated release notes below, or the full
+            [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+            if one is maintained.
