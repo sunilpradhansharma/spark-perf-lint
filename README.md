@@ -730,19 +730,19 @@ spark-perf-lint/
 
 ## Comparison with Existing Tools
 
-| | **spark-perf-lint** | pylint / flake8 | Palantir `spark-style-guide` | sparkMeasure |
+| Feature | spark-perf-lint | pylint / flake8 | Palantir spark-style-guide | sparkMeasure |
 |---|---|---|---|---|
-| **Spark-aware rules** | ✅ 93 Spark-specific | ❌ Generic Python | ⚠️ Style guide docs only | ❌ Metrics, not rules |
-| **Before/after code fix** | ✅ Every finding | ❌ | ❌ | ❌ |
-| **Pre-commit hook** | ✅ Built-in | ✅ | ❌ | ❌ |
-| **CI PR annotations** | ✅ Inline diff comments | ⚠️ Via plugins | ❌ | ❌ |
-| **LLM enrichment** | ✅ Claude (Tier 2) | ❌ | ❌ | ❌ |
-| **Physical plan analysis** | ✅ Tier 3 | ❌ | ❌ | ✅ (metrics only) |
-| **Zero Spark dependency** | ✅ Tier 1 | ✅ | ✅ | ❌ |
-| **Config audit** | ✅ 75 Spark configs | ❌ | ❌ | ❌ |
-| **Severity + effort levels** | ✅ | ⚠️ | ❌ | ❌ |
-| **Structured findings** | ✅ JSON / Markdown | ⚠️ | ❌ | ⚠️ |
-| **Observability / tracing** | ✅ HTML trace report | ❌ | ❌ | ⚠️ |
+| Spark-aware rules | **93 Spark-specific** | Generic Python | Style guide docs only | Metrics, not rules |
+| Before/after code fix | **Every finding** | — | — | — |
+| Pre-commit hook | **Built-in** | Built-in | — | — |
+| CI PR annotations | **Inline diff comments** | Via plugins | — | — |
+| LLM enrichment | **Claude (Tier 2)** | — | — | — |
+| Physical plan analysis | **Tier 3** | — | — | Metrics only |
+| Zero Spark dependency | **Tier 1** | Yes | Yes | — |
+| Config audit | **75 Spark configs** | — | — | — |
+| Severity + effort levels | **Yes** | Partial | — | — |
+| Structured findings | **JSON / Markdown** | Partial | — | Partial |
+| Observability / tracing | **HTML trace report** | — | — | Partial |
 
 > **Note on Palantir:** The [Palantir Spark Style Guide](https://github.com/palantir/spark-style-guide) is an excellent reference document — `spark-perf-lint` encodes those recommendations as executable rules that catch violations automatically.
 
