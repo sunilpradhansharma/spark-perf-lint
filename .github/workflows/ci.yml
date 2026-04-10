@@ -210,7 +210,7 @@ jobs:
           print(f"D01 findings      : {len(d01_findings)}")
           print(f"D01 rules fired   : {sorted(set(d01_findings))}")
 
-          assert report["files_scanned"] == 1, "Expected 1 file scanned"
+          assert report["scan"]["files_scanned"] == 1, "Expected 1 file scanned"
           assert len(d01_findings) >= 3, (
               f"Expected ≥3 D01 findings in bad_config.py, got {len(d01_findings)}"
           )
