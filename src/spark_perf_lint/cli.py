@@ -40,6 +40,7 @@ _FORMAT_CHOICES = click.Choice(["terminal", "json", "markdown", "github-pr"], ca
     context_settings={"help_option_names": ["-h", "--help"]},
     invoke_without_command=True,
 )
+@click.version_option(version=__version__, prog_name="spark-perf-lint")
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """spark-perf-lint — Apache Spark performance linter.
