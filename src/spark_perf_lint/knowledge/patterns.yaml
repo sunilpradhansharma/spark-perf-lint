@@ -1,0 +1,1402 @@
+# =============================================================================
+# patterns.yaml — spark-perf-lint decision guide
+# =============================================================================
+#
+# Structure
+# ---------
+# Top-level key `categories` is a list of pattern groups.  Each group has:
+#
+#   id          Short identifier used in rule messages, e.g. JOIN
+#   name        Human-readable group title
+#   patterns    List of pattern entries (see fields below)
+#
+# Fields per pattern entry
+# ------------------------
+#   id            Unique scoped identifier, e.g. JOIN-broadcast_hash
+#   name          Display name
+#   when          List of conditions under which this is the right choice
+#   avoid_when    List of conditions under which this pattern should NOT be used
+#   trade_offs    Prose describing key costs, benefits, and edge-case behaviour
+#   config        Dict of Spark config keys → recommended values.
+#                 null when no config change is needed.
+#   example_code  Multi-line PySpark / SQL snippet demonstrating the pattern
+#   spark_version Minimum Spark version that fully supports this pattern
+#                 (format: "X.Y")
+#
+# Coverage
+# --------
+# 1. JOIN PATTERNS         — 7 patterns (broadcast_hash through nested_loop)
+# 2. PARTITIONING PATTERNS — 7 patterns (hash through bucketing)
+# 3. CACHING PATTERNS      — 5 patterns (MEMORY_ONLY through checkpoint)
+# 4. FILE FORMAT PATTERNS  — 6 patterns (Parquet through CSV/JSON)
+# 5. AGGREGATION PATTERNS  — 5 patterns (reduceByKey through map_side_pre_agg)
+# 6. SKEW HANDLING PATTERNS — 6 patterns (aqe_auto through two_phase_agg)
+# =============================================================================
+
+categories:
+
+  # ===========================================================================
+  # 1. JOIN PATTERNS
+  # ===========================================================================
+
+  - id: JOIN
+    name: "Join Strategy Patterns"
+    patterns:
+
+      - id: JOIN-broadcast_hash
+        name: "Broadcast Hash Join"
+        when:
+          - "One side of the join is small enough to fit in executor memory (default threshold: 10 MB; raise to 100–512 MB with autoBroadcastJoinThreshold)"
+          - "The small table is reused across multiple joins in the same stage"
+          - "The join key has high cardinality (many unique values) — no skew risk"
+          - "Network bandwidth is available and the cluster has enough executor memory headroom"
+        avoid_when:
+          - "Both sides are large — broadcasting a large table causes executor OOM"
+          - "The 'small' side is actually a skewed key-value dataset with a few dominant keys"
+          - "Streaming join where the build side changes between micro-batches"
+          - "The driver must serialize the entire broadcast table — avoid if driver heap is < 2 GB"
+        trade_offs: |
+          Broadcast Hash Join eliminates the shuffle entirely by sending the smaller table
+          to every executor. This is the fastest join strategy when it applies: no sort,
+          no shuffle, O(1) lookup via in-memory hash table. The cost is memory — every
+          executor holds a full copy of the broadcast table, so it must fit in executor
+          memory multiplied by the number of executor cores. Broadcast is broadcast to the
+          driver first, then to executors, so driver heap is also a constraint. If the
+          broadcast table is updated frequently, cache invalidation adds complexity.
+        config:
+          spark.sql.autoBroadcastJoinThreshold: "104857600"  # 100 MB
+          spark.sql.broadcastTimeout: "300"
+        example_code: |
+          from pyspark.sql.functions import broadcast
+
+          # Explicit broadcast hint (overrides autoBroadcastJoinThreshold)
+          result = large_df.join(broadcast(small_df), 'user_id')
+
+          # Or raise the auto-threshold in session config:
+          spark.conf.set('spark.sql.autoBroadcastJoinThreshold', 104857600)
+          result = large_df.join(small_df, 'user_id')  # Catalyst selects BHJ automatically
+        spark_version: "2.0"
+
+      - id: JOIN-sort_merge
+        name: "Sort-Merge Join"
+        when:
+          - "Both sides of the join are large (hundreds of GB+) and neither fits in memory"
+          - "The join key is equi-join (equality condition) and both sides can be sorted"
+          - "Data locality is more important than latency — SMJ is CPU-efficient and spillable"
+          - "Join is repeated on the same bucketed key — sort phase is skipped entirely"
+        avoid_when:
+          - "One side is small enough to broadcast — BHJ is always faster without the sort cost"
+          - "The join key is highly skewed — SMJ distributes rows by key, putting all skewed-key rows on one task"
+          - "Low-latency interactive queries — sort overhead adds noticeable latency"
+          - "Non-equi joins — SMJ cannot be used for inequality or range conditions"
+        trade_offs: |
+          Sort-Merge Join is the default strategy for large-large equi-joins. It sorts both
+          sides by join key then merges in a single linear pass — O(N log N) sort followed
+          by O(N) merge. The sort requires a full shuffle, which is the dominant cost.
+          SMJ spills gracefully to disk when partitions exceed memory, making it robust
+          for very large datasets. For skewed keys, all rows sharing the dominant key land
+          on one task, creating a straggler; AQE skew join optimization can mitigate this
+          by splitting oversized partitions automatically.
+        config:
+          spark.sql.join.preferSortMergeJoin: "true"
+          spark.sql.shuffle.partitions: "200"
+        example_code: |
+          from pyspark.sql.functions import expr
+
+          # SMJ is Catalyst's default for large-large equi-joins
+          result = fact_df.join(dim_df, 'product_id')
+
+          # Force SMJ with a hint if Catalyst would otherwise choose shuffle hash:
+          result = fact_df.hint('MERGE').join(dim_df, 'product_id')
+        spark_version: "2.0"
+
+      - id: JOIN-shuffle_hash
+        name: "Shuffle Hash Join"
+        when:
+          - "One side is significantly smaller than the other (roughly 3x or more) but too large to broadcast"
+          - "The smaller side fits in a per-partition hash table after shuffle (executor memory allows it)"
+          - "AQE is enabled and can convert a sort-merge join to shuffle hash at runtime based on actual partition sizes"
+          - "Both sides have a reasonably uniform key distribution"
+        avoid_when:
+          - "The build side (smaller table) does not fit in executor memory per partition — leads to OOM"
+          - "The join key is highly skewed — hash table size is unpredictable per partition"
+          - "Both sides are large and comparably sized — SMJ is more memory-predictable"
+          - "Sorting is required on the output — SHJ produces unsorted results"
+        trade_offs: |
+          Shuffle Hash Join shuffles both sides by key, then builds an in-memory hash table
+          from the smaller partition and probes it with the larger. It avoids the sort phase
+          of SMJ, making it faster when the build side fits in memory. However, if the build
+          partition is larger than executor memory, SHJ spills or OOMs — unlike SMJ which
+          spills both sides gracefully. AQE in Spark 3.x can dynamically convert planned
+          SMJ to SHJ at runtime once actual shuffle partition sizes are known, making this
+          strategy transparent in well-tuned configurations.
+        config:
+          spark.sql.adaptive.enabled: "true"
+          spark.sql.adaptive.localShuffleReader.enabled: "true"
+        example_code: |
+          # Force shuffle hash join with a hint
+          result = large_df.hint('SHUFFLE_HASH').join(medium_df, 'order_id')
+
+          # With AQE, Catalyst may auto-select SHJ when one side coalesces small:
+          spark.conf.set('spark.sql.adaptive.enabled', 'true')
+          result = fact_df.join(dim_df, 'category_id')
+        spark_version: "2.0"
+
+      - id: JOIN-bucket
+        name: "Bucketed Join (Pre-Shuffled)"
+        when:
+          - "The same large tables are joined repeatedly on the same key across multiple jobs or queries"
+          - "Tables are written once and read many times (data warehouse fact/dimension model)"
+          - "Both tables are bucketed on the join key with the same bucket count"
+          - "Join key has high cardinality and data volume is large enough that eliminating shuffle is worthwhile"
+        avoid_when:
+          - "Tables are updated frequently — re-bucketing on every write negates the benefit"
+          - "Bucket count was chosen without regard for data size — too few buckets → large files; too many → many small files"
+          - "The join key changes across different consumers — a single bucket key cannot serve all use cases"
+          - "Using Delta Lake with Auto Optimize enabled — file compaction may break bucket alignment"
+        trade_offs: |
+          Bucketing pre-sorts and co-partitions data by the join key at write time, allowing
+          Spark to skip the shuffle phase entirely on subsequent reads. For tables joined
+          hundreds of times, the one-time write overhead is amortised quickly. The constraint
+          is that both tables must use the same bucket count and key, and the bucket count
+          must match exactly — if one table has 100 buckets and the other 200, Spark cannot
+          skip the shuffle. File size management is also critical: too many small buckets
+          cause excessive task scheduling overhead.
+        config:
+          spark.sql.sources.bucketing.enabled: "true"
+          spark.sql.autoBroadcastJoinThreshold: "-1"  # disable broadcast to force bucketed join
+        example_code: |
+          # Write bucketed tables once
+          orders_df.write.bucketBy(64, 'customer_id').sortBy('customer_id') \
+              .mode('overwrite').saveAsTable('orders_bucketed')
+
+          customers_df.write.bucketBy(64, 'customer_id').sortBy('customer_id') \
+              .mode('overwrite').saveAsTable('customers_bucketed')
+
+          # Subsequent joins skip shuffle entirely
+          orders = spark.table('orders_bucketed')
+          customers = spark.table('customers_bucketed')
+          result = orders.join(customers, 'customer_id')  # no shuffle stage in plan
+        spark_version: "2.0"
+
+      - id: JOIN-skew_aqe
+        name: "AQE Skew Join Optimization"
+        when:
+          - "Join on a skewed key (power-law distributed: user_id, product_id, status) produces straggler tasks"
+          - "Spark 3.0+ is available and AQE can be enabled without breaking existing logic"
+          - "Skew is moderate — a few partitions are 5x+ larger than the median but not pathological"
+          - "The job is otherwise correct and the only issue is uneven task duration"
+        avoid_when:
+          - "Skew is so severe (one key holds 90%+ of data) that even splitting the partition does not help"
+          - "AQE is disabled cluster-wide by infrastructure policy"
+          - "The join produces incorrect results when partition splits create cross-partition duplicate key matching — rare but possible with certain join semantics"
+          - "Deterministic physical plans are required for debugging or plan comparison — AQE makes plans runtime-dependent"
+        trade_offs: |
+          AQE's skew join optimization monitors shuffle partition sizes after the map phase.
+          When a partition exceeds skewedPartitionFactor × median AND skewedPartitionThresholdInBytes,
+          AQE automatically splits it into smaller sub-partitions and reads the corresponding
+          portion of the other side multiple times. This turns an O(N) straggler into several
+          O(N/k) tasks with zero code changes. The cost is a small planning overhead per stage
+          as the driver evaluates partition statistics before scheduling the reduce phase.
+        config:
+          spark.sql.adaptive.enabled: "true"
+          spark.sql.adaptive.skewJoin.enabled: "true"
+          spark.sql.adaptive.skewJoin.skewedPartitionFactor: "5"
+          spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes: "268435456"  # 256 MB
+        example_code: |
+          spark = (
+              SparkSession.builder
+              .config('spark.sql.adaptive.enabled', 'true')
+              .config('spark.sql.adaptive.skewJoin.enabled', 'true')
+              .getOrCreate()
+          )
+
+          # No code change needed — AQE handles skew transparently
+          result = events.join(user_profiles, 'user_id')
+          # Verify in Spark UI: look for 'SkewJoin' in the physical plan
+        spark_version: "3.0"
+
+      - id: JOIN-salted
+        name: "Salted Join (Manual Skew Mitigation)"
+        when:
+          - "A small number of keys hold a dominant fraction of rows (e.g. 1 key = 50% of data)"
+          - "AQE skew join is insufficient — the dominant partition is so large it exhausts executor memory even when split"
+          - "Spark version < 3.0 or AQE is disabled"
+          - "The hot keys are known in advance and a salt range can be pre-computed"
+        avoid_when:
+          - "AQE skew join already handles the skew with no code change — prefer AQE"
+          - "The join key distribution is actually uniform — salting adds overhead for no benefit"
+          - "The smaller side of the join cannot be replicated (it is itself very large) — salting requires exploding the build side"
+          - "More than a handful of distinct hot keys — generating salt explodes the build side by salt_factor × hot_key_count"
+        trade_offs: |
+          Salting appends a random integer suffix [0, N) to each key on the probe side, then
+          replicates the build side N times with matching suffixes. This distributes the hot
+          partition across N tasks at the cost of reading the build side N times. Choose N
+          based on the skew ratio: if one partition is 10x the median, N=10 reduces it to
+          near-median size. The approach is effective but manual — it requires schema changes
+          and explicit handling of the salt column in downstream operations.
+        config:
+          spark.sql.adaptive.enabled: "false"  # salting is a manual fallback; typically used when AQE is not available
+        example_code: |
+          from pyspark.sql.functions import col, expr, lit, array, explode
+
+          SALT_FACTOR = 10
+
+          # Probe side: append random salt
+          salted_large = large_df.withColumn(
+              'salted_key',
+              expr(f"concat(cast(user_id as string), '_', cast(floor(rand() * {SALT_FACTOR}) as string))")
+          )
+
+          # Build side: replicate for each salt value
+          salted_small = small_df.withColumn('salt', explode(array([lit(i) for i in range(SALT_FACTOR)]))) \
+              .withColumn('salted_key', expr("concat(cast(user_id as string), '_', cast(salt as string))"))
+
+          result = salted_large.join(salted_small, 'salted_key').drop('salted_key', 'salt')
+        spark_version: "2.0"
+
+      - id: JOIN-nested_loop
+        name: "Broadcast Nested Loop Join"
+        when:
+          - "Non-equi join condition (inequality, range, LIKE, or cross join)"
+          - "One side is very small and the cross product is bounded"
+          - "Cartesian product is intentional (cross join for combinatorics)"
+          - "Theta join with a range condition: e.g. events within a time window of each other"
+        avoid_when:
+          - "Both sides are large — O(N×M) cost makes this catastrophically slow at scale"
+          - "An equi-join can be derived from the condition — always prefer hash or sort-merge"
+          - "The cross product explodes memory: even a 1 M × 1 M cross join produces 1 T rows"
+          - "Accidental cross join from a missing join condition in SQL — verify intent carefully"
+        trade_offs: |
+          Broadcast Nested Loop Join is Spark's last-resort strategy for non-equi conditions.
+          It broadcasts the smaller side and computes every combination of rows to evaluate
+          the condition — O(N×M). For truly small build sides (< thousands of rows) this is
+          acceptable. For any significant dataset size it is almost always a bug. When you
+          see BroadcastNestedLoopJoin in explain() output on a large dataset, treat it as a
+          red flag and revisit the join condition to find an equi-join reformulation.
+        config:
+          spark.sql.crossJoin.enabled: "true"  # required to allow explicit cross joins without error
+        example_code: |
+          from pyspark.sql.functions import col
+
+          # Intentional cross join (small × small)
+          spark.conf.set('spark.sql.crossJoin.enabled', 'true')
+          combinations = dim_a.crossJoin(dim_b)  # only acceptable when both are tiny
+
+          # Range / theta join — non-equi condition forces nested loop
+          result = events.join(
+              windows,
+              (col('event_ts') >= col('window_start')) & (col('event_ts') < col('window_end'))
+          )
+          # Check plan: result.explain() should show BroadcastNestedLoopJoin with small build side
+        spark_version: "2.0"
+
+  # ===========================================================================
+  # 2. PARTITIONING PATTERNS
+  # ===========================================================================
+
+  - id: PARTITIONING
+    name: "Partitioning Patterns"
+    patterns:
+
+      - id: PART-hash
+        name: "Hash Partitioning"
+        when:
+          - "Wide transformations (groupBy, join, distinct) require co-locating rows with the same key"
+          - "Key distribution is reasonably uniform — no dominant key holds a large fraction of rows"
+          - "Default partitioning for shuffle operations; explicit when controlling the partition key"
+          - "Downstream operations will also group or join on the same key — reuse the shuffle"
+        avoid_when:
+          - "Key is highly skewed — all rows for the dominant key land on one partition"
+          - "Sorted output is required — hash partitioning does not guarantee order"
+          - "The number of distinct keys is very small (e.g. boolean column) — produces unbalanced partitions"
+          - "Range partitioning is needed for bucketed writes or ordered range scans"
+        trade_offs: |
+          Hash partitioning maps each row to a partition via hash(key) % numPartitions. It
+          guarantees all rows with the same key are co-located in one partition, which is
+          necessary for correct groupBy/join results. The partition count directly controls
+          parallelism. With AQE enabled, over-partitioned outputs are coalesced automatically.
+          The main weakness is susceptibility to skew: a key that appears in millions of rows
+          produces one oversized partition.
+        config:
+          spark.sql.shuffle.partitions: "200"
+          spark.sql.adaptive.enabled: "true"
+        example_code: |
+          from pyspark.sql.functions import col
+
+          # Explicit hash repartition on a key
+          df_repartitioned = df.repartition(200, col('customer_id'))
+
+          # Hash partitioning is implicit in groupBy and join
+          result = df.groupBy('customer_id').agg({'amount': 'sum'})
+        spark_version: "2.0"
+
+      - id: PART-range
+        name: "Range Partitioning"
+        when:
+          - "Sorted output is required — range partitioning guarantees global sort order"
+          - "Window functions with an OVER (PARTITION BY x ORDER BY y) clause need ordered partitions"
+          - "Writing sorted Parquet/ORC files for range-based predicate pushdown"
+          - "Bucketed writes with sortBy() to enable sort-merge join without the sort phase"
+        avoid_when:
+          - "No ordering requirement — range partitioning samples the dataset first, adding overhead"
+          - "Highly skewed key distribution — range boundaries cluster around the dominant key"
+          - "Very small datasets where the sampling overhead exceeds the benefit"
+          - "Streaming jobs where global sort is ill-defined across micro-batches"
+        trade_offs: |
+          Range partitioning samples the data to compute approximate quantile boundaries, then
+          assigns rows to partitions such that each partition covers a contiguous key range.
+          This guarantees sorted output but requires an extra pass over the data for sampling
+          (default: 20 rows per partition × numPartitions samples). The result is globally
+          sorted partitioned output, which is required for write.sortBy() and certain window
+          function implementations. Skewed key distributions produce unbalanced partitions
+          despite range boundaries; use a composite sort key to spread the sort.
+        config:
+          spark.sql.shuffle.partitions: "200"
+          spark.sql.execution.rangeExchange.sampleSizePerPartition: "100"
+        example_code: |
+          from pyspark.sql.functions import col
+          from pyspark.sql import Window
+
+          # Range partitioning for window functions
+          window_spec = Window.partitionBy('customer_id').orderBy('event_ts')
+          df_with_rank = df.withColumn('row_num', row_number().over(window_spec))
+
+          # Range repartition for sorted writes
+          df.repartitionByRange(100, col('date'), col('user_id')) \
+            .write.mode('overwrite').parquet('s3://bucket/sorted-output/')
+        spark_version: "2.3"
+
+      - id: PART-repartition
+        name: "Explicit Repartition (Increase Parallelism)"
+        when:
+          - "Input has too few partitions for available executor cores — parallelism is under-utilized"
+          - "After a filter that removed most rows, re-partitioning consolidates into sensible partition sizes"
+          - "Pre-join repartition on the join key to reuse the shuffle in subsequent operations on the same key"
+          - "Output files must be a specific count for downstream consumers"
+        avoid_when:
+          - "Data is already well-partitioned and the extra shuffle adds unnecessary overhead"
+          - "Coalesce() would suffice — repartition always triggers a full shuffle even when reducing partition count"
+          - "Using AQE — let AQE determine the optimal post-shuffle count dynamically"
+          - "Very small datasets where partition count does not affect performance"
+        trade_offs: |
+          repartition(N) triggers a full shuffle to redistribute data into exactly N partitions.
+          Unlike coalesce(), it always produces an even distribution across partitions. The
+          cost is one full network shuffle pass. Use repartition() when increasing partition
+          count or when a uniform distribution is required. When only reducing partition count
+          (e.g. before writing), prefer coalesce() to avoid the full shuffle. With AQE,
+          manual repartition() before aggregations is often unnecessary — AQE coalesces
+          post-shuffle partitions based on actual data sizes.
+        config:
+          spark.sql.shuffle.partitions: "200"
+          spark.sql.adaptive.enabled: "true"
+        example_code: |
+          from pyspark.sql.functions import col
+
+          # Increase parallelism: default 200 partitions is too few for 10 TB dataset
+          df_large = df_large.repartition(2000)
+
+          # Pre-join repartition on the join key to reuse shuffle
+          df_a = df_a.repartition(200, col('order_id'))
+          df_b = df_b.repartition(200, col('order_id'))
+          result = df_a.join(df_b, 'order_id')  # no additional shuffle needed
+        spark_version: "2.0"
+
+      - id: PART-coalesce
+        name: "Coalesce (Reduce Partitions Without Full Shuffle)"
+        when:
+          - "Partition count must be reduced before writing to avoid excessive small output files"
+          - "After a heavy filter that left many near-empty partitions"
+          - "Cost of full shuffle (repartition) is not justified — only need to merge, not redistribute"
+          - "Final output step where downstream consumer expects a fixed file count"
+        avoid_when:
+          - "Data distribution must be uniform across the reduced partitions — coalesce merges adjacent partitions, not uniform spread"
+          - "Increasing partition count — coalesce cannot increase partitions (use repartition)"
+          - "Coalesce before a shuffle operation — the upstream shuffle will re-partition anyway"
+          - "The skew in upstream partitions must be corrected — coalesce preserves skew"
+        trade_offs: |
+          coalesce(N) merges adjacent partitions on the same executor without a full shuffle,
+          making it much cheaper than repartition() for reducing partition count. The cost is
+          that merged partitions may be uneven in size — if upstream partitions vary in row count,
+          the merged output will too. This is usually acceptable for write operations where
+          file count matters more than exact size uniformity. AQE's post-shuffle coalescing
+          in Spark 3.x is generally preferable — it automatically determines the optimal count
+          based on actual partition sizes.
+        config:
+          spark.sql.adaptive.coalescePartitions.enabled: "true"
+          spark.sql.adaptive.advisoryPartitionSizeInBytes: "134217728"  # 128 MB
+        example_code: |
+          # Reduce output file count before writing (no shuffle)
+          result.coalesce(10).write.mode('overwrite').parquet('s3://bucket/output/')
+
+          # AQE automatic coalescing (preferred in Spark 3.x):
+          spark.conf.set('spark.sql.adaptive.enabled', 'true')
+          spark.conf.set('spark.sql.adaptive.coalescePartitions.enabled', 'true')
+          # No explicit coalesce needed — AQE determines optimal count at runtime
+          result.write.mode('overwrite').parquet('s3://bucket/output/')
+        spark_version: "2.0"
+
+      - id: PART-aqe_coalescing
+        name: "AQE Automatic Post-Shuffle Coalescing"
+        when:
+          - "Spark 3.0+ is available and adaptive query execution can be enabled"
+          - "spark.sql.shuffle.partitions is set to a large number (200+) as a safe upper bound"
+          - "Actual data size per partition varies widely across different jobs or query runs"
+          - "Manual tuning of shuffle.partitions is burdensome across a diverse workload"
+        avoid_when:
+          - "Deterministic physical plans are required — AQE changes the plan at runtime"
+          - "spark.sql.shuffle.partitions is already tuned precisely for the workload"
+          - "AQE overhead is measurable for very fast queries (< 1 second) where planning time dominates"
+          - "Downstream operations depend on a fixed partition count (e.g. bucketed writes)"
+        trade_offs: |
+          AQE coalescing reads actual shuffle partition byte sizes after the map phase
+          completes, then coalesces adjacent small partitions to reach the advisoryPartitionSizeInBytes
+          target. This eliminates the need to manually tune spark.sql.shuffle.partitions per job.
+          Set shuffle.partitions to a high safe upper bound (e.g. 1000) and let AQE coalesce
+          down to the optimal count. The small overhead is per-stage statistics collection;
+          for long-running jobs this is negligible. The only trade-off is plan non-determinism,
+          which complicates physical plan comparison across runs.
+        config:
+          spark.sql.adaptive.enabled: "true"
+          spark.sql.adaptive.coalescePartitions.enabled: "true"
+          spark.sql.adaptive.advisoryPartitionSizeInBytes: "134217728"  # 128 MB
+          spark.sql.shuffle.partitions: "1000"
+        example_code: |
+          spark = (
+              SparkSession.builder
+              .config('spark.sql.adaptive.enabled', 'true')
+              .config('spark.sql.adaptive.coalescePartitions.enabled', 'true')
+              .config('spark.sql.adaptive.advisoryPartitionSizeInBytes', 134217728)
+              .config('spark.sql.shuffle.partitions', 1000)
+              .getOrCreate()
+          )
+          # AQE decides the actual post-shuffle partition count at runtime
+          result = df.groupBy('region', 'product').agg({'revenue': 'sum'})
+        spark_version: "3.0"
+
+      - id: PART-custom
+        name: "Custom Partitioner (RDD API)"
+        when:
+          - "Domain-specific partitioning logic that hash or range cannot express (e.g. geo-tiling, tenant routing)"
+          - "RDD API is being used and data must be co-located by a composite or derived key"
+          - "Partitioning must align with an external system's sharding scheme"
+          - "Legacy code that cannot be rewritten to use DataFrame API"
+        avoid_when:
+          - "DataFrame / Dataset API is available — use repartition(N, col) instead, Catalyst can optimize it"
+          - "The custom logic is actually hash or range — use the built-in partitioners"
+          - "Tier 1 static analysis is in scope — custom partitioners are opaque to the linter"
+          - "The partitioner is stateful or depends on external data that changes between jobs"
+        trade_offs: |
+          Custom partitioners give full control over which partition a row is assigned to.
+          They are only available in the RDD API; DataFrame operations always use Spark's
+          built-in hash or range partitioners. The main risk is correctness: a buggy custom
+          partitioner can silently produce wrong results for joins and groupBys. Performance
+          is also a concern — a poorly balanced custom partitioner produces skewed partitions
+          that Spark cannot rebalance automatically.
+        config: null
+        example_code: |
+          from pyspark import Partitioner
+
+          class GeoPartitioner(Partitioner):
+              def __init__(self, num_partitions):
+                  self._num_partitions = num_partitions
+
+              def numPartitions(self):
+                  return self._num_partitions
+
+              def getPartition(self, key):
+                  # Route by geographic region tile
+                  region_id, tile = key
+                  return (region_id * 1000 + tile) % self._num_partitions
+
+          rdd_partitioned = rdd.partitionBy(200, GeoPartitioner(200))
+        spark_version: "1.0"
+
+      - id: PART-bucketing
+        name: "Bucketing (Write-Time Pre-Partitioning)"
+        when:
+          - "Tables are written once and joined repeatedly on the same key — amortise the shuffle cost"
+          - "The join key has high cardinality and the join is performance-critical"
+          - "Both sides of the join can be written with the same bucket count and key"
+          - "The table is managed by Spark (saveAsTable) or a Hive-compatible metastore"
+        avoid_when:
+          - "Tables are updated incrementally — appending to a bucketed table requires re-bucketing the full table"
+          - "Bucket count was not chosen based on data size — too many small buckets cause excessive file overhead"
+          - "Using external formats (raw Parquet files) that do not record bucket metadata in a metastore"
+          - "The join key changes across different consumers of the same table"
+        trade_offs: |
+          Bucketing pre-shuffles and sorts data at write time, recording the bucketing metadata
+          in the Hive metastore. Spark reads this metadata and skips the shuffle stage for
+          subsequent joins and groupBys on the bucket key. The one-time write cost is repaid
+          on every subsequent read. Critical constraint: both tables must have the exact same
+          bucket count to skip the shuffle — mismatched counts force a full re-shuffle at read
+          time. Choose bucket count as a multiple of executor cores × parallelism target, and
+          aim for 100–200 MB per bucket file.
+        config:
+          spark.sql.sources.bucketing.enabled: "true"
+          spark.sql.sources.bucketing.maxBuckets: "100000"
+        example_code: |
+          # Write with bucketing (one-time cost)
+          df.write \
+            .bucketBy(64, 'customer_id') \
+            .sortBy('customer_id') \
+            .mode('overwrite') \
+            .saveAsTable('orders_bucketed')
+
+          # Read: join skips shuffle when both sides have matching buckets
+          orders = spark.table('orders_bucketed')
+          returns = spark.table('returns_bucketed')  # also 64 buckets on customer_id
+          result = orders.join(returns, 'customer_id')
+          # Verify: result.explain() should NOT show an Exchange node
+        spark_version: "2.0"
+
+  # ===========================================================================
+  # 3. CACHING PATTERNS
+  # ===========================================================================
+
+  - id: CACHING
+    name: "Caching and Persistence Patterns"
+    patterns:
+
+      - id: CACHE-memory_only
+        name: "MEMORY_ONLY (Default Cache)"
+        when:
+          - "The DataFrame fits entirely in executor heap memory and is accessed 2+ times in the same job"
+          - "Recomputation is expensive (multi-stage upstream pipeline) and memory is plentiful"
+          - "The cached data is accessed repeatedly within a short time window (same Spark application)"
+          - "Data consists of columnar numeric data — JVM heap stores it efficiently"
+        avoid_when:
+          - "The DataFrame is larger than available executor heap — cache eviction causes re-computation cascades"
+          - "The DataFrame is accessed only once — caching adds serialisation overhead with no benefit"
+          - "Strings or complex objects dominate — JVM heap stores these inefficiently; consider OFF_HEAP"
+          - "The pipeline is a single linear chain with no branching — no re-use means no cache benefit"
+        trade_offs: |
+          MEMORY_ONLY stores deserialized Java objects directly in executor heap. It provides
+          the fastest access (no deserialization overhead) but consumes the most memory. When
+          the cached data does not fit, Spark evicts partitions using LRU — evicted partitions
+          are recomputed from scratch on next access, potentially causing a cascade of upstream
+          recomputation. Use StorageLevel.MEMORY_ONLY_SER to trade access speed for 2–5x
+          memory reduction via serialization.
+        config:
+          spark.memory.fraction: "0.6"
+          spark.memory.storageFraction: "0.5"
+        example_code: |
+          from pyspark import StorageLevel
+
+          # Default cache — MEMORY_ONLY deserialized
+          df_hot = df.filter('event_type = "purchase"').join(products, 'product_id')
+          df_hot.cache()  # equivalent to persist(StorageLevel.MEMORY_ONLY)
+          df_hot.count()  # trigger materialization
+
+          # Serialized variant — less memory, slightly slower access
+          df_hot.persist(StorageLevel.MEMORY_ONLY_SER)
+        spark_version: "1.0"
+
+      - id: CACHE-memory_and_disk
+        name: "MEMORY_AND_DISK"
+        when:
+          - "The DataFrame may not fully fit in memory but eviction would cause expensive recomputation"
+          - "Iterative algorithms (ML training loops) where all partitions must be accessed each iteration"
+          - "Checkpointing-equivalent behaviour without truncating lineage — keep data available across iterations"
+          - "The recomputation cost exceeds the disk I/O cost of reading spilled partitions"
+        avoid_when:
+          - "Disk I/O is slower than recomputation (e.g. data is read from local SSD and transformation is cheap)"
+          - "Local disk space is limited — spilling large datasets can fill executor disk and crash the node"
+          - "Data access pattern is sequential — streaming reads are not accelerated by caching"
+          - "The pipeline branches only once — a single reuse rarely justifies disk spill"
+        trade_offs: |
+          MEMORY_AND_DISK stores partitions in memory first; when memory is full, it spills
+          overflow partitions to executor local disk. Evicted partitions are read back from
+          disk rather than recomputed from the source. Disk read is typically 10–100x slower
+          than memory read but far cheaper than recomputing a multi-stage pipeline. For
+          iterative ML algorithms where all partitions are accessed each iteration, this
+          level prevents re-reading from object storage on every iteration.
+        config:
+          spark.memory.fraction: "0.6"
+          spark.local.dir: "/mnt/fast-disk/spark-tmp"
+        example_code: |
+          from pyspark import StorageLevel
+
+          # Persist for iterative ML — survives memory pressure
+          training_data = df.select(features).persist(StorageLevel.MEMORY_AND_DISK)
+          training_data.count()  # force materialization before training loop
+
+          for epoch in range(num_epochs):
+              model = train_step(training_data, model)  # reads from memory or disk
+
+          training_data.unpersist()
+        spark_version: "1.0"
+
+      - id: CACHE-disk_only
+        name: "DISK_ONLY"
+        when:
+          - "Executor heap is severely constrained and MEMORY_AND_DISK still causes GC pressure"
+          - "Data is accessed infrequently but recomputation is extremely expensive"
+          - "Large intermediate results that must survive executor memory pressure in long-running jobs"
+          - "Off-heap memory is not available and GC pauses from heap-resident cache are unacceptable"
+        avoid_when:
+          - "Fast local disk is not available — network-mounted disk makes DISK_ONLY slower than recomputation"
+          - "The DataFrame is accessed frequently — disk I/O latency dominates total access time"
+          - "The DataFrame fits comfortably in memory — DISK_ONLY wastes the available memory"
+          - "You need deserialized access speed — DISK_ONLY always serializes to disk"
+        trade_offs: |
+          DISK_ONLY serializes all partitions to executor local disk, using no executor heap
+          for storage. This eliminates GC pressure from cached data entirely. The cost is
+          serialization/deserialization overhead on every read (typically 10–50x slower than
+          MEMORY_ONLY). Useful when memory is exhausted and GC pauses from large on-heap caches
+          degrade performance more than disk I/O would. Requires fast local disk — NVMe or SSD.
+        config:
+          spark.local.dir: "/mnt/fast-disk/spark-tmp"
+        example_code: |
+          from pyspark import StorageLevel
+
+          # When executor heap is too small for in-memory cache
+          large_reference = spark.read.parquet('s3://bucket/large-reference/') \
+              .persist(StorageLevel.DISK_ONLY)
+          large_reference.count()  # force materialization to disk
+
+          result = events.join(large_reference, 'key')
+        spark_version: "1.0"
+
+      - id: CACHE-off_heap
+        name: "OFF_HEAP (Tungsten Off-Heap Storage)"
+        when:
+          - "Large caches are causing JVM GC pauses (full GC > 1 second observed in Spark UI)"
+          - "Executor heap is large (> 16 GB) and long GC stop-the-world events are degrading performance"
+          - "The cluster uses G1GC or ZGC but cache data still shows high GC overhead"
+          - "Tungsten off-heap is available and spark.memory.offHeap.enabled is permitted by cluster policy"
+        avoid_when:
+          - "Off-heap memory is not configured — requires explicit spark.memory.offHeap.size > 0"
+          - "The workload does not produce GC pressure — off-heap adds configuration complexity for no gain"
+          - "Native memory is already under pressure — off-heap competes with OS page cache and executor native libs"
+          - "Debugging memory issues — off-heap allocations are harder to profile than heap objects"
+        trade_offs: |
+          OFF_HEAP stores cached data in native memory outside the JVM heap using Unsafe
+          allocation, eliminating GC pressure for cached objects. Access speed is comparable
+          to MEMORY_ONLY_SER (binary serialized format) since Tungsten's binary format avoids
+          Java object overhead. The configuration requires setting both offHeap.enabled=true
+          and offHeap.size to the amount of off-heap memory per executor. Off-heap memory
+          is not released automatically on eviction — Spark manages it explicitly.
+        config:
+          spark.memory.offHeap.enabled: "true"
+          spark.memory.offHeap.size: "10737418240"  # 10 GB per executor
+        example_code: |
+          from pyspark import StorageLevel
+
+          spark = (
+              SparkSession.builder
+              .config('spark.memory.offHeap.enabled', 'true')
+              .config('spark.memory.offHeap.size', 10737418240)  # 10 GB
+              .getOrCreate()
+          )
+
+          df_cached = df.persist(StorageLevel.OFF_HEAP)
+          df_cached.count()
+        spark_version: "2.0"
+
+      - id: CACHE-checkpoint
+        name: "Checkpoint (Lineage Truncation)"
+        when:
+          - "Lineage graph has grown so deep it causes StackOverflowError or slow plan analysis"
+          - "Iterative algorithms (GraphX, MLlib) where each iteration appends to the lineage"
+          - "Fault tolerance is critical — checkpointed data survives executor failure without re-running the full lineage"
+          - "The lineage includes sources that may not be re-readable (streaming, transient data)"
+        avoid_when:
+          - "The lineage is short — checkpoint overhead (two-pass write and read) is not justified"
+          - "The checkpoint directory is on slow storage — checkpoint write dominates the job"
+          - "Single-pass jobs where fault recovery is not required — cache() is cheaper"
+          - "Structured Streaming checkpoints — use StreamingQuery checkpointLocation instead"
+        trade_offs: |
+          checkpoint() writes the DataFrame to a reliable distributed file system (HDFS, S3,
+          GCS) and severs the lineage. Unlike cache(), the stored data persists beyond the
+          Spark application and survives executor failures. The cost is a full write pass to
+          external storage followed by a re-read on next access — typically 2–5x the latency
+          of a cache() hit. localCheckpoint() writes to executor local disk and is faster
+          but provides no fault tolerance. Always call df.count() or an action after
+          checkpoint() to force materialization before the lineage is needed again.
+        config:
+          spark.checkpoint.compress: "true"
+        example_code: |
+          sc = spark.sparkContext
+          sc.setCheckpointDir('s3://bucket/checkpoints/')
+
+          # In iterative algorithms — checkpoint every N iterations to truncate lineage
+          for i in range(num_iterations):
+              df = iterate(df)
+              if i % 10 == 0:
+                  df = df.checkpoint()  # write to S3, truncate lineage
+                  df.count()  # force materialization
+
+          # Local checkpoint (faster, no fault tolerance):
+          df = df.localCheckpoint()
+        spark_version: "2.1"
+
+  # ===========================================================================
+  # 4. FILE FORMAT PATTERNS
+  # ===========================================================================
+
+  - id: FILE_FORMAT
+    name: "File Format Patterns"
+    patterns:
+
+      - id: FMT-parquet
+        name: "Parquet"
+        when:
+          - "Analytical workloads that read a subset of columns — columnar format enables column pruning"
+          - "Large datasets with repetitive values — dictionary and run-length encoding compress well"
+          - "Spark, Presto, Athena, BigQuery, or Hive reads — Parquet is universally supported"
+          - "Schema is relatively stable — Parquet supports schema evolution for additive changes"
+        avoid_when:
+          - "Row-level access patterns dominate — columnar I/O requires reading entire row groups for single-row lookups"
+          - "Very small datasets (< 1 MB) — Parquet file overhead is disproportionate"
+          - "Frequent append-only row-level writes without a table format layer (Delta/Iceberg) — compaction needed"
+          - "External systems require CSV or JSON for data exchange"
+        trade_offs: |
+          Parquet is the standard columnar format for analytical Spark workloads. It provides
+          column pruning (skip columns not in the query), predicate pushdown (skip row groups
+          via min/max statistics), and excellent compression ratios via dictionary encoding and
+          Snappy/Zstd compression. Row groups (default 128 MB) are the unit of skipping.
+          Read performance degrades for narrow queries on very wide tables if row group size
+          is too large. For write-heavy, frequently-updated tables, use Delta Lake or Iceberg
+          on top of Parquet to add ACID semantics and efficient compaction.
+        config:
+          spark.sql.parquet.compression.codec: "snappy"
+          spark.sql.parquet.filterPushdown: "true"
+          spark.sql.parquet.mergeSchema: "false"
+        example_code: |
+          # Write Parquet with Snappy compression (default for most clusters)
+          df.write \
+            .mode('overwrite') \
+            .option('compression', 'snappy') \
+            .parquet('s3://bucket/data/events/')
+
+          # Read with column pruning and predicate pushdown (automatic)
+          result = spark.read.parquet('s3://bucket/data/events/') \
+              .filter('event_date >= "2024-01-01"') \
+              .select('user_id', 'amount')
+          # Spark skips row groups where event_date is outside the range
+        spark_version: "1.4"
+
+      - id: FMT-orc
+        name: "ORC (Optimized Row Columnar)"
+        when:
+          - "Hive ecosystem is the primary consumer — ORC is the native Hive format"
+          - "ACID table updates via Hive or Spark + Hive are required"
+          - "Bloom filter pushdown is needed for high-cardinality key lookups (ORC bloom filters are more mature than Parquet's)"
+          - "The cluster uses the Hive metastore and ORC tables are already the standard"
+        avoid_when:
+          - "Spark-only workloads without Hive dependency — Parquet is better supported and more widely compatible"
+          - "Multi-engine access (Presto + Spark + Athena) — Parquet has broader tooling support"
+          - "Schema evolution with complex type changes — ORC schema evolution is more restrictive than Parquet"
+          - "Python-heavy tooling — pandas, PyArrow, and Dask have better Parquet support than ORC"
+        trade_offs: |
+          ORC is Hive's native columnar format, offering similar compression and predicate
+          pushdown to Parquet. ORC supports ACID transactions natively (insert, update, delete)
+          at the Hive level, which Parquet alone cannot. ORC stores indexes at the stripe level
+          (default 64 MB) rather than row groups, and supports bloom filters for hash-join
+          style lookups. Spark's ORC support is mature but Parquet remains the default for
+          Spark-native workloads. Choose ORC primarily for Hive compatibility.
+        config:
+          spark.sql.orc.filterPushdown: "true"
+          spark.sql.orc.splits.include.file.footer: "true"
+        example_code: |
+          # Write ORC (Hive-compatible)
+          df.write \
+            .mode('overwrite') \
+            .option('compression', 'zlib') \
+            .orc('s3://bucket/hive-warehouse/events/')
+
+          # Read with predicate pushdown
+          result = spark.read.orc('s3://bucket/hive-warehouse/events/') \
+              .filter('region = "US"') \
+              .select('user_id', 'revenue')
+        spark_version: "1.4"
+
+      - id: FMT-delta
+        name: "Delta Lake"
+        when:
+          - "ACID transactions are required — concurrent reads and writes without corruption"
+          - "The table receives frequent updates, deletes, or upserts (MERGE INTO)"
+          - "Time travel / audit history is needed (query data as of a previous version)"
+          - "Schema enforcement and evolution with automatic backfill of null columns"
+          - "Z-ordering for multi-dimensional data skipping on high-cardinality columns"
+        avoid_when:
+          - "The cluster does not have the Delta Lake library installed"
+          - "Multi-engine reads from non-Delta-aware engines (legacy Hive without Delta connector)"
+          - "Append-only workloads on static data — plain Parquet is simpler and equally fast"
+          - "Very small tables (< 100 MB) — Delta transaction log overhead is disproportionate"
+        trade_offs: |
+          Delta Lake adds a transaction log (_delta_log) on top of Parquet files, providing
+          ACID semantics, optimistic concurrency control, and schema enforcement. Reads always
+          see a consistent snapshot. MERGE INTO (upsert) enables CDC-style pipelines. The
+          transaction log adds small write overhead and requires periodic VACUUM to remove
+          old files. OPTIMIZE + ZORDER improves read performance for multi-column filter
+          patterns by co-locating similar values. Delta is the de-facto table format for
+          Databricks and has strong open-source support via the Delta Spark connector.
+        config:
+          spark.databricks.delta.optimizeWrite.enabled: "true"
+          spark.databricks.delta.autoCompact.enabled: "true"
+          spark.sql.extensions: "io.delta.sql.DeltaSparkSessionExtension"
+          spark.sql.catalog.spark_catalog: "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        example_code: |
+          # Write Delta table
+          df.write \
+            .format('delta') \
+            .mode('overwrite') \
+            .save('s3://bucket/delta/events/')
+
+          # MERGE INTO (upsert)
+          from delta.tables import DeltaTable
+          delta_table = DeltaTable.forPath(spark, 's3://bucket/delta/events/')
+          delta_table.alias('target').merge(
+              updates_df.alias('source'),
+              'target.id = source.id'
+          ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+
+          # Time travel
+          df_yesterday = spark.read.format('delta') \
+              .option('versionAsOf', 5) \
+              .load('s3://bucket/delta/events/')
+        spark_version: "3.0"
+
+      - id: FMT-iceberg
+        name: "Apache Iceberg"
+        when:
+          - "Multi-engine access is required — Spark, Trino, Flink, Hive, and Snowflake all read Iceberg natively"
+          - "Row-level deletes and updates with full ACID guarantees across engines"
+          - "Hidden partitioning — partition evolution without rewriting data or query changes"
+          - "Metadata-based data skipping via column statistics at the manifest level"
+          - "The organisation has a multi-lakehouse strategy and vendor neutrality is important"
+        avoid_when:
+          - "Databricks-only stack — Delta Lake has deeper Databricks integration"
+          - "Simple append-only Spark workloads — Iceberg overhead is not justified"
+          - "The Iceberg Spark catalog is not configured — setup is more involved than Delta"
+          - "Very frequent small writes — Iceberg manifest overhead accumulates without compaction"
+        trade_offs: |
+          Iceberg provides similar ACID semantics to Delta Lake but with broader engine
+          compatibility. Its key differentiators are hidden partitioning (partition by
+          transform functions like bucket() or truncate() without exposing the partition
+          column in queries), partition evolution (change the partition scheme without
+          rewriting data), and metadata tables for inspecting snapshot history. Iceberg
+          uses a tree of manifest files for metadata, which scales better than Delta's
+          single transaction log for very large tables (billions of files). The trade-off
+          is higher setup complexity and slightly less mature tooling than Delta.
+        config:
+          spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+          spark.sql.catalog.spark_catalog: "org.apache.iceberg.spark.SparkSessionCatalog"
+          spark.sql.catalog.spark_catalog.type: "hive"
+        example_code: |
+          # Create Iceberg table
+          spark.sql("""
+            CREATE TABLE catalog.db.events (
+              id BIGINT, user_id BIGINT, event_ts TIMESTAMP, amount DOUBLE
+            ) USING iceberg
+            PARTITIONED BY (days(event_ts))
+          """)
+
+          # Write
+          df.writeTo('catalog.db.events').append()
+
+          # Time travel
+          spark.read.option('snapshot-id', 12345678).table('catalog.db.events')
+        spark_version: "3.0"
+
+      - id: FMT-avro
+        name: "Avro"
+        when:
+          - "Kafka-based streaming pipelines — Avro with Schema Registry is the Kafka default"
+          - "Row-level access patterns where entire records are read (not column subsets)"
+          - "Schema evolution with full backward and forward compatibility guarantees"
+          - "RPC / service communication where schemas must be shared at runtime via registry"
+        avoid_when:
+          - "Analytical queries that read only a few columns — Avro has no column pruning"
+          - "Large-scale batch analytics — columnar formats (Parquet, ORC) are 5–20x faster for analytical scans"
+          - "No schema registry is available — Avro without a registry loses the schema evolution benefit"
+          - "Spark batch workloads without Kafka integration — Parquet is simpler and faster"
+        trade_offs: |
+          Avro is a row-oriented binary format with self-describing schemas stored separately
+          in a Schema Registry or in file headers. Its primary strengths are compact binary
+          row encoding, full schema evolution (add/remove fields with defaults), and deep
+          Kafka integration. For batch analytical workloads, Avro is outperformed by columnar
+          formats because every query must read all fields even when only a few are needed.
+          Use Avro at the Kafka ingestion boundary and convert to Parquet or Delta for
+          downstream analytics.
+        config:
+          spark.sql.avro.compression.codec: "snappy"
+        example_code: |
+          # Read from Kafka (Avro-encoded with Schema Registry)
+          from pyspark.sql.avro.functions import from_avro
+
+          df_raw = spark.readStream \
+              .format('kafka') \
+              .option('kafka.bootstrap.servers', 'broker:9092') \
+              .option('subscribe', 'events') \
+              .load()
+
+          schema_str = open('event_schema.avsc').read()
+          df_parsed = df_raw.select(from_avro(col('value'), schema_str).alias('data')) \
+              .select('data.*')
+
+          # Write landing zone as Avro, then convert to Parquet for analytics
+          df_parsed.write.format('avro').mode('append').save('s3://bucket/landing/avro/')
+        spark_version: "2.4"
+
+      - id: FMT-csv_json
+        name: "CSV / JSON (Ingestion Boundary Only)"
+        when:
+          - "Data arrives from external systems that produce CSV or JSON and cannot be changed"
+          - "Ingestion boundary where the raw format must be preserved for auditability"
+          - "Small lookup tables (< 10 MB) where format performance is irrelevant"
+          - "Ad-hoc data exchange with non-Spark systems that cannot read Parquet"
+        avoid_when:
+          - "Any analytical workload that will be repeated — convert to Parquet or Delta immediately after ingestion"
+          - "Large datasets (> 1 GB) queried repeatedly — 5–20x slower than Parquet for analytical queries"
+          - "Schema needs to be enforced — inferSchema=true is slow and produces fragile type detection"
+          - "Predicate pushdown is needed — row-based text formats have no statistics or column skipping"
+        trade_offs: |
+          CSV and JSON are row-oriented text formats designed for data exchange, not analytical
+          performance. They offer maximum compatibility (any system can produce them) at the
+          cost of no column pruning, no predicate pushdown, no statistics, and poor compression
+          ratios compared to binary formats. For recurring analytical queries, the pattern is
+          always: land as CSV/JSON, convert once to Parquet/Delta, delete the original.
+          If CSV/JSON must be queried directly, always provide an explicit schema (never
+          inferSchema=true) to avoid the double-pass inference scan.
+        config:
+          spark.sql.csv.filterPushdown.enabled: "true"
+        example_code: |
+          from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType
+
+          # Always use explicit schema — never inferSchema=True
+          schema = StructType([
+              StructField('user_id', LongType()),
+              StructField('event_type', StringType()),
+              StructField('amount', DoubleType()),
+          ])
+
+          # Read at ingestion boundary
+          raw = spark.read.schema(schema).csv('s3://bucket/landing/events.csv')
+
+          # Convert immediately to columnar format for all downstream queries
+          raw.write.mode('overwrite').option('compression', 'snappy') \
+              .parquet('s3://bucket/processed/events/')
+        spark_version: "2.0"
+
+  # ===========================================================================
+  # 5. AGGREGATION PATTERNS
+  # ===========================================================================
+
+  - id: AGGREGATION
+    name: "Aggregation Patterns"
+    patterns:
+
+      - id: AGG-reduce_by_key
+        name: "reduceByKey (RDD API)"
+        when:
+          - "Using the RDD API and the aggregation function is commutative and associative"
+          - "Map-side partial combination is needed to reduce shuffle data before grouping"
+          - "Simple sum, count, min, max aggregations where the combine function matches the merge function"
+          - "Legacy RDD code where migrating to DataFrame API is not immediately feasible"
+        avoid_when:
+          - "The DataFrame / Dataset API is available — use groupBy().agg() which Catalyst can optimise"
+          - "The aggregation function is not associative — partial combination produces wrong results"
+          - "You need to access the entire group at once (e.g. collect the list) — use groupByKey + mapValues"
+          - "The key space is small (< 100 distinct keys) — groupByKey may be simpler and equally fast"
+        trade_offs: |
+          reduceByKey performs partial aggregation (combine) on the map side before shuffling,
+          reducing the amount of data sent over the network. It is strictly more efficient than
+          groupByKey followed by reduce for associative operations. The trade-off is that the
+          combine and merge functions must produce values of the same type. For non-associative
+          aggregations (e.g. average), use aggregateByKey or combineByKey.
+        config:
+          spark.reducer.maxSizeInFlight: "48m"
+          spark.shuffle.compress: "true"
+        example_code: |
+          # Map-side partial combination before shuffle
+          word_counts = text_rdd \
+              .flatMap(lambda line: line.split()) \
+              .map(lambda word: (word, 1)) \
+              .reduceByKey(lambda a, b: a + b)  # combines on map side, then merges
+
+          # Compare to groupByKey (no map-side combine — sends all values):
+          # word_counts = text_rdd.flatMap(...).map(...).groupByKey().mapValues(sum)
+        spark_version: "1.0"
+
+      - id: AGG-aggregate_by_key
+        name: "aggregateByKey (RDD API — Non-Homogeneous Accumulator)"
+        when:
+          - "The accumulator type differs from the value type (e.g. summing integers into a running tuple)"
+          - "You need a zero value (identity element) for the accumulator that differs from the value"
+          - "Both a sequence function (value → accumulator) and a combine function (accumulator + accumulator) are needed"
+          - "Computing statistics like average, variance, or histogram where partial results have a different shape"
+        avoid_when:
+          - "The accumulator type equals the value type and the function is associative — use reduceByKey instead"
+          - "DataFrame API is available — use groupBy().agg(avg(), stddev()) which Catalyst optimises"
+          - "The partition-level accumulator grows unbounded — prefer a combineByKey pattern with bounded accumulators"
+          - "Code clarity is more important than performance — aggregateByKey requires understanding three functions"
+        trade_offs: |
+          aggregateByKey provides maximum flexibility for RDD aggregations with different
+          accumulator types. It takes a zero value (initial accumulator), a sequence function
+          (incorporates a value into the accumulator), and a combine function (merges two
+          accumulators). Like reduceByKey, it performs map-side partial aggregation, reducing
+          shuffle data. The added flexibility comes at the cost of more complex code — three
+          functions must be defined correctly. For DataFrame workloads, Catalyst handles all
+          of this automatically via groupBy().agg().
+        config:
+          spark.reducer.maxSizeInFlight: "48m"
+        example_code: |
+          # Compute average with a (sum, count) accumulator
+          zero_value = (0.0, 0)  # (sum, count)
+
+          def seq_func(acc, value):
+              return (acc[0] + value, acc[1] + 1)
+
+          def comb_func(acc1, acc2):
+              return (acc1[0] + acc2[0], acc1[1] + acc2[1])
+
+          avg_by_key = rdd.aggregateByKey(zero_value, seq_func, comb_func) \
+              .mapValues(lambda x: x[0] / x[1])
+        spark_version: "1.0"
+
+      - id: AGG-combine_by_key
+        name: "combineByKey (RDD API — Full Control)"
+        when:
+          - "Full control over map-side combine logic is needed with a custom create function"
+          - "The first value for a key must be handled differently from subsequent values"
+          - "Implementing custom online statistics (e.g. Welford's algorithm for variance)"
+          - "Building per-key data structures (sorted lists, heaps) where the zero value depends on the first element"
+        avoid_when:
+          - "aggregateByKey covers the use case — combineByKey is strictly more general but also more complex"
+          - "DataFrame API is available — always prefer groupBy().agg() for readability and optimisation"
+          - "The custom combiner per-key creates large objects — watch for GC pressure from millions of distinct keys"
+          - "The partition-level combine operation is stateful across calls — Spark does not guarantee call order"
+        trade_offs: |
+          combineByKey is the most general RDD aggregation primitive — reduceByKey and
+          aggregateByKey are implemented on top of it. It takes three functions: createCombiner
+          (initializes the accumulator for the first value of a key in a partition),
+          mergeValue (combines a value into an existing accumulator), and mergeCombiners
+          (merges two accumulators from different partitions). This allows the first-value
+          treatment to differ from subsequent values, enabling patterns impossible with the
+          other operators. Use sparingly — the complexity rarely justifies itself when
+          DataFrame API is available.
+        config: null
+        example_code: |
+          # Build a top-3 list per key using a heap combiner
+          import heapq
+
+          def create_combiner(value):
+              return [value]  # first value initialises the list
+
+          def merge_value(combiner, value):
+              heapq.heappush(combiner, value)
+              return combiner[:3]  # keep top 3
+
+          def merge_combiners(c1, c2):
+              merged = c1 + c2
+              merged.sort(reverse=True)
+              return merged[:3]
+
+          top3_by_key = rdd.combineByKey(create_combiner, merge_value, merge_combiners)
+        spark_version: "1.0"
+
+      - id: AGG-two_phase
+        name: "Two-Phase Aggregation (Partial + Final)"
+        when:
+          - "COUNT DISTINCT or approximate aggregations on a highly skewed key produce straggler tasks"
+          - "A single groupBy produces one oversized partition per dominant key"
+          - "The aggregation function supports partial computation (sum, count, min, max)"
+          - "AQE skew handling is insufficient for the aggregation skew"
+        avoid_when:
+          - "AQE and Spark's built-in adaptive aggregation already handle the skew"
+          - "The two-phase logic complicates the code beyond the performance gain"
+          - "The aggregation function is not decomposable (e.g. exact median requires all values)"
+          - "The dataset is small enough that a single phase is fast regardless of skew"
+        trade_offs: |
+          Two-phase aggregation adds a random salt to the key in phase 1, producing N partial
+          aggregates per original key spread across N tasks. Phase 2 removes the salt and
+          applies a final aggregation over the partial results. This distributes the work of
+          aggregating a dominant key across N tasks instead of one. The trade-off is an extra
+          shuffle stage and increased total work (the second aggregation). For COUNT DISTINCT
+          on skewed keys, use approx_count_distinct() which avoids two-phase overhead entirely.
+        config:
+          spark.sql.adaptive.enabled: "true"
+          spark.sql.adaptive.skewJoin.enabled: "true"
+        example_code: |
+          from pyspark.sql.functions import col, count, floor, rand, lit
+
+          SALT_FACTOR = 10
+
+          # Phase 1: add salt, partial aggregation
+          phase1 = df \
+              .withColumn('salt', (rand() * SALT_FACTOR).cast('int')) \
+              .withColumn('salted_key', col('key').cast('string').concat(lit('_')).concat(col('salt').cast('string'))) \
+              .groupBy('salted_key', 'key') \
+              .agg(count('*').alias('partial_count'))
+
+          # Phase 2: remove salt, final aggregation
+          result = phase1.groupBy('key').agg({'partial_count': 'sum'})
+        spark_version: "2.0"
+
+      - id: AGG-map_side_pre_agg
+        name: "Map-Side Pre-Aggregation"
+        when:
+          - "Aggregation on a low-cardinality key (< 1000 distinct values) where most records share the same key"
+          - "Input has many duplicates that can be pre-combined within each partition before shuffling"
+          - "Network bandwidth is a bottleneck and reducing shuffle output size is high priority"
+          - "Using RDD API with reduceByKey (inherently map-side) or DataFrame with groupBy (Catalyst auto-applies)"
+        avoid_when:
+          - "Key cardinality is high — pre-aggregation has minimal benefit when every partition has distinct keys"
+          - "The aggregation function is not associative — partial results cannot be combined safely"
+          - "Input partitions are already small — the pre-agg pass adds overhead without proportional benefit"
+          - "DataFrame API is used — Catalyst already applies partial aggregation automatically via HashAggregate"
+        trade_offs: |
+          Map-side pre-aggregation reduces the data volume sent to the shuffle by combining
+          values within each input partition before the network transfer. For a low-cardinality
+          groupBy key (e.g. status, region, category), this can reduce shuffle output by
+          orders of magnitude. In the DataFrame API, Catalyst applies this automatically via
+          the HashAggregate + Exchange + HashAggregate pattern visible in explain() output.
+          The first HashAggregate is the map-side pre-aggregation. In the RDD API, reduceByKey
+          applies it explicitly. This is only effective when input partitions have significant
+          key overlap.
+        config:
+          spark.sql.aggregate.fastHashMap.capacity: "1024"
+        example_code: |
+          # DataFrame: Catalyst automatically applies map-side pre-agg (HashAggregate)
+          result = df.groupBy('region', 'product_category').agg({'revenue': 'sum', 'quantity': 'sum'})
+          # Check explain(): first HashAggregate is the map-side combiner
+          result.explain()
+
+          # RDD: reduceByKey explicitly applies map-side combine
+          pre_agg = df.rdd \
+              .map(lambda r: ((r['region'], r['category']), (r['revenue'], 1))) \
+              .reduceByKey(lambda a, b: (a[0] + b[0], a[1] + b[1]))
+        spark_version: "2.0"
+
+  # ===========================================================================
+  # 6. SKEW HANDLING PATTERNS
+  # ===========================================================================
+
+  - id: SKEW_HANDLING
+    name: "Data Skew Handling Patterns"
+    patterns:
+
+      - id: SKEW-aqe_auto
+        name: "AQE Automatic Skew Join Handling"
+        when:
+          - "Spark 3.0+ is available and AQE can be enabled"
+          - "Skew is detected at shuffle stage boundaries — a few partitions are 5x+ larger than the median"
+          - "The skewed key is an equi-join key in a sort-merge or shuffle-hash join"
+          - "No code changes are feasible or desired — automatic mitigation is preferred"
+        avoid_when:
+          - "One key holds the vast majority of data (> 50%) — splitting the partition does not make tasks equal"
+          - "AQE is disabled by cluster policy"
+          - "Non-equi or cross joins — AQE skew handling only applies to shuffle-based equi-joins"
+          - "The skew is in an aggregation rather than a join — AQE skew only addresses joins"
+        trade_offs: |
+          AQE monitors actual shuffle partition sizes after the map phase and identifies
+          partitions exceeding skewedPartitionFactor × median. Oversized partitions are split
+          into sub-partitions; the corresponding range of the other side is read once per
+          sub-partition. This effectively reduces the dominant task's work by the split factor.
+          Zero code changes are required — just enable AQE and configure the thresholds.
+          The cost is per-stage statistics collection overhead (small) and non-deterministic
+          physical plans (plan varies with data distribution).
+        config:
+          spark.sql.adaptive.enabled: "true"
+          spark.sql.adaptive.skewJoin.enabled: "true"
+          spark.sql.adaptive.skewJoin.skewedPartitionFactor: "5"
+          spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes: "268435456"  # 256 MB
+        example_code: |
+          spark = (
+              SparkSession.builder
+              .config('spark.sql.adaptive.enabled', 'true')
+              .config('spark.sql.adaptive.skewJoin.enabled', 'true')
+              .getOrCreate()
+          )
+          # Zero code change — AQE handles skewed partitions transparently
+          result = events.join(user_profiles, 'user_id')
+          # Monitor: Spark UI stage details show 'SkewedPartitions' in AQE section
+        spark_version: "3.0"
+
+      - id: SKEW-salting
+        name: "Key Salting (Manual Skew Distribution)"
+        when:
+          - "A small number of keys dominate the data distribution (power-law / Zipfian)"
+          - "AQE cannot handle the skew — partition too large even after splitting"
+          - "Spark version < 3.0 or AQE is disabled"
+          - "The hot keys are known or discoverable and salt range can be bounded"
+        avoid_when:
+          - "AQE skew join can handle the skew — prefer automatic mitigation"
+          - "Key distribution is actually uniform — salting adds overhead with no benefit"
+          - "The build side of the join cannot be replicated at scale — salting multiplies the build side by SALT_FACTOR"
+          - "Downstream operations group by the original key — salt must be stripped before groupBy"
+        trade_offs: |
+          Salting appends a random integer [0, N) to each key on the large side and replicates
+          the small side N times with all N suffix values. This distributes one dominant-key
+          partition across N tasks. The replication multiplies the small side's storage and
+          scan cost by N — choose N to be the minimum that makes all tasks roughly equal.
+          Salting is purely manual and changes the schema: the salted key column must be
+          managed throughout the pipeline and stripped before downstream key-based operations.
+        config: null
+        example_code: |
+          from pyspark.sql.functions import col, rand, floor, lit, array, explode, concat, cast
+
+          SALT_N = 8  # distribute each hot key across 8 tasks
+
+          # Large (skewed) side: random salt per row
+          large_salted = large_df.withColumn(
+              'join_key_salted',
+              concat(col('join_key').cast('string'), lit('_'),
+                     floor(rand() * SALT_N).cast('string'))
+          )
+
+          # Small (build) side: explode to all salt values
+          small_salted = small_df.withColumn('salt', explode(array([lit(i) for i in range(SALT_N)]))) \
+              .withColumn('join_key_salted',
+                          concat(col('join_key').cast('string'), lit('_'), col('salt').cast('string')))
+
+          result = large_salted.join(small_salted, 'join_key_salted').drop('join_key_salted', 'salt')
+        spark_version: "2.0"
+
+      - id: SKEW-isolation
+        name: "Hot Key Isolation (Split-and-Union)"
+        when:
+          - "A small number of specific hot keys are known in advance (e.g. NULL, 'unknown', a handful of IDs)"
+          - "Hot keys should receive different treatment than normal keys (e.g. broadcast join for hot keys only)"
+          - "Mixing hot and normal keys in the same join stage causes the entire stage to be limited by the hot key"
+          - "The number of hot keys is small enough to hardcode or pre-compute cheaply"
+        avoid_when:
+          - "Hot keys are not known in advance and discovering them requires an extra scan"
+          - "The majority of data is hot — splitting and unioning produces more overhead than the skew"
+          - "AQE or salting can handle the skew without changing the query structure"
+          - "Code complexity is a concern — split-and-union pipelines are hard to maintain"
+        trade_offs: |
+          Hot key isolation splits the input into two DataFrames: rows with hot keys and rows
+          with normal keys. Each subset is joined with an appropriate strategy (broadcast for
+          hot keys, sort-merge for normal keys), then the results are unioned. This is the
+          most targeted skew mitigation when hot keys are known, because it avoids degrading
+          the performance of non-hot rows. The cost is added code complexity and an extra
+          union stage. NULL keys are a common hot key — filter them out or handle separately
+          before any join.
+        config: null
+        example_code: |
+          from pyspark.sql.functions import broadcast, col
+
+          HOT_KEYS = ['unknown', 'guest', None]
+
+          # Split into hot and normal subsets
+          is_hot = col('user_id').isin([k for k in HOT_KEYS if k is not None]) | col('user_id').isNull()
+          hot_df = large_df.filter(is_hot)
+          normal_df = large_df.filter(~is_hot)
+
+          # Hot keys: broadcast join (small result set)
+          result_hot = hot_df.join(broadcast(small_df.filter(is_hot)), 'user_id', 'left')
+
+          # Normal keys: regular sort-merge join
+          result_normal = normal_df.join(small_df.filter(~is_hot), 'user_id', 'left')
+
+          result = result_normal.union(result_hot)
+        spark_version: "2.0"
+
+      - id: SKEW-broadcast_replace
+        name: "Broadcast Replace (Eliminate Shuffle for Skewed Joins)"
+        when:
+          - "The smaller side of a join that would be sort-merge is below the broadcast threshold"
+          - "Skew is caused by a join where one side can fit in executor memory"
+          - "Raising autoBroadcastJoinThreshold to include the smaller side eliminates the skewed shuffle entirely"
+          - "The join is equi-join and the small side does not itself have a skewed key distribution"
+        avoid_when:
+          - "The smaller side is too large to broadcast — broadcasting a multi-GB table causes executor OOM"
+          - "The skew is in an aggregation (groupBy), not a join — broadcast does not help aggregations"
+          - "The smaller side is dynamically generated and its size cannot be predicted at plan time"
+          - "Driver heap is insufficient to serialize the broadcast table before distributing"
+        trade_offs: |
+          Broadcasting the smaller side of a skewed join eliminates the shuffle entirely —
+          the skew cannot manifest because there is no partition distribution step. This is
+          the simplest skew fix when applicable: one config change or a broadcast() hint,
+          and the sort-merge join (with its O(N log N) sort and skewed partition problem)
+          becomes a broadcast hash join (O(N) probe, no sort, no shuffle). The constraint
+          is executor memory: every executor must hold a copy of the broadcast table.
+        config:
+          spark.sql.autoBroadcastJoinThreshold: "104857600"  # 100 MB
+          spark.sql.broadcastTimeout: "300"
+        example_code: |
+          from pyspark.sql.functions import broadcast
+
+          # Explicitly broadcast the smaller side regardless of threshold
+          result = skewed_large_df.join(broadcast(small_dim_df), 'category_id')
+          # No shuffle → no skewed partition → no straggler task
+
+          # Or raise the threshold so Catalyst auto-selects broadcast:
+          spark.conf.set('spark.sql.autoBroadcastJoinThreshold', 200 * 1024 * 1024)  # 200 MB
+          result = skewed_large_df.join(small_dim_df, 'category_id')
+        spark_version: "2.0"
+
+      - id: SKEW-two_phase_agg
+        name: "Two-Phase Aggregation for Skewed COUNT DISTINCT"
+        when:
+          - "COUNT DISTINCT on a column grouped by a skewed key produces straggler tasks"
+          - "Exact count distinct is required (approx_count_distinct is not acceptable)"
+          - "The cardinality of the distinct column is high within each skewed group"
+          - "A single groupBy produces one enormous task per dominant key"
+        avoid_when:
+          - "approx_count_distinct() (HyperLogLog) is acceptable — it is always single-phase and orders of magnitude faster"
+          - "AQE skew join handling already distributes the aggregation work"
+          - "The dominant key group is actually small — two-phase adds overhead for no benefit"
+          - "The distinct column has very low cardinality — a simple groupBy handles it without skew"
+        trade_offs: |
+          Two-phase aggregation for COUNT DISTINCT adds a salt dimension to pre-aggregate
+          partial distinct sets per (original_key, salt) group before combining. Phase 1
+          groups by (key, salt, distinct_value) to deduplicate within salt groups. Phase 2
+          counts distinct values per original key across all salt groups. This spreads the
+          aggregation work across SALT_N tasks instead of one per dominant key. The cost
+          is two shuffle stages instead of one and slightly higher total work. For approximate
+          counts, always prefer approx_count_distinct(col, relativeSD=0.05).
+        config:
+          spark.sql.adaptive.enabled: "true"
+        example_code: |
+          from pyspark.sql.functions import col, countDistinct, approx_count_distinct, floor, rand
+
+          # Prefer approximate when exact is not required:
+          approx = df.groupBy('skewed_key').agg(approx_count_distinct('user_id', 0.02).alias('approx_users'))
+
+          # Exact two-phase COUNT DISTINCT:
+          SALT_N = 10
+          phase1 = df \
+              .withColumn('salt', (rand() * SALT_N).cast('int')) \
+              .select('skewed_key', 'salt', 'user_id') \
+              .dropDuplicates(['skewed_key', 'salt', 'user_id'])
+
+          result = phase1.groupBy('skewed_key').agg(countDistinct('user_id').alias('exact_users'))
+        spark_version: "2.0"
+
+      - id: SKEW-repartition_uniform
+        name: "Uniform Repartition Before Heavy Operations"
+        when:
+          - "Input partitions are highly uneven in row count due to upstream filter or skewed source data"
+          - "A heavy operation (join, complex withColumn, write) follows and will be bottlenecked by large partitions"
+          - "Salting is not appropriate because the key itself must be preserved"
+          - "A quick fix is needed to spread load evenly before a shuffle-inducing operation"
+        avoid_when:
+          - "The downstream operation is a join on the same key — repartitioning by a random key will re-shuffle at the join"
+          - "AQE coalescing will re-balance partitions automatically after the next shuffle"
+          - "The partition imbalance is minor (< 3x difference between largest and smallest) — overhead not justified"
+          - "The target operation is a write — use coalesce() instead, which avoids a full shuffle"
+        trade_offs: |
+          Repartitioning by a random expression (or simply repartition(N)) redistributes rows
+          uniformly across N partitions, breaking up oversized partitions before a heavy
+          computation. This trades one shuffle for the benefit of balanced downstream tasks.
+          Unlike salting, the original key is preserved — but the repartition benefit is lost
+          after any key-based shuffle (join, groupBy) that re-partitions by a different key.
+          Most effective as a pre-processing step before expensive non-key-based computations.
+        config:
+          spark.sql.adaptive.enabled: "true"
+        example_code: |
+          from pyspark.sql.functions import col, rand
+
+          # Uniform repartition before heavy transformation (no key-based shuffle needed)
+          df_balanced = df.repartition(400)  # uniform random redistribution
+
+          # Or repartition by a composite key to spread hot keys
+          df_balanced = df.repartition(400, col('region'), (rand() * 4).cast('int'))
+
+          result = df_balanced.withColumn('score', complex_udf(col('features')))
+        spark_version: "2.0"
