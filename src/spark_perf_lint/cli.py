@@ -757,9 +757,14 @@ def explain(rule_id: str, output_format: str) -> None:
       spark-perf-lint explain SPL-D08-001 --format markdown\n
       spark-perf-lint explain SPL-D02-002 --format json
     """
+    from spark_perf_lint.rules.registry import RuleRegistry
+
     normalised = rule_id.strip().upper()
 
-    if normalised not in _RULE_CATALOGUE:
+    registry = RuleRegistry.instance()
+    rule = registry.get_rule_by_id(normalised)
+
+    if rule is None:
         # Give a helpful suggestion if the dimension exists but the number doesn't
         try:
             dim = normalised.split("-")[1]
@@ -787,7 +792,7 @@ def explain(rule_id: str, output_format: str) -> None:
             )
         sys.exit(1)
 
-    sev, desc = _RULE_CATALOGUE[normalised]
+    sev = rule.default_severity.name
     dim_code = normalised.split("-")[1]
     _, dim_label = _DIMENSION_META.get(dim_code, ("", dim_code))
 
@@ -801,8 +806,14 @@ def explain(rule_id: str, output_format: str) -> None:
                     "dimension": dim_code,
                     "dimension_label": dim_label,
                     "default_severity": sev,
-                    "description": desc,
-                    "detail": "Not yet implemented — coming in Phase 3 (knowledge base wiring).",
+                    "description": rule.description,
+                    "explanation": rule.explanation,
+                    "recommendation": rule.recommendation_template,
+                    "before_example": rule.before_example,
+                    "after_example": rule.after_example,
+                    "estimated_impact": rule.estimated_impact,
+                    "effort_level": rule.effort_level.value,
+                    "references": list(rule.references),
                 },
                 indent=2,
             )
@@ -813,33 +824,75 @@ def explain(rule_id: str, output_format: str) -> None:
         click.echo(f"## {normalised}\n")
         click.echo(f"**Dimension** : {dim_code} · {dim_label}  ")
         click.echo(f"**Severity**  : {sev}  ")
-        click.echo(f"**Summary**   : {desc}\n")
-        click.echo(
-            "> Full rule documentation (Spark internals, before/after examples, "
-            "decision matrix) is not yet implemented — coming in Phase 3."
-        )
+        click.echo(f"**Summary**   : {rule.description}\n")
+        click.echo(f"### Why this matters\n\n{rule.explanation}\n")
+        click.echo(f"### Recommendation\n\n{rule.recommendation_template}\n")
+        if rule.before_example:
+            click.echo(f"**Before:**\n```python\n{rule.before_example}\n```\n")
+        if rule.after_example:
+            click.echo(f"**After:**\n```python\n{rule.after_example}\n```\n")
+        if rule.estimated_impact:
+            click.echo(f"**Impact:** {rule.estimated_impact}  ")
+        click.echo(f"**Effort:** {rule.effort_level.value}  ")
+        if rule.references:
+            click.echo("\n**References:**")
+            for ref in rule.references:
+                click.echo(f"- {ref}")
         return
 
     # Default: plain text
+    W = 68  # content width inside the indent
+    sep = click.style("  " + "─" * W, fg="bright_black")
+
     click.echo("")
     click.echo(
-        click.style(f"  {normalised}", bold=True, fg="bright_cyan")
+        "  "
+        + click.style(normalised, bold=True, fg="bright_cyan")
         + "  "
         + click.style(f"[{sev}]", fg=_SEVERITY_COLORS.get(sev, "white"), bold=True)
     )
-    click.echo(click.style("  " + "─" * 60, fg="bright_black"))
-    click.echo(f"  Dimension : {dim_code} · {dim_label}")
-    click.echo(f"  Summary   : {desc}")
+    click.echo(sep)
+    click.echo(f"  {'Dimension':<14}: {dim_code} · {dim_label}")
+    click.echo(f"  {'Summary':<14}: {rule.description}")
+    click.echo(f"  {'Impact':<14}: {rule.estimated_impact or '—'}")
+    click.echo(f"  {'Effort':<14}: {rule.effort_level.value}")
     click.echo("")
-    click.echo(
-        click.style(
-            "  Full documentation (Spark internals, before/after code examples, "
-            "decision\n  matrix context) is not yet implemented — "
-            "coming in Phase 3 (knowledge base wiring).",
-            fg="yellow",
-        )
-    )
+
+    click.echo(click.style("  Why this matters", bold=True))
+    click.echo(sep)
+    # Word-wrap explanation at 68 chars
+    import textwrap
+
+    for para in rule.explanation.split("\n\n"):
+        for line in textwrap.wrap(para.strip(), width=W):
+            click.echo(f"  {line}")
+        click.echo("")
+
+    click.echo(click.style("  Recommendation", bold=True))
+    click.echo(sep)
+    for line in textwrap.wrap(rule.recommendation_template, width=W):
+        click.echo(f"  {line}")
     click.echo("")
+
+    if rule.before_example or rule.after_example:
+        click.echo(click.style("  Before / After", bold=True))
+        click.echo(sep)
+        if rule.before_example:
+            click.echo(click.style("  Before:", fg="red"))
+            for line in rule.before_example.splitlines():
+                click.echo(f"    {line}")
+        if rule.after_example:
+            click.echo(click.style("  After:", fg="green"))
+            for line in rule.after_example.splitlines():
+                click.echo(f"    {line}")
+        click.echo("")
+
+    if rule.references:
+        click.echo(click.style("  References", bold=True))
+        click.echo(sep)
+        for ref in rule.references:
+            click.echo(f"  • {ref}")
+        click.echo("")
 
 
 # =============================================================================
