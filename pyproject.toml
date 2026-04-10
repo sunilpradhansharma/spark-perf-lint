@@ -7,9 +7,9 @@ name = "spark-perf-lint"
 version = "0.1.0"
 description = "Enterprise-grade Apache Spark performance linter — 93 rules across 11 dimensions"
 readme = "README.md"
-license = "Apache-2.0"
-authors = [{ name = "Sucandra Dasa", email = "sucandra.dasa@gmail.com" }]
-maintainers = [{ name = "Sucandra Dasa", email = "sucandra.dasa@gmail.com" }]
+license = "MIT"
+authors = [{ name = "Sunil Pradhan Sharma", email = "sucandra.dasa@gmail.com" }]
+maintainers = [{ name = "Sunil Pradhan Sharma", email = "sucandra.dasa@gmail.com" }]
 keywords = [
     "spark", "pyspark", "linter", "performance", "static-analysis",
     "pre-commit", "data-engineering",
