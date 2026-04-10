@@ -651,3 +651,659 @@ rules:
     estimated_speedup: "Up to 32x reduction in shuffle-write syscall count"
     effort: CONFIG_ONLY
     common_in: "Shuffle-heavy ETL, multi-join pipelines, large groupBy aggregations"
+
+  # ---------------------------------------------------------------------------
+  # D03 — Joins (SPL-D03-001 through SPL-D03-010)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D03-001
+    short_recommendation: >-
+      Replace crossJoin() / join(how='cross') with an explicit join key;
+      cartesian products grow as O(n²) and almost always indicate a logic error.
+    detailed_recommendation: |
+      A cross join multiplies every row in the left DataFrame with every row in
+      the right DataFrame. Two DataFrames of 10 M rows each produce a 100-trillion-
+      row result — enough to exhaust cluster memory and run indefinitely. Spark does
+      not warn when a join key is accidentally omitted; it silently upgrades the plan
+      to a cartesian product. Add the correct join key:
+      `df.join(other, on='key_column', how='inner')`. If a cross product is
+      genuinely needed (e.g., generating all combinations from a tiny reference
+      table of < 1,000 rows), wrap the smaller side in `broadcast()` and document
+      the intent explicitly so reviewers understand it is intentional.
+    before_code: |
+      # Accidental cross join — O(n²) rows!
+      result = orders_df.crossJoin(products_df)
+    after_code: |
+      # Explicit join key — only matching rows are returned
+      result = orders_df.join(products_df, on='product_id', how='inner')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.crossJoin.html"
+    estimated_speedup: "Unbounded; cross join can produce trillions of rows vs thousands with a key"
+    effort: MINOR_CODE_CHANGE
+    common_in: "ETL pipelines, data exploration notebooks, schema migration scripts"
+
+  - rule_id: SPL-D03-002
+    short_recommendation: >-
+      Wrap small lookup DataFrames in broadcast() to eliminate the shuffle on
+      both sides of the join.
+    detailed_recommendation: |
+      When one side of a join is significantly smaller than the other (a typical
+      fact-dimension or fact-lookup pattern), Spark can broadcast the small table
+      to every executor as an in-memory hash map, eliminating the shuffle entirely.
+      Without a broadcast hint, Spark defaults to a sort-merge join, which shuffles
+      both DataFrames across the network. Use `df.join(broadcast(small_df), 'key')`
+      or `df.join(small_df.hint("broadcast"), 'key')`. Spark's
+      `spark.sql.autoBroadcastJoinThreshold` (default 10 MB) auto-broadcasts tables
+      below the threshold, but for tables slightly above it or when auto-broadcast
+      is disabled, an explicit hint is the only way to force broadcast semantics.
+      With AQE enabled, also set `spark.sql.adaptive.autoBroadcastJoinThreshold`
+      to a higher value (e.g., 100 MB) to let AQE promote larger tables at runtime.
+    before_code: |
+      from pyspark.sql.functions import broadcast
+
+      # Both sides shuffled — sort-merge join
+      result = orders_df.join(product_lookup, 'product_id')
+    after_code: |
+      from pyspark.sql.functions import broadcast
+
+      # product_lookup broadcast to every executor — zero shuffle
+      result = orders_df.join(broadcast(product_lookup), 'product_id')
+    config_changes:
+      spark.sql.adaptive.autoBroadcastJoinThreshold: "104857600"  # 100 MB
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#broadcast-hint-for-sql-queries"
+    estimated_speedup: "10-100x for small lookups; eliminates shuffle on both sides"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Star-schema ETL, fact-dimension joins, enrichment pipelines, ML feature joins"
+
+  - rule_id: SPL-D03-003
+    short_recommendation: >-
+      Remove spark.sql.autoBroadcastJoinThreshold = -1; it disables all
+      broadcast joins and forces sort-merge on every join, including tiny lookups.
+    detailed_recommendation: |
+      Setting `spark.sql.autoBroadcastJoinThreshold` to `-1` completely disables
+      Spark's automatic broadcast join optimization. Every join — including those
+      on tiny reference tables with a few hundred rows — falls back to a full
+      sort-merge join, shuffling both sides across the network. This setting was
+      sometimes applied as a workaround for a broadcast garbage-collection race
+      condition fixed in Spark 2.4+; there is almost never a valid reason to use
+      it in modern deployments. Remove the override entirely to restore the default
+      10 MB threshold, or set a higher value (e.g., `10485760` for 10 MB, or
+      `104857600` for 100 MB). If specific joins cause OOM due to over-eager
+      broadcasting, use `df.hint("merge")` on those individual joins to force
+      sort-merge without disabling broadcast globally.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.autoBroadcastJoinThreshold", "-1")  # disables all broadcasts
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.autoBroadcastJoinThreshold", "10485760")  # 10 MB default
+          .getOrCreate()
+      )
+      # For specific joins that should not broadcast:
+      # df.join(large_df.hint("merge"), 'key')
+    config_changes:
+      spark.sql.autoBroadcastJoinThreshold: "10485760"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#execution-behavior"
+    estimated_speedup: "Restores broadcast optimization; 10-100x for joins on small tables"
+    effort: CONFIG_ONLY
+    common_in: "Any codebase with join-heavy queries, legacy Spark 2.x migrations"
+
+  - rule_id: SPL-D03-004
+    short_recommendation: >-
+      Apply filter() and select() before join() to reduce shuffle payload;
+      joining full unfiltered tables wastes all rows and all columns in network I/O.
+    detailed_recommendation: |
+      Joining full tables without projecting or filtering first forces Spark to
+      shuffle all rows and all columns of both DataFrames across the network. Two
+      500 GB tables joined without any filtering = 1 TB of shuffle traffic just to
+      materialize the join keys. A `filter()` that removes 90% of rows before
+      the join reduces shuffle data by the same fraction. `select()` before join
+      is equally valuable: omitting wide columns not needed in the join result
+      prevents those bytes from being serialized, transferred, and deserialized
+      on every shuffle node. On tables with hundreds of columns this is often
+      the single biggest win available. The golden rule: push predicates and
+      projections as close to the data source as possible.
+    before_code: |
+      # Full 500 GB table shuffled
+      events = spark.read.parquet('s3://datalake/events')
+      result = events.join(users, 'user_id')
+    after_code: |
+      # Filter first (90% row reduction), select only needed columns (80% width reduction)
+      events = (
+          spark.read.parquet('s3://datalake/events')
+          .filter("event_date >= '2024-01-01'")
+          .select('user_id', 'event_type', 'event_date')
+      )
+      result = events.join(users.select('user_id', 'name', 'region'), 'user_id')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "10-100x shuffle reduction when large fractions of rows/columns are pruned"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Datalake ETL, wide-table analytics, multi-year history joins"
+
+  - rule_id: SPL-D03-005
+    short_recommendation: >-
+      Add explicit cast() when joining on columns with different names to
+      prevent silent type-mismatch bugs or empty join output.
+    detailed_recommendation: |
+      When joining on a condition like `df1.order_id == df2.id`, Spark implicitly
+      casts one column to match the other's type. If `order_id` is `LongType` and
+      `id` is `StringType`, the implicit coercion may produce zero matching rows
+      silently — integer `123` never equals string `'123'` under all coercion
+      rules, and the rules vary between Spark versions. This is especially risky
+      when columns originate from JSON/CSV sources with inferred schemas or when
+      column names differ between tables in a star schema. Always add explicit
+      `cast()` to document the intended types: `df1.join(df2, df1.order_id.cast('long')
+      == df2.id.cast('long'))`. Alternatively, rename one column with
+      `withColumnRenamed()` so a simple string key can be used, which avoids
+      the comparison expression entirely.
+    before_code: |
+      # Implicit type coercion — may silently produce 0 rows if types differ
+      result = df1.join(df2, df1.order_id == df2.id)
+    after_code: |
+      # Explicit cast — behavior is clear and version-stable
+      result = df1.join(df2, df1.order_id.cast('long') == df2.id.cast('long'))
+
+      # Or rename to use a safe string key:
+      # result = df1.join(df2.withColumnRenamed('id', 'order_id'), 'order_id')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-ref-ansi-compliance.html"
+    estimated_speedup: "Correctness fix; prevents empty output or wrong results from type mismatch"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Star-schema joins, CSV/JSON ingest pipelines, schema evolution scenarios"
+
+  - rule_id: SPL-D03-006
+    short_recommendation: >-
+      Broadcast small dimension tables and enable CBO when chaining 3+ joins;
+      each unbroadcast join adds a full shuffle stage.
+    detailed_recommendation: |
+      In a star-schema join pattern, every non-broadcast join triggers a full
+      shuffle. Three consecutive sort-merge joins on different keys produce three
+      independent shuffle stages, each reading and writing the full intermediate
+      dataset. Reduce cost with these strategies: (1) Wrap any dimension under the
+      broadcast threshold in `broadcast()` to eliminate its shuffle entirely.
+      (2) Enable Cost-Based Optimization — `spark.sql.cbo.enabled = true` and
+      `spark.sql.statistics.histogram.enabled = true` — so Catalyst can reorder
+      joins to minimize intermediate result size. (3) If all joins share a common
+      key, one upfront `repartition('key')` makes subsequent joins local.
+      (4) Apply aggressive `filter()` before the first join to reduce the base row
+      count flowing through every subsequent stage.
+    before_code: |
+      # Three sort-merge joins — three full shuffles
+      result = (
+          facts
+          .join(dim_a, 'key_a')
+          .join(dim_b, 'key_b')
+          .join(dim_c, 'key_c')
+      )
+    after_code: |
+      from pyspark.sql.functions import broadcast
+
+      # Broadcast small dimensions — eliminates their shuffle stages
+      result = (
+          facts
+          .join(broadcast(dim_a), 'key_a')
+          .join(broadcast(dim_b), 'key_b')
+          .join(broadcast(dim_c), 'key_c')
+      )
+    config_changes:
+      spark.sql.cbo.enabled: "true"
+      spark.sql.statistics.histogram.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#join-strategy-hints-for-sql-queries"
+    estimated_speedup: "Eliminates 1-3 shuffle stages; 3-10x for star-schema patterns"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Star-schema ETL, data warehouse pipelines, multi-dimension analytical queries"
+
+  - rule_id: SPL-D03-007
+    short_recommendation: >-
+      Replace self-joins with Window functions; self-joins shuffle the same
+      dataset twice while window functions require no cross-node data transfer.
+    detailed_recommendation: |
+      A self-join (joining a DataFrame to itself) doubles the shuffle cost: both
+      sides of the join are the same data, so Spark serializes, shuffles, and
+      deserializes the dataset twice. Most self-join patterns can be rewritten
+      as a single Window function pass with no shuffle at all. Common rewrites:
+      running totals and moving averages use `sum(col).over(window)`;
+      lead/lag comparisons use `lag(col, 1).over(window)`;
+      rank-within-group uses `rank().over(Window.partitionBy().orderBy())`;
+      deduplication uses `row_number().over(...) == 1`. Window functions operate
+      within each partition and avoid both the cross-node data transfer and the
+      row duplication that a self-join produces. Import `Window` from
+      `pyspark.sql.window` and use `partitionBy()` + `orderBy()` to define the
+      window frame.
+    before_code: |
+      # Self-join to compute lag — shuffles the same data twice
+      df_with_prev = df.join(
+          df.withColumnRenamed('value', 'prev_value')
+            .withColumnRenamed('ts', 'prev_ts'),
+          on=(df.key == df.prev_key),
+          how='inner'
+      )
+    after_code: |
+      from pyspark.sql import Window
+      from pyspark.sql.functions import lag
+
+      # Window function — partition-local, zero cross-node transfer
+      w = Window.partitionBy('key').orderBy('ts')
+      df_with_prev = df.withColumn('prev_value', lag('value', 1).over(w))
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.lag.html"
+    estimated_speedup: "2x shuffle data reduction; window functions avoid all cross-node transfer"
+    effort: MAJOR_REFACTOR
+    common_in: "Time-series analytics, sessionization, deduplication, ranking pipelines"
+
+  - rule_id: SPL-D03-008
+    short_recommendation: >-
+      Move join() outside the loop and union all right-side inputs into a
+      single DataFrame; each loop iteration currently triggers a full shuffle.
+    detailed_recommendation: |
+      Calling `join()` inside a Python `for` or `while` loop does not accumulate
+      rows iteratively — it builds a new query plan on each iteration and triggers
+      a full shuffle every time the loop body executes. With 100 loop iterations
+      each joining a 10 GB table, total shuffle I/O is 1 TB even if the final
+      result is small. The query plan also grows linearly with loop count, causing
+      plan serialization overhead and stack overflows in Catalyst for large iteration
+      counts. The correct pattern: collect all loop values into a single DataFrame
+      and perform one join. For date ranges, use `filter(col('date').between(start,
+      end))` rather than looping over individual dates. For a list of IDs,
+      use `spark.createDataFrame([(id,) for id in ids], ['id'])` and join once.
+    before_code: |
+      result = base_df
+      for date in date_list:
+          daily = spark.read.parquet(f's3://bucket/events/{date}')
+          result = result.join(daily, 'user_id')  # new shuffle per iteration!
+    after_code: |
+      # Load all dates in one read and join once
+      all_events = spark.read.parquet('s3://bucket/events').filter(
+          col('date').between(date_list[0], date_list[-1])
+      )
+      result = base_df.join(all_events, 'user_id')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#resilient-distributed-datasets-rdds"
+    estimated_speedup: "N-fold reduction where N = loop iterations; from hours to minutes"
+    effort: MAJOR_REFACTOR
+    common_in: "Date-range batch jobs, per-entity enrichment loops, iterative join pipelines"
+
+  - rule_id: SPL-D03-009
+    short_recommendation: >-
+      Add fillna() or dropna() after a left join to handle nulls explicitly;
+      unhandled nulls propagate silently and corrupt aggregations.
+    detailed_recommendation: |
+      A left join always produces `null` values for right-side columns when no
+      matching row exists. Unhandled nulls silently corrupt downstream operations:
+      `count('column')` returns fewer rows than `count('*')` because nulls are
+      excluded; `sum('amount')` skips null rows, producing a wrong total;
+      `filter(col > 0)` silently drops all unmatched rows; Parquet writes with
+      NOT NULL constraints fail at write time. Use `fillna(default_dict)` to
+      substitute sensible defaults for optional join columns, `dropna(subset=
+      ['required_col'])` to explicitly discard rows that failed to match, or
+      `isNotNull()` / `isNull()` filters to separate matched from unmatched rows.
+      Explicit null handling documents the intended behavior and surfaces data
+      quality issues early rather than silently corrupting downstream consumers.
+    before_code: |
+      # Nulls silently propagate to all downstream operations
+      result = customers.join(orders, 'customer_id', 'left')
+      total = result.groupBy('region').agg(sum('order_amount'))  # wrong totals!
+    after_code: |
+      # Handle nulls explicitly after the left join
+      result = (
+          customers
+          .join(orders, 'customer_id', 'left')
+          .fillna({'order_amount': 0, 'order_status': 'no_order'})
+      )
+      total = result.groupBy('region').agg(sum('order_amount'))
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.fillna.html"
+    estimated_speedup: "Correctness fix; prevents silent data quality bugs in aggregations"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Customer 360 pipelines, optional enrichment joins, CDC merge operations"
+
+  - rule_id: SPL-D03-010
+    short_recommendation: >-
+      Enable spark.sql.cbo.enabled so Catalyst can reorder multi-join queries
+      by cost instead of left-deep order of appearance.
+    detailed_recommendation: |
+      Catalyst's default join ordering is left-deep: it joins tables in the order
+      they appear in the query. With Cost-Based Optimization (CBO) disabled,
+      Catalyst has no statistics on table sizes and cannot reorder joins to
+      minimize intermediate result size. For a three-table star join where dimension
+      tables vary from 1K to 100M rows, the difference between best and worst join
+      order can be several orders of magnitude in shuffle data. Enable CBO with
+      `spark.sql.cbo.enabled = true` and `spark.sql.statistics.histogram.enabled =
+      true`, then collect table statistics: run `ANALYZE TABLE t COMPUTE STATISTICS
+      FOR ALL COLUMNS` on the tables involved in complex joins. CBO is most
+      impactful when queries have 3+ joins, table sizes differ significantly, or
+      some joins are highly selective.
+    before_code: |
+      # CBO off — Catalyst joins in left-deep declaration order regardless of sizes
+      spark = SparkSession.builder.appName("analytics").getOrCreate()
+      result = facts.join(huge_dim, 'key_a').join(tiny_dim, 'key_b')
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName("analytics")
+          .config("spark.sql.cbo.enabled", "true")
+          .config("spark.sql.statistics.histogram.enabled", "true")
+          .getOrCreate()
+      )
+      # Then analyze tables once:
+      # spark.sql("ANALYZE TABLE facts COMPUTE STATISTICS FOR ALL COLUMNS")
+      result = facts.join(huge_dim, 'key_a').join(tiny_dim, 'key_b')
+    config_changes:
+      spark.sql.cbo.enabled: "true"
+      spark.sql.statistics.histogram.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#cost-based-optimizer-framework"
+    estimated_speedup: "Orders of magnitude for suboptimal join order on skewed-size tables"
+    effort: CONFIG_ONLY
+    common_in: "Multi-join analytical queries, star/snowflake schema ETL, BI reporting pipelines"
+
+  # ---------------------------------------------------------------------------
+  # D04 — Partitioning (SPL-D04-001 through SPL-D04-010)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D04-001
+    short_recommendation: >-
+      Remove repartition(1); it collapses the entire dataset to one task,
+      eliminating all cluster parallelism and causing GC pressure.
+    detailed_recommendation: |
+      `repartition(1)` triggers a full shuffle and then funnels the entire dataset
+      through a single reducer task. On any non-trivial dataset this means one
+      executor core handles all work while the rest of the cluster sits idle, the
+      single partition must fit entirely in one executor's JVM heap (causing GC
+      pressure), and a single task failure forces re-shuffling the full dataset
+      from scratch. The only legitimate use is writing a single output file for
+      a downstream system that cannot read multi-part output. Even then, use
+      `coalesce(1)` instead — it achieves the same result without the upfront
+      shuffle cost. For larger data, let Spark manage partition count or set
+      `spark.sql.shuffle.partitions` to `2-3 × total executor cores`.
+    before_code: |
+      # Single-task bottleneck — entire cluster except one core sits idle
+      df.repartition(1).write.parquet('s3://bucket/output/')
+    after_code: |
+      # Option A: let Spark decide partition count (uses spark.sql.shuffle.partitions)
+      df.write.parquet('s3://bucket/output/')
+
+      # Option B: if a single output file is truly required, use coalesce (no shuffle)
+      df.coalesce(1).write.parquet('s3://bucket/output/single_file.parquet')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#parallelized-collections"
+    estimated_speedup: "Full cluster parallelism restored; up to N× where N = executor core count"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Legacy ETL scripts, single-file export jobs, Jupyter notebook prototypes"
+
+  - rule_id: SPL-D04-002
+    short_recommendation: >-
+      Move coalesce(1) to the very last step before .write, or remove it
+      entirely if it precedes further transformations.
+    detailed_recommendation: |
+      `coalesce(1)` merges all partitions onto a single task without a shuffle.
+      Unlike `repartition(1)`, it avoids the upfront shuffle cost, but the result
+      is the same: one enormous partition processed by a single executor core.
+      When used before further transformations (filters, joins, aggregations), it
+      destroys parallelism for all subsequent stages and should always be removed
+      or replaced with a smaller-but-not-one count. The only acceptable use is
+      immediately before a `.write` when a single output file is genuinely required
+      by a downstream system. In that case, place `coalesce(1)` as the absolute
+      last step so it does not affect any computation. For uniform output file
+      sizes, prefer `repartition(n)` over `coalesce(n)` — the even distribution
+      makes downstream reads more predictable.
+    before_code: |
+      # coalesce before aggregation — single-core groupBy on the full dataset
+      df.coalesce(1).groupBy('category').agg(sum('revenue').alias('total'))
+    after_code: |
+      # Remove coalesce before transformations; only use it before write if needed
+      df.groupBy('category').agg(sum('revenue').alias('total'))
+
+      # If single output file is required, coalesce at the very end:
+      # df.groupBy('category').agg(sum('revenue').alias('total')).coalesce(1).write.csv(...)
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.coalesce.html"
+    estimated_speedup: "Restores full parallelism for downstream stages; up to N× speedup"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Single-file export jobs, legacy HDFS write patterns, Jupyter notebook prototypes"
+
+  - rule_id: SPL-D04-003
+    short_recommendation: >-
+      Reduce repartition() count below 10,000; extremely high values cause
+      millions of shuffle files and driver scheduling overhead.
+    detailed_recommendation: |
+      Each Spark partition corresponds to one task, and each task writes its own
+      shuffle output file. Creating tens of thousands of partitions from a single
+      `repartition()` call causes: the driver must track and schedule every task,
+      consuming significant CPU and memory even before data is processed; with
+      50,000 tasks × 200 executors = 10 million shuffle files for a single stage;
+      Spark's speculative execution scans all task statuses periodically, making
+      the O(n) scan slow for huge task counts. Target 128-256 MB of input data
+      per partition as a practical guideline — for most workloads this means
+      partition counts in the hundreds to low thousands. Enable AQE
+      (`spark.sql.adaptive.enabled = true`) to automatically coalesce small
+      post-shuffle partitions if you prefer to over-partition and let the runtime
+      tune down.
+    before_code: |
+      # 50,000 tasks — millions of shuffle files, driver OOM risk
+      df.repartition(50_000).write.parquet('s3://bucket/output/')
+    after_code: |
+      # ~128 MB per partition at 50 GB data with AQE auto-coalesce
+      df.repartition(400).write.parquet('s3://bucket/output/')
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#adaptive-query-execution"
+    estimated_speedup: "Prevents driver OOM; eliminates millions of tiny shuffle files"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Large-scale data ingestion, over-partitioned legacy jobs, automated partition sizing"
+
+  - rule_id: SPL-D04-004
+    short_recommendation: >-
+      Increase repartition() count to at least 10 (ideally 2-3× executor cores)
+      to utilize the full cluster for downstream operations.
+    detailed_recommendation: |
+      Repartitioning to a very low number of partitions (2-9) caps parallelism
+      for all downstream stages to that number. On a 100-core cluster,
+      `repartition(4)` means at most 4 tasks run simultaneously — 96 cores sit
+      idle, stage duration scales inversely, and data skew within the few
+      partitions causes long-tail stragglers. Low partition counts are sometimes
+      intentional for very small DataFrames (< 100 MB) where task-scheduling
+      overhead exceeds computation cost. For anything larger, partition to at
+      least `2-3 × total executor cores`. If the DataFrame is genuinely small
+      enough that a handful of partitions is correct, document that with a comment
+      so future readers do not flag it as a mistake. Consider removing the
+      `repartition()` call entirely and relying on `spark.sql.shuffle.partitions`.
+    before_code: |
+      # 4 partitions on a 100-core cluster — 96 cores idle
+      df.repartition(4).groupBy('region').agg(sum('sales'))
+    after_code: |
+      # 200 partitions — 100 cores fully utilized
+      df.repartition(200).groupBy('region').agg(sum('sales'))
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#execution-behavior"
+    estimated_speedup: "Up to N× where N = cores / old_partitions; 25x for repartition(4) on 100 cores"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Prototype scripts, manually tuned jobs, data-size-unaware partition settings"
+
+  - rule_id: SPL-D04-005
+    short_recommendation: >-
+      Replace coalesce(n) before write with repartition(n) to produce
+      evenly-sized output files; coalesce creates unbalanced partitions.
+    detailed_recommendation: |
+      `coalesce(n)` reduces partition count by merging existing partitions without
+      redistributing data. When used before a write, the resulting output files are
+      unbalanced: merged partitions produce a few very large files alongside smaller
+      ones. This degrades downstream reader performance (Spark, Presto, Athena)
+      because a large merged file forces one task to read the entire partition
+      sequentially rather than splitting at block boundaries. S3/GCS listing
+      performance also degrades with a mix of huge and tiny files in the same
+      prefix. Use `repartition(n)` before write when uniform output file sizes
+      matter — it costs one extra shuffle but guarantees evenly-sized output.
+      Exception: `coalesce(1)` for a single-file write is covered by SPL-D04-002.
+    before_code: |
+      # Unbalanced output: some files huge, others tiny
+      df.coalesce(20).write.mode('overwrite').parquet('s3://bucket/output/')
+    after_code: |
+      # Even output files — one extra shuffle, but uniform downstream read performance
+      df.repartition(20).write.mode('overwrite').parquet('s3://bucket/output/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.coalesce.html"
+    estimated_speedup: "Even file sizes; prevents downstream read skew and long-tail query stragglers"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Data lake writes, output file size management, Parquet/ORC sink jobs"
+
+  - rule_id: SPL-D04-006
+    short_recommendation: >-
+      Add partitionBy() to Parquet/ORC/Delta writes so downstream queries can
+      prune to relevant partitions instead of scanning the full table.
+    detailed_recommendation: |
+      Writing analytics data without a `partitionBy` clause places all output in a
+      single directory. Readers that filter on common columns (date, region,
+      status) must scan every file rather than pruning to a relevant subset.
+      Partition pruning is one of the highest-impact Spark optimizations:
+      partitioning a 10 TB table by `date` and filtering on a single day reduces
+      the scan from 10 TB to ~27 GB (assuming 3 years of data) — a 370× reduction.
+      Choose partition columns that are low-cardinality (hundreds to low thousands
+      of distinct values), aligned with the most common query filter predicates,
+      and not too granular (`date` is good; `timestamp` creates millions of tiny
+      files). Avoid high-cardinality columns like user IDs or UUIDs — use
+      SPL-D04-007 guidance to check for that anti-pattern.
+    before_code: |
+      # No partition structure — every query scans the full table
+      df.write.mode('overwrite').parquet('s3://datalake/events/')
+    after_code: |
+      # Partition by date and region — most queries touch <1% of files
+      df.write.partitionBy('date', 'region').mode('overwrite').parquet('s3://datalake/events/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#partition-discovery"
+    estimated_speedup: "10-1000x read reduction for filtered queries via partition pruning"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Data lake writes, analytical tables, event ingestion pipelines, Delta Lake tables"
+
+  - rule_id: SPL-D04-007
+    short_recommendation: >-
+      Replace high-cardinality partition columns (e.g., *_id, *_at) with
+      low-cardinality equivalents; high cardinality creates millions of tiny files.
+    detailed_recommendation: |
+      Partitioning by a high-cardinality column (one with thousands to millions
+      of distinct values) causes the small-files problem. Each distinct partition
+      value becomes a directory: with 10 M distinct `user_id` values × 200 Spark
+      tasks, the result can be millions of output files. Object storage charges
+      per LIST/PUT operation — millions of tiny files dramatically increase cost
+      and latency. The Spark driver OOMs when listing partition directories of
+      partitioned tables with millions of partitions. Use low-cardinality columns
+      instead: `date` instead of `timestamp`, `user_segment` instead of `user_id`,
+      `event_category` instead of `event_id`. If the high-cardinality column is
+      the primary join/lookup key, use `bucketBy` instead of `partitionBy` —
+      bucketing pre-distributes rows by key hash into a fixed number of files
+      (e.g., 256 buckets) without creating a separate directory per value.
+    before_code: |
+      # user_id has 10M distinct values → millions of tiny files
+      df.write.partitionBy('user_id').mode('overwrite').parquet('s3://datalake/events/')
+    after_code: |
+      # Low-cardinality date+region → manageable partition count
+      df.write.partitionBy('date', 'region').mode('overwrite').parquet('s3://datalake/events/')
+
+      # If user_id lookups are needed, use bucketing instead:
+      # df.write.bucketBy(256, 'user_id').sortBy('user_id').saveAsTable('events')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#partition-discovery"
+    estimated_speedup: "Prevents driver OOM on partition listing; eliminates millions of tiny files"
+    effort: MINOR_CODE_CHANGE
+    common_in: "User-level analytics tables, event streams, time-series data lakes"
+
+  - rule_id: SPL-D04-008
+    short_recommendation: >-
+      Add bucketBy(n, 'join_key') before saveAsTable() so repeated joins on
+      this table require zero shuffle — bucket co-partitioning is permanent.
+    detailed_recommendation: |
+      When writing a table that will be repeatedly joined (a fact table, a
+      frequently-used dimension, or a lookup table), bucketing pre-distributes
+      rows by the join key so that every subsequent join on that key requires
+      zero shuffle. `bucketBy(n, 'join_key')` writes exactly `n` files per
+      partition, sorted by the hash of `join_key`. When two bucketed tables share
+      the same bucket count and key, Spark detects the pre-sorted co-partitioning
+      and replaces the sort-merge join plan with a bucket join — no shuffle stage,
+      no sort stage. Use a bucket count that is a power of 2 (e.g., 128 or 256)
+      and consistent across all tables you join against. The `saveAsTable()` call
+      writes to a Hive-compatible metastore location; ensure the warehouse
+      directory is configured. The upfront write cost is higher, but the amortized
+      shuffle savings dominate if the table is joined tens of times per day.
+    before_code: |
+      # Every join on this table triggers a full shuffle
+      df.write.mode('overwrite').saveAsTable('fact_orders')
+    after_code: |
+      # Bucket by join key — subsequent joins on order_id require zero shuffle
+      (
+          df.write
+          .bucketBy(256, 'order_id')
+          .sortBy('order_id')
+          .mode('overwrite')
+          .saveAsTable('fact_orders')
+      )
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html#bucketing-sorting-and-partitioning"
+    estimated_speedup: "Eliminates shuffle on every subsequent join; amortized 10-100x over table lifetime"
+    effort: MAJOR_REFACTOR
+    common_in: "Fact tables, frequently-joined dimension tables, high-frequency analytical pipelines"
+
+  - rule_id: SPL-D04-009
+    short_recommendation: >-
+      Add a filter() on the partition column before groupBy/distinct/orderBy
+      to enable partition pruning and avoid a full table scan.
+    detailed_recommendation: |
+      Partitioned Parquet/ORC/Delta tables store their partition directory structure
+      on disk. When a query includes a `filter()` on the partition column (e.g.,
+      `WHERE date = '2024-01-01'`), Spark's partition pruning skips all irrelevant
+      directories and reads only the matching data. When no such filter is present
+      and the read flows directly into an expensive operation (`groupBy`, `distinct`,
+      `orderBy`, `agg`), Spark must scan the entire table. On a multi-year history
+      table this can mean scanning terabytes when only gigabytes are needed — a
+      common cause of unexpectedly long job runtimes. Add `filter()` on the
+      partition column before the expensive operation. Confirm pruning is active
+      by checking the Spark UI Stage Detail "Input" bytes — it should reflect only
+      the pruned partition size, not the full table size.
+    before_code: |
+      # Full table scan — reads all years of history
+      spark.read.parquet('s3://datalake/events').groupBy('user_id').count()
+    after_code: |
+      # Partition pruning — reads only 2024-01-01 data
+      (
+          spark.read.parquet('s3://datalake/events')
+          .filter("date = '2024-01-01'")
+          .groupBy('user_id')
+          .count()
+      )
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#partition-discovery"
+    estimated_speedup: "10-1000x data read reduction depending on filter selectivity"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Datalake analytics, multi-year history tables, scheduled reporting queries"
+
+  - rule_id: SPL-D04-010
+    short_recommendation: >-
+      Remove repartition() by a column that differs from the subsequent join key;
+      the repartition is wasted because the join immediately re-shuffles.
+    detailed_recommendation: |
+      `df.repartition('col_a').join(other, 'col_b')` performs two full shuffles
+      back-to-back: first `repartition('col_a')` shuffles data by col_a hash,
+      then `join('col_b')` immediately re-shuffles by col_b hash to co-locate
+      matching keys. The first shuffle is completely wasted because the join
+      invalidates the partitioning before any computation benefits from it. Simply
+      remove the `repartition()` call — the join already shuffles on the join key.
+      The only time a pre-join `repartition` saves work is when the repartition
+      key and the join key are the same column, and even then, Spark's exchange
+      reuse (`spark.sql.exchange.reuse`, enabled by default) can achieve the same
+      result without an explicit `repartition`. If pre-partitioning by the join
+      key is the intent, use `repartition('join_key')` with the same column as
+      the join and rely on exchange reuse.
+    before_code: |
+      # Two full shuffles: repartition by user_id, then join reshuffles by order_id
+      result = df.repartition('user_id').join(orders, 'order_id')
+    after_code: |
+      # One shuffle: join on order_id handles co-location internally
+      result = df.join(orders, 'order_id')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "Eliminates one full wasted shuffle; 2x shuffle I/O reduction for that stage"
+    effort: MINOR_CODE_CHANGE
+    common_in: "ETL join pipelines, manually-partitioned DataFrames, multi-key join chains"
