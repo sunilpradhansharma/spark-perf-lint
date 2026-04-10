@@ -192,6 +192,27 @@ def _read_file(path: Path) -> tuple[str, str | None]:
         return "", f"{path}: {exc}"
 
 
+def _read_head(path: Path, n_bytes: int = _QUICK_SCAN_BYTES) -> tuple[str, str | None]:
+    """Read the first *n_bytes* of *path* as text, for a fast pre-filter check.
+
+    Used by ``_build_target`` to decide whether a full read is needed without
+    loading the entire file into memory.
+
+    Args:
+        path: File to sample.
+        n_bytes: Maximum number of bytes to read.
+
+    Returns:
+        ``(head_text, None)`` on success or ``("", error_message)`` on failure.
+    """
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(n_bytes)
+        return raw.decode("utf-8", errors="replace"), None
+    except OSError as exc:
+        return "", f"{path}: {exc}"
+
+
 def _is_python_file(path: Path) -> bool:
     """Return ``True`` for ``.py`` files (case-insensitive on Windows)."""
     return path.suffix.lower() == ".py"
@@ -260,6 +281,19 @@ def _build_target(
     ``skip_reason`` set when the file should be skipped, so callers can
     surface the reason in verbose output.
 
+    **Fast-path optimisation** — the function avoids reading the full file
+    contents for files that can be cheaply classified:
+
+    1. Ignore-rule check first (pure path matching, zero I/O): ignored files
+       are returned immediately with ``content=""`` and ``size_bytes=0``.
+    2. PySpark head-scan: reads only the first ``_QUICK_SCAN_BYTES`` (8 KB)
+       and runs the PySpark detector on that slice.  Files that contain no
+       PySpark indicators in the first 8 KB are returned as non-PySpark
+       without a full read.  In practice, all PySpark imports appear at the
+       top of the file; files with imports deliberately placed beyond 8 KB
+       are not supported by this fast path.
+    3. Full read: only performed for files that pass the head-scan check.
+
     Args:
         path: Absolute path to the source file.
         root: Project root for relative-path computation.
@@ -271,23 +305,48 @@ def _build_target(
         A ``ScanTarget`` (possibly with ``skip_reason`` set), or ``None``
         when the file could not be read.
     """
+    rel = _resolve_relative(path, root)
+
+    # ── Step 1: ignore check (no I/O) ────────────────────────────────────────
+    skip_reason = _apply_ignore(path, config, root)
+    if skip_reason:
+        return ScanTarget(
+            path=path,
+            content="",
+            is_pyspark=False,
+            relative_path=rel,
+            size_bytes=0,
+            skip_reason=skip_reason,
+        )
+
+    # ── Step 2: fast head-only PySpark check ─────────────────────────────────
+    if not force_pyspark:
+        head, head_err = _read_head(path)
+        if head_err:
+            logger.warning("Could not read %s: %s", path, head_err)
+            return None
+        if not is_pyspark_file(head):
+            return ScanTarget(
+                path=path,
+                content="",
+                is_pyspark=False,
+                relative_path=rel,
+                size_bytes=0,
+            )
+
+    # ── Step 3: full read for confirmed PySpark files ─────────────────────────
     content, err = _read_file(path)
     if err:
         logger.warning("Could not read %s: %s", path, err)
         return None
 
-    rel = _resolve_relative(path, root)
     size = len(content.encode("utf-8", errors="replace"))
-    skip_reason = _apply_ignore(path, config, root)
-    spark = force_pyspark or is_pyspark_file(content)
-
     return ScanTarget(
         path=path,
         content=content,
-        is_pyspark=spark,
+        is_pyspark=True,
         relative_path=rel,
         size_bytes=size,
-        skip_reason=skip_reason,
     )
 
 

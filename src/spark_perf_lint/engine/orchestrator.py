@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from spark_perf_lint.config import LintConfig
@@ -47,6 +48,13 @@ _SEVERITY_ORDER: dict[Severity, int] = {
     Severity.WARNING: 1,
     Severity.INFO: 2,
 }
+
+# Parallel execution tuning.
+# Below _PARALLEL_THRESHOLD files the thread-pool overhead costs more than
+# it saves; above it each file is dispatched to its own worker thread so that
+# I/O wait and GIL-releasing C extensions (ast.parse) run concurrently.
+_PARALLEL_THRESHOLD: int = 3   # files; serial below this count
+_MAX_WORKERS: int = 4           # threads; enough for a typical 20-file commit
 
 
 class ScanOrchestrator:
@@ -145,18 +153,58 @@ class ScanOrchestrator:
     def _run_rules_on_targets(self, targets: list[ScanTarget]) -> list[Finding]:
         """Run all enabled rules across a list of scan targets.
 
+        Pre-computes the enabled-rule list once so the registry is not
+        accessed from multiple threads simultaneously.  For small batches
+        (< ``_PARALLEL_THRESHOLD`` files) the serial path is used to avoid
+        thread-pool overhead.  Larger batches are dispatched to a
+        ``ThreadPoolExecutor`` so that AST parsing and I/O-bound work
+        can proceed concurrently.
+
         Args:
             targets: PySpark files to analyse.
 
         Returns:
-            Flat list of all findings from all targets.
+            Flat list of all findings from all targets (order not
+            guaranteed when parallel execution is used).
         """
-        all_findings: list[Finding] = []
-        for target in targets:
-            all_findings.extend(self._run_rules_on_target(target))
+        if not targets:
+            return []
+
+        # Resolve once — registry access is not thread-safe under mutation.
+        enabled_rules = self._registry.get_enabled_rules(self._config)
+
+        if len(targets) < _PARALLEL_THRESHOLD:
+            # Serial fast-path: zero thread overhead for tiny batches.
+            all_findings: list[Finding] = []
+            for target in targets:
+                all_findings.extend(self._run_rules_on_target(target, enabled_rules))
+            return all_findings
+
+        # Parallel path: dispatch each file to a worker thread.
+        all_findings = []
+        n_workers = min(len(targets), _MAX_WORKERS)
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {
+                pool.submit(self._run_rules_on_target, target, enabled_rules): target
+                for target in targets
+            }
+            for future in as_completed(futures):
+                try:
+                    all_findings.extend(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    tgt = futures[future]
+                    logger.error(
+                        "Worker failed unexpectedly on %s: %s",
+                        tgt.relative_path,
+                        exc,
+                    )
         return all_findings
 
-    def _run_rules_on_target(self, target: ScanTarget) -> list[Finding]:
+    def _run_rules_on_target(
+        self,
+        target: ScanTarget,
+        enabled_rules: list | None = None,
+    ) -> list[Finding]:
         """Parse and run all enabled rules against a single ``ScanTarget``.
 
         Parse errors are logged as warnings and produce a synthetic INFO
@@ -164,6 +212,10 @@ class ScanOrchestrator:
 
         Args:
             target: A single file target with pre-loaded content.
+            enabled_rules: Pre-computed rule list from the caller.  When
+                ``None`` (e.g. from ``scan_content``), the list is resolved
+                from the registry.  Pass an explicit list when calling from a
+                thread pool to avoid repeated registry lookups.
 
         Returns:
             All findings for *target*, or a single parse-error finding if
@@ -178,8 +230,10 @@ class ScanOrchestrator:
             logger.error("Unexpected error parsing %s: %s", target.relative_path, exc)
             return []
 
+        if enabled_rules is None:
+            enabled_rules = self._registry.get_enabled_rules(self._config)
+
         findings: list[Finding] = []
-        enabled_rules = self._registry.get_enabled_rules(self._config)
         for rule in enabled_rules:
             try:
                 rule_findings = rule.check(analyzer, self._config)
