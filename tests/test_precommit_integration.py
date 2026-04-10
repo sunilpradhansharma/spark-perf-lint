@@ -233,8 +233,8 @@ class TestHookOutput:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert (
-            "SPL-D03-001" in strip_ansi(result.stdout)
+        assert "SPL-D03-001" in strip_ansi(
+            result.stdout
         ), f"Expected SPL-D03-001 in output.\nOutput: {result.stdout[:500]}"
 
     def test_quiet_flag_suppresses_header(self, tmp_path: Path) -> None:
@@ -248,7 +248,9 @@ class TestHookOutput:
         assert len(full_result.stdout) > len(
             quiet_result.stdout
         ), "--quiet output should be shorter than full output."
-        assert "v0." not in strip_ansi(quiet_result.stdout), "Quiet mode should suppress the versioned header."
+        assert "v0." not in strip_ansi(
+            quiet_result.stdout
+        ), "Quiet mode should suppress the versioned header."
 
     def test_no_fix_suppresses_code_panels(self, tmp_path: Path) -> None:
         """--no-fix should omit before/after code panels."""
@@ -283,8 +285,8 @@ class TestHookOutput:
         result = _run_hook("--verbose", files=[bad])
 
         # Dimension breakdown lists dimension display names like "D03 · Joins"
-        assert (
-            "D03" in strip_ansi(result.stdout)
+        assert "D03" in strip_ansi(
+            result.stdout
         ), f"--verbose should include dimension breakdown.\nOutput: {result.stdout[:800]}"
 
 
@@ -792,8 +794,8 @@ class TestOutputFormat:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert (
-            "SPL-D03-001" in strip_ansi(result.stdout)
+        assert "SPL-D03-001" in strip_ansi(
+            result.stdout
         ), f"Rule ID not found in output.\nstdout: {result.stdout[:500]}"
 
     def test_severity_label_present_in_output(self, tmp_path: Path) -> None:
@@ -810,8 +812,8 @@ class TestOutputFormat:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert (
-            "Traceback (most recent call last)" not in strip_ansi(result.stdout)
+        assert "Traceback (most recent call last)" not in strip_ansi(
+            result.stdout
         ), "A Python traceback leaked into the hook output."
 
 
