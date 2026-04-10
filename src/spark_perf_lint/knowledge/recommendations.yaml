@@ -1,0 +1,653 @@
+# =============================================================================
+# recommendations.yaml — spark-perf-lint knowledge base
+# =============================================================================
+#
+# Structure
+# ---------
+# Each entry in the top-level `rules` list describes one lint rule and how to
+# fix it.  Fields:
+#
+#   rule_id              Unique rule identifier, e.g. SPL-D01-001
+#   short_recommendation One-line fix summary (displayed inline in terminal output)
+#   detailed_recommendation
+#                        Multi-sentence paragraph with concrete steps the developer
+#                        should follow to resolve the finding.
+#   before_code          Anti-pattern snippet that triggers the rule (Python/PySpark)
+#   after_code           Fixed snippet that resolves the finding
+#   config_changes       Dict of Spark config keys → recommended values.
+#                        null when the fix is purely a code change.
+#   spark_docs_link      URL to the most relevant Spark documentation page
+#   estimated_speedup    Human-readable range, e.g. "2-5x" or "10-100x"
+#   effort               One of: CONFIG_ONLY | MINOR_CODE_CHANGE | MAJOR_REFACTOR
+#   common_in            Comma-separated list of workload types where this pattern
+#                        is frequently seen
+#
+# Coverage
+# --------
+# This file currently covers D01 (Cluster Configuration) and D02 (Shuffle).
+# D03–D11 recommendations are in separate files added as each dimension ships.
+# =============================================================================
+
+rules:
+
+  # ---------------------------------------------------------------------------
+  # D01 — Cluster Configuration (SPL-D01-001 through SPL-D01-010)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D01-001
+    short_recommendation: >-
+      Set spark.serializer to KryoSerializer for 10x faster serialization and
+      3-5x smaller shuffle payloads.
+    detailed_recommendation: |
+      Spark defaults to Java serialization, which is ~10x slower than Kryo and
+      produces serialized objects 3-5x larger. This directly inflates shuffle
+      traffic and block-manager memory pressure on every wide transformation.
+      Add `.config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")`
+      to your SparkSession builder. Optionally register domain classes with
+      `spark.kryo.classesToRegister` for maximum efficiency, and set
+      `spark.kryo.registrationRequired = false` while migrating to avoid
+      ClassNotRegistered exceptions on unregistered types.
+    before_code: |
+      spark = SparkSession.builder.appName("job").getOrCreate()
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName("job")
+          .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+      spark.kryo.registrationRequired: "false"
+    spark_docs_link: "https://spark.apache.org/docs/latest/tuning.html#data-serialization"
+    estimated_speedup: "10x serialization speed; 3-5x shuffle data reduction"
+    effort: CONFIG_ONLY
+    common_in: "ETL pipelines, ML feature pipelines, streaming jobs"
+
+  - rule_id: SPL-D01-002
+    short_recommendation: >-
+      Set spark.executor.memory explicitly; the 1 GB default causes OOM and
+      disk spill on any production dataset.
+    detailed_recommendation: |
+      When `spark.executor.memory` is absent, Spark uses 1 GB on YARN/Kubernetes
+      cluster managers. This is rarely sufficient: tasks spill shuffle data to
+      disk, GC pauses lengthen, and jobs fail with OutOfMemoryError under modest
+      data volumes. A practical formula: `(rows_per_task × avg_row_bytes × 3) +
+      20% overhead`. Start with 4g for general ETL and increase based on Spark UI
+      executor memory metrics. Also set `spark.executor.memoryOverhead` to at
+      least 10% of executor memory (minimum 384 MB) to cover JVM off-heap usage.
+    before_code: |
+      spark = SparkSession.builder.appName("job").getOrCreate()
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName("job")
+          .config("spark.executor.memory", "4g")
+          .config("spark.executor.memoryOverhead", "512m")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.executor.memory: "4g"
+      spark.executor.memoryOverhead: "512m"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#application-properties"
+    estimated_speedup: "Prevents OOM; 2-10x task throughput improvement over disk-spilling baseline"
+    effort: CONFIG_ONLY
+    common_in: "ETL pipelines, batch aggregation jobs, ML training"
+
+  - rule_id: SPL-D01-003
+    short_recommendation: >-
+      Set spark.driver.memory to at least 2g; the 1 GB default fails when
+      collect() or broadcast variables are used.
+    detailed_recommendation: |
+      The driver accumulates task result metadata, broadcast variables, and the
+      full output of `collect()` / `toPandas()` calls. Spark's 1 GB driver default
+      is commonly exceeded by jobs that collect even moderately sized result sets
+      or use several broadcast joins simultaneously. A driver OOM kills the entire
+      application, wasting all executor work already completed. Set
+      `spark.driver.memory` to 2g as a minimum; increase to 4g or more for jobs
+      that collect large DataFrames, use many broadcast joins, or maintain a large
+      accumulator registry.
+    before_code: |
+      spark = SparkSession.builder.appName("job").getOrCreate()
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName("job")
+          .config("spark.driver.memory", "2g")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.driver.memory: "2g"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#application-properties"
+    estimated_speedup: "Prevents driver OOM; no performance gain when already stable"
+    effort: CONFIG_ONLY
+    common_in: "Interactive notebooks, jobs using collect() or toPandas(), broadcast-heavy joins"
+
+  - rule_id: SPL-D01-004
+    short_recommendation: >-
+      Enable spark.dynamicAllocation.enabled to release idle executors and
+      improve cluster utilization.
+    detailed_recommendation: |
+      Without dynamic allocation, Spark holds every requested executor for the
+      entire application lifetime, including idle phases between query stages.
+      On shared YARN or Kubernetes clusters this blocks other jobs from using
+      those resources. Enable dynamic allocation by setting
+      `spark.dynamicAllocation.enabled = true` and
+      `spark.dynamicAllocation.shuffleTracking.enabled = true` (Spark 3+, removes
+      the requirement for an external shuffle service). Tune
+      `spark.dynamicAllocation.minExecutors`, `maxExecutors`, and
+      `executorIdleTimeout` to match your workload's burst and steady-state
+      patterns. Note: do not use dynamic allocation with Spark Structured Streaming
+      unless you also configure the external shuffle service.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.executor.instances", "10")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.dynamicAllocation.enabled", "true")
+          .config("spark.dynamicAllocation.shuffleTracking.enabled", "true")
+          .config("spark.dynamicAllocation.minExecutors", "2")
+          .config("spark.dynamicAllocation.maxExecutors", "20")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.dynamicAllocation.enabled: "true"
+      spark.dynamicAllocation.shuffleTracking.enabled: "true"
+      spark.dynamicAllocation.minExecutors: "2"
+      spark.dynamicAllocation.maxExecutors: "20"
+    spark_docs_link: "https://spark.apache.org/docs/latest/job-scheduling.html#dynamic-resource-allocation"
+    estimated_speedup: "20-50% cluster cost reduction; reduced queue wait times for concurrent jobs"
+    effort: CONFIG_ONLY
+    common_in: "Batch ETL jobs, shared YARN/Kubernetes clusters, variable-load pipelines"
+
+  - rule_id: SPL-D01-005
+    short_recommendation: >-
+      Reduce spark.executor.cores to 4-5; higher values cause HDFS contention
+      and GC pressure.
+    detailed_recommendation: |
+      Each executor core runs one task concurrently, and all cores share the
+      executor's JVM heap and HDFS connection pool. The HDFS client handles
+      approximately 5 concurrent streams efficiently per DataNode connection;
+      beyond that, throughput degrades due to lock contention and thread
+      context-switching overhead. More than 5 cores per executor also amplifies
+      GC pause duration because all tasks pause together. Set
+      `spark.executor.cores` to 4 or 5 and increase the number of executors
+      instead to achieve the desired total parallelism. The standard formula:
+      `total_executor_cores = num_executors × cores_per_executor`, keeping
+      `cores_per_executor` at 4-5.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.executor.cores", "10")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.executor.cores", "4")
+          .config("spark.executor.instances", "20")  # scale out, not up
+          .getOrCreate()
+      )
+    config_changes:
+      spark.executor.cores: "4"
+    spark_docs_link: "https://spark.apache.org/docs/latest/hardware-provisioning.html"
+    estimated_speedup: "1.5-3x HDFS read throughput; reduced GC pause frequency"
+    effort: CONFIG_ONLY
+    common_in: "HDFS-backed ETL, large cluster deployments, Parquet/ORC ingestion jobs"
+
+  - rule_id: SPL-D01-006
+    short_recommendation: >-
+      Raise spark.executor.memoryOverhead to at least 384m to prevent silent
+      container kills on YARN/Kubernetes.
+    detailed_recommendation: |
+      `spark.executor.memoryOverhead` covers off-heap JVM memory: metadata,
+      thread stacks, NIO direct buffers, and (for PySpark) the Python worker
+      process memory. Spark's internal default is `max(384 MB, 10% of
+      executor.memory)`. Explicitly setting it below this floor means YARN or
+      Kubernetes will kill the container when RSS memory exceeds the allocation,
+      producing a cryptic "executor lost" message with no Java OutOfMemoryError
+      in the logs. Set it to at least 384m; for PySpark jobs with UDFs or jobs
+      using Arrow-based pandas API, increase to 1g-2g to account for native
+      Python process memory.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.executor.memoryOverhead", "128m")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.executor.memory", "4g")
+          .config("spark.executor.memoryOverhead", "512m")  # >= max(384m, 10% of memory)
+          .getOrCreate()
+      )
+    config_changes:
+      spark.executor.memoryOverhead: "512m"
+    spark_docs_link: "https://spark.apache.org/docs/latest/running-on-yarn.html#resource-allocation"
+    estimated_speedup: "Prevents container kills; no throughput gain when already stable"
+    effort: CONFIG_ONLY
+    common_in: "YARN/Kubernetes deployments, PySpark UDF jobs, Arrow-enabled pandas API workloads"
+
+  - rule_id: SPL-D01-007
+    short_recommendation: >-
+      Set spark.python.worker.memory when Python UDFs are present; the 512 MB
+      default causes silent task failures on large inputs.
+    detailed_recommendation: |
+      Each Python UDF task runs in a separate Python worker subprocess per
+      executor slot. The worker's memory is bounded by `spark.python.worker.memory`
+      (default 512 MB). UDFs that load ML models, process wide pandas DataFrames,
+      or call into native libraries routinely exceed this. When a worker is killed
+      by the OOM killer, Spark reports a confusing `WorkerLostFailureReason`
+      rather than an OutOfMemoryError. Set this config to at least 1g for general
+      UDFs; 2g or more for pandas UDFs processing wide DataFrames or heavy ML
+      inference. Also ensure `spark.executor.memoryOverhead` accounts for all
+      Python workers running concurrently on an executor
+      (`cores_per_executor × python_worker_memory`).
+    before_code: |
+      @udf(returnType=StringType())
+      def transform(x):
+          return x.strip().upper()
+
+      df.withColumn("clean", transform("raw_col"))
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.python.worker.memory", "1g")
+          .config("spark.executor.memoryOverhead", "1g")
+          .getOrCreate()
+      )
+
+      @udf(returnType=StringType())
+      def transform(x):
+          return x.strip().upper()
+
+      df.withColumn("clean", transform("raw_col"))
+    config_changes:
+      spark.python.worker.memory: "1g"
+      spark.executor.memoryOverhead: "1g"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#execution-behavior"
+    estimated_speedup: "Prevents silent task failures; stable throughput under large UDF inputs"
+    effort: CONFIG_ONLY
+    common_in: "PySpark UDF-heavy ETL, ML inference pipelines, pandas UDF (Arrow) jobs"
+
+  - rule_id: SPL-D01-008
+    short_recommendation: >-
+      Raise spark.network.timeout to at least 120s; lower values cause false
+      executor evictions during GC pauses.
+    detailed_recommendation: |
+      `spark.network.timeout` is the global deadline for all Spark internal
+      network communications: executor heartbeats, shuffle block fetches, and
+      block manager transfers. During heavy shuffle phases or full-GC pauses,
+      executors legitimately go silent for 30-90 seconds. A timeout shorter than
+      120s fires before GC completes, causing Spark to mark healthy executors
+      as lost, kill their in-flight tasks, and reschedule all work from scratch —
+      wasting significant compute. Remove any override below 120s, or set it
+      explicitly to `120s`. For jobs with very long GC pauses (large heap, G1GC),
+      consider 300s and tune `spark.executor.heartbeatInterval` to 30s for
+      faster *real* failure detection.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.network.timeout", "30s")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.network.timeout", "120s")
+          .config("spark.executor.heartbeatInterval", "10s")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.network.timeout: "120s"
+      spark.executor.heartbeatInterval: "10s"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#networking"
+    estimated_speedup: "Eliminates wasted recompute from false-positive executor evictions"
+    effort: CONFIG_ONLY
+    common_in: "Large shuffle jobs, GC-heavy workloads, jobs on congested network fabrics"
+
+  - rule_id: SPL-D01-009
+    short_recommendation: >-
+      Enable spark.speculation to automatically re-launch straggler tasks on
+      slow nodes or degraded cloud instances.
+    detailed_recommendation: |
+      Without speculative execution, a single slow node (hardware degradation,
+      noisy neighbour, JVM GC skew) can stall an entire stage until its tasks
+      finish. `spark.speculation = true` monitors task progress and launches
+      duplicate copies of straggler tasks on other executors, using the result
+      from whichever finishes first. This is especially valuable on heterogeneous
+      cloud hardware where instance performance varies by 20-30%. Tune
+      `spark.speculation.multiplier` (default 1.5x — tasks 1.5x slower than the
+      median are speculated) and `spark.speculation.quantile` (default 0.75 —
+      speculation starts after 75% of tasks in the stage complete). Important:
+      enable only for idempotent tasks. Non-idempotent operations (DB writes,
+      external API calls) can produce duplicate side-effects.
+    before_code: |
+      spark = SparkSession.builder.appName("etl").getOrCreate()
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName("etl")
+          .config("spark.speculation", "true")
+          .config("spark.speculation.multiplier", "1.5")
+          .config("spark.speculation.quantile", "0.9")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.speculation: "true"
+      spark.speculation.multiplier: "1.5"
+      spark.speculation.quantile: "0.9"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#scheduling"
+    estimated_speedup: "2-5x stage speedup on degraded nodes; negligible overhead on healthy clusters"
+    effort: CONFIG_ONLY
+    common_in: "Long-running batch jobs, cloud spot/preemptible instance workloads, ETL pipelines"
+
+  - rule_id: SPL-D01-010
+    short_recommendation: >-
+      Tune spark.sql.shuffle.partitions away from the default of 200; it is
+      rarely correct for production datasets or clusters.
+    detailed_recommendation: |
+      The default of 200 shuffle partitions was chosen for a small benchmark
+      cluster circa 2014. It is wrong in both directions: too high for small
+      datasets (hundreds of tiny shuffle files cause scheduler overhead and slow
+      downstream reads) and too low for large datasets (GBs per partition, disk
+      spill, OOM). A practical formula: start with
+      `max(total_executor_cores * 2, dataset_size_gb * 8)` and validate using
+      the Spark UI stage detail — aim for 100-300 MB per post-shuffle partition.
+      With Spark 3+ AQE enabled (`spark.sql.adaptive.enabled = true`), you can
+      set a higher value and let AQE automatically coalesce small post-shuffle
+      partitions at runtime, reducing the risk of over-partitioning.
+    before_code: |
+      # Default 200 partitions in effect — not set anywhere
+      spark = SparkSession.builder.appName("job").getOrCreate()
+      result = df.groupBy("customer_id").agg(sum("revenue"))
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName("job")
+          .config("spark.sql.shuffle.partitions", "400")  # tune for cluster
+          .config("spark.sql.adaptive.enabled", "true")   # AQE auto-coalesces
+          .getOrCreate()
+      )
+      result = df.groupBy("customer_id").agg(sum("revenue"))
+    config_changes:
+      spark.sql.shuffle.partitions: "400"  # replace with cluster-tuned value
+      spark.sql.adaptive.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "2-10x on large datasets (avoids spill); 5-20x on small datasets (avoids overhead)"
+    effort: CONFIG_ONLY
+    common_in: "All Spark SQL jobs, joins, aggregations, window functions"
+
+  # ---------------------------------------------------------------------------
+  # D02 — Shuffle (SPL-D02-001 through SPL-D02-008)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D02-001
+    short_recommendation: >-
+      Replace groupByKey() with reduceByKey() or aggregateByKey() to enable
+      map-side partial aggregation before the shuffle.
+    detailed_recommendation: |
+      `groupByKey()` collects every value for each key from every partition and
+      ships all of them to a single reducer before any aggregation occurs. On a
+      10 GB dataset this means 10 GB of shuffle traffic even if the final result
+      is kilobytes. `reduceByKey(func)` and `aggregateByKey(zero, seqOp, combOp)`
+      apply a partial aggregation on each mapper partition first, then shuffle
+      only the reduced values — reducing shuffle data by 10-100x for commutative,
+      associative operations (sum, count, max, string concat). For the DataFrame
+      API, `groupBy().agg()` already uses partial aggregation internally; prefer
+      it over `groupBy().apply()` with a Python function unless you need custom
+      group-level logic that cannot be expressed as a built-in aggregation.
+    before_code: |
+      # Shuffles all raw values across the network
+      result = rdd.groupByKey().mapValues(sum)
+    after_code: |
+      # Partial aggregation happens map-side; only sums are shuffled
+      result = rdd.reduceByKey(lambda a, b: a + b)
+
+      # Or for more complex aggregations:
+      result = rdd.aggregateByKey(0, lambda acc, v: acc + v, lambda a, b: a + b)
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#working-with-key-value-pairs"
+    estimated_speedup: "10-100x shuffle data reduction for aggregation workloads"
+    effort: MINOR_CODE_CHANGE
+    common_in: "RDD-based ETL, word-count style aggregations, legacy PySpark pipelines"
+
+  - rule_id: SPL-D02-002
+    short_recommendation: >-
+      Set spark.sql.shuffle.partitions away from the default 200; enable AQE
+      to auto-tune at runtime.
+    detailed_recommendation: |
+      The default of 200 shuffle partitions is wrong for most production
+      workloads. For small datasets (<1 GB) it produces hundreds of tiny tasks
+      with scheduler overhead exceeding actual computation. For large datasets
+      (>50 GB) it yields partitions too large to fit in executor memory, causing
+      disk spill. Set `spark.sql.shuffle.partitions` explicitly using the formula
+      `max(total_executor_cores * 2, dataset_size_gb * 8)`. Then enable Adaptive
+      Query Execution (`spark.sql.adaptive.enabled = true`) so Spark can
+      automatically coalesce small post-shuffle partitions at runtime, giving you
+      a safe ceiling without manual tuning for every query.
+    before_code: |
+      # 200 shuffle partitions in effect
+      spark = SparkSession.builder.getOrCreate()
+      df.groupBy("category").agg(count("*")).write.parquet("output/")
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.shuffle.partitions", "400")
+          .config("spark.sql.adaptive.enabled", "true")
+          .getOrCreate()
+      )
+      df.groupBy("category").agg(count("*")).write.parquet("output/")
+    config_changes:
+      spark.sql.shuffle.partitions: "400"  # replace with cluster-tuned value
+      spark.sql.adaptive.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#adaptive-query-execution"
+    estimated_speedup: "2-10x on large data (no spill); 5-20x on small data (no scheduler overhead)"
+    effort: CONFIG_ONLY
+    common_in: "All Spark SQL jobs, aggregation pipelines, join-heavy workloads"
+
+  - rule_id: SPL-D02-003
+    short_recommendation: >-
+      Remove repartition() immediately before join(); join already shuffles on
+      the key, making the prior repartition redundant.
+    detailed_recommendation: |
+      `join()` performs a full shuffle internally to co-locate matching keys on
+      the same executor. Calling `repartition()` on the same key immediately
+      before `join()` triggers two full shuffles for the same data: once to
+      repartition, and again inside the join. This doubles the shuffle I/O for
+      that stage with no benefit. Spark 3+ AQE can sometimes merge these via
+      exchange reuse, but explicit pre-join repartitioning prevents that
+      optimization from applying. Simply remove the `repartition()` call. If you
+      need to control the output partition count, set `spark.sql.shuffle.partitions`
+      globally, or use `df.hint("repartition", n, "key")` to communicate intent
+      to the Catalyst optimizer without guaranteeing a redundant shuffle.
+    before_code: |
+      # Two full shuffles: repartition + join
+      result = orders.repartition(200, "customer_id").join(customers, "customer_id")
+    after_code: |
+      # One shuffle: join handles co-location internally
+      result = orders.join(customers, "customer_id")
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "2x shuffle I/O reduction for that join stage"
+    effort: MINOR_CODE_CHANGE
+    common_in: "ETL join pipelines, star-schema fact/dimension joins, multi-table merges"
+
+  - rule_id: SPL-D02-004
+    short_recommendation: >-
+      Add .limit(n) after orderBy() to activate the TakeOrderedAndProject
+      optimization; full global sorts are rarely needed.
+    detailed_recommendation: |
+      `orderBy()` / `sort()` produces a globally ordered result, requiring a full
+      shuffle followed by a range-partition sort across all executors — O(n log n)
+      over the total row count. In practice, almost every use case only needs the
+      top-N rows. `df.orderBy(col).limit(n)` is recognized by Catalyst as a
+      `TakeOrderedAndProject` physical plan that maintains only a top-N heap per
+      task, never materializing the full sorted output — O(n log k) complexity.
+      If you genuinely need a fully sorted output (e.g., for a downstream
+      checkpoint file with strict ordering), use `sortWithinPartitions()` to sort
+      each partition independently and cheaply, then write the output; downstream
+      readers can merge-sort at read time if needed.
+    before_code: |
+      # Full global sort — shuffles and sorts every row
+      top_customers = df.orderBy("revenue", ascending=False)
+    after_code: |
+      # TakeOrderedAndProject — heap of 100 rows per task, no full sort
+      top_customers = df.orderBy("revenue", ascending=False).limit(100)
+
+      # For partition-local ordering (no global shuffle):
+      # df.sortWithinPartitions("revenue", ascending=False)
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-orderby.html"
+    estimated_speedup: "O(n log n) → O(n log k); 10-1000x for large n with small k"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Reporting queries, top-N analytics, leaderboard computations, ranking pipelines"
+
+  - rule_id: SPL-D02-005
+    short_recommendation: >-
+      Apply filter() and select() before distinct() to reduce the shuffle
+      payload; avoid deduplicating the full dataset.
+    detailed_recommendation: |
+      `distinct()` is equivalent to `groupBy(*all_columns).count()` — it shuffles
+      every row across the network to detect duplicates. On a 100 M-row wide table
+      with no prior filtering, this is a full O(n) shuffle of the entire dataset,
+      including columns you may not need. Two optimizations reduce the cost
+      significantly: (1) Apply `filter()` / `where()` before `distinct()` to
+      reduce the number of rows entering the shuffle. (2) Apply `select()` before
+      `distinct()` to drop unused columns, reducing the serialized row size. If
+      you only need distinct values of a few columns, use
+      `dropDuplicates(["col1", "col2"])` which is more explicit and avoids
+      shuffling the full row width.
+    before_code: |
+      # Shuffles all 50 columns of the full table
+      distinct_ids = events_df.distinct()
+    after_code: |
+      # Filter first to reduce rows; select to reduce columns; then deduplicate
+      distinct_ids = (
+          events_df
+          .filter("event_date > '2024-01-01'")
+          .select("user_id", "event_type")
+          .distinct()
+      )
+
+      # Or for column-subset deduplication:
+      # events_df.dropDuplicates(["user_id", "event_type"])
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.distinct.html"
+    estimated_speedup: "2-20x depending on filter selectivity and column width reduction"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Deduplication ETL, event stream processing, CDC pipelines, data quality checks"
+
+  - rule_id: SPL-D02-006
+    short_recommendation: >-
+      Replace coalesce() after a shuffle with repartition() to maintain even
+      data distribution; coalesce creates unbalanced tasks.
+    detailed_recommendation: |
+      `coalesce(n)` merges partitions without a shuffle by assigning multiple
+      existing partitions to fewer tasks. When applied after a shuffle operation
+      (groupBy, join, orderBy, distinct, repartition), the resulting tasks are
+      highly unbalanced: some process multiple shuffle output partitions while
+      others process one. This creates long-tail stragglers that stall the stage.
+      If the goal is to reduce output file count, use `repartition(n)` instead
+      — it shuffles data evenly across the target partitions. Better still, set
+      `spark.sql.shuffle.partitions` to the desired target so the preceding
+      shuffle already produces the right partition count, eliminating the need
+      for a post-shuffle repartition entirely.
+    before_code: |
+      # coalesce after groupBy creates unbalanced partitions
+      result = (
+          df.groupBy("region")
+          .agg(sum("sales").alias("total"))
+          .coalesce(10)
+      )
+    after_code: |
+      # repartition shuffles evenly; or tune spark.sql.shuffle.partitions directly
+      result = (
+          df.groupBy("region")
+          .agg(sum("sales").alias("total"))
+          .repartition(10)
+      )
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.coalesce.html"
+    estimated_speedup: "Eliminates straggler tasks; consistent stage completion time"
+    effort: MINOR_CODE_CHANGE
+    common_in: "ETL output sinks, small-file reduction pipelines, post-aggregation writes"
+
+  - rule_id: SPL-D02-007
+    short_recommendation: >-
+      Insert cache() or checkpoint() between sequential shuffle operations to
+      truncate lineage and prevent redundant re-execution.
+    detailed_recommendation: |
+      Each wide transformation (join, groupBy, orderBy, distinct, repartition)
+      triggers a full shuffle stage. When multiple such operations are chained
+      without materializing the intermediate result, Spark must re-execute the
+      entire preceding lineage if any executor fails mid-sequence. The query
+      plan also grows deeply nested, making debugging difficult. Inserting
+      `df.cache()` between shuffle stages materializes the intermediate result
+      in memory, truncates the lineage, and provides a checkpoint for failure
+      recovery. Use `df.checkpoint()` (with a configured checkpoint directory)
+      for long lineages or when executor memory is tight. Also check whether
+      a `filter()` can be applied between the shuffles to reduce the data volume
+      entering the second shuffle.
+    before_code: |
+      # Three shuffle stages with no materialization break
+      df2 = df.groupBy("category").agg(sum("amount").alias("total"))
+      df3 = df2.join(lookup_df, "category")
+      df4 = df3.orderBy("total", ascending=False)
+      df4.write.parquet("output/")
+    after_code: |
+      # Materialize after the first shuffle to truncate lineage
+      df2 = df.groupBy("category").agg(sum("amount").alias("total")).cache()
+      df2.count()  # trigger materialization
+
+      df3 = df2.join(lookup_df, "category")
+      df4 = df3.orderBy("total", ascending=False)
+      df4.write.parquet("output/")
+
+      df2.unpersist()  # release memory when done
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#rdd-persistence"
+    estimated_speedup: "Prevents full lineage re-execution on failure; 2-5x faster recovery"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Complex multi-stage ETL, iterative ML preprocessing, multi-join pipelines"
+
+  - rule_id: SPL-D02-008
+    short_recommendation: >-
+      Set spark.shuffle.file.buffer to 1m to reduce shuffle-write syscall
+      count by up to 32x versus the 32 KB default.
+    detailed_recommendation: |
+      `spark.shuffle.file.buffer` controls the in-memory write buffer used when
+      each map task writes its shuffle output files. Spark's default is 32 KB,
+      set conservatively for memory-constrained environments. At 32 KB, a task
+      writing 32 MB of shuffle data issues ~1000 `write()` syscalls; at 1 MB,
+      only ~32 syscalls. The memory overhead is negligible: one 1 MB buffer per
+      active shuffle map task. For shuffle-heavy workloads (many groupBy/join
+      operations), this reduction in syscall overhead is visible as shorter
+      shuffle-write times in the Spark UI Stage Detail page. Pair this with
+      `spark.shuffle.io.preferDirectBufs = true` to use off-heap (direct)
+      NIO buffers for shuffle reads, reducing GC pressure during shuffle fetch.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.shuffle.file.buffer", "32k")  # Spark default
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.shuffle.file.buffer", "1m")
+          .config("spark.shuffle.io.preferDirectBufs", "true")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.shuffle.file.buffer: "1m"
+      spark.shuffle.io.preferDirectBufs: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/configuration.html#shuffle-behavior"
+    estimated_speedup: "Up to 32x reduction in shuffle-write syscall count"
+    effort: CONFIG_ONLY
+    common_in: "Shuffle-heavy ETL, multi-join pipelines, large groupBy aggregations"
