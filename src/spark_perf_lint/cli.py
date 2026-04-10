@@ -8,9 +8,8 @@ Exposes a Click command group with five sub-commands:
     spark-perf-lint version  — print the package version
     spark-perf-lint explain  — show detailed rule documentation
 
-The scan command is wired to ``ScanOrchestrator`` for full engine execution.
-Reporter integration (JSON, Markdown, GitHub PR) will be completed once the
-reporters/ package is implemented.
+The scan command is wired to ``ScanOrchestrator`` for full engine execution
+and ``TerminalReporter`` for Rich-formatted terminal output.
 """
 
 from __future__ import annotations
@@ -211,9 +210,6 @@ def scan(
         click.echo(f"Configuration error: {exc}", err=True)
         sys.exit(2)
 
-    if not quiet:
-        _print_scan_header(paths, config, verbose)
-
     # --- Run the scan ---
     from spark_perf_lint.engine.orchestrator import ScanOrchestrator
 
@@ -236,26 +232,6 @@ def scan(
         sys.exit(1)
 
 
-def _print_scan_header(
-    paths: tuple[Path, ...],
-    config: LintConfig,
-    verbose: bool,
-) -> None:
-    """Print a styled scan header to stdout."""
-    click.echo(
-        click.style(
-            f"spark-perf-lint v{__version__}",
-            fg="bright_cyan",
-            bold=True,
-        )
-    )
-    if verbose:
-        source = str(config.config_file_path) if config.config_file_path else "built-in defaults"
-        click.echo(f"  Config : {source}")
-        click.echo(f"  Paths  : {[str(p) for p in paths] or ['.']}")
-    click.echo("")
-
-
 def _render_report(
     report: Any,
     config: LintConfig,
@@ -264,82 +240,31 @@ def _render_report(
     quiet: bool,
     verbose: bool,
 ) -> None:
-    """Render *report* to stdout (or *output_path*) using a minimal terminal formatter.
-
-    Full reporter integration (JSON, Markdown, GitHub PR) will be wired in
-    once the reporters/ package is complete.  For now this provides a clean,
-    colour-coded terminal view sufficient for development and pre-commit use.
+    """Render *report* using :class:`~spark_perf_lint.reporters.terminal.TerminalReporter`.
 
     Args:
         report: ``AuditReport`` produced by the orchestrator.
-        config: Resolved configuration (used for threshold filtering).
+        config: Resolved configuration used during the scan.
         output_path: If set, write plain-text output here instead of stdout.
-        show_fix: Whether to render before/after code snippets.
-        quiet: Suppress all non-finding output.
-        verbose: Print per-file timing and rule counts.
+        show_fix: Whether to render before/after code panels.
+        quiet: Suppress header and footer; emit only finding cards.
+        verbose: Include explanations, diffs, references, and dimension breakdown.
     """
-    import io
+    from spark_perf_lint.reporters.terminal import TerminalReporter
 
-    threshold = config.severity_threshold
-    visible = [f for f in report.findings if f.severity >= threshold]
+    reporter = TerminalReporter(
+        report,
+        config,
+        show_fix=show_fix,
+        quiet=quiet,
+        verbose=verbose,
+    )
 
-    buf = io.StringIO()
-
-    if not visible:
-        if not quiet:
-            buf.write(
-                click.style("  No findings at or above threshold. ", fg="green")
-                + click.style(f"({report.files_scanned} file(s) scanned)\n", fg="bright_black")
-            )
-    else:
-        for finding in visible:
-            sev_color = _SEVERITY_COLORS.get(finding.severity.name, "white")
-            sev_badge = click.style(f"[{finding.severity.name}]", fg=sev_color, bold=True)
-            loc = click.style(f"{finding.file_path}:{finding.line_number}", fg="bright_white")
-            rid = click.style(finding.rule_id, fg="bright_black")
-            buf.write(f"  {sev_badge} {loc}  {rid}\n")
-            buf.write(f"         {finding.message}\n")
-            if show_fix and finding.recommendation:
-                buf.write(
-                    click.style(f"         Fix: {finding.recommendation}\n", fg="bright_black")
-                )
-            if show_fix and finding.before_code and finding.after_code:
-                buf.write(click.style("         Before: ", fg="red") + finding.before_code + "\n")
-                buf.write(click.style("         After:  ", fg="green") + finding.after_code + "\n")
-            buf.write("\n")
-
-    if not quiet:
-        total = len(visible)
-        crit = sum(1 for f in visible if f.severity.name == "CRITICAL")
-        warn = sum(1 for f in visible if f.severity.name == "WARNING")
-        info = sum(1 for f in visible if f.severity.name == "INFO")
-        elapsed = f"{report.scan_duration_seconds:.2f}s"
-        summary_parts = [
-            click.style(f"{crit} critical", fg="red") if crit else "",
-            click.style(f"{warn} warning", fg="yellow") if warn else "",
-            click.style(f"{info} info", fg="blue") if info else "",
-        ]
-        summary = ", ".join(p for p in summary_parts if p) or click.style("0 findings", fg="green")
-        buf.write(
-            click.style("  ─" * 30 + "\n", fg="bright_black")
-            + f"  {total} finding(s): {summary}"
-            + click.style(f"  [{report.files_scanned} file(s), {elapsed}]\n", fg="bright_black")
-        )
-        if verbose:
-            from spark_perf_lint.rules.registry import RuleRegistry
-
-            n_rules = len(RuleRegistry.instance().get_enabled_rules(config))
-            buf.write(click.style(f"  Rules run: {n_rules}\n", fg="bright_black"))
-
-    text = buf.getvalue()
     if output_path is not None:
-        # Strip ANSI codes for file output
-        import re
-
-        plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
-        output_path.write_text(plain, encoding="utf-8")
+        with output_path.open("w", encoding="utf-8") as fh:
+            reporter.render(file=fh)
     else:
-        click.echo(text, nl=False)
+        reporter.render()
 
 
 # =============================================================================
