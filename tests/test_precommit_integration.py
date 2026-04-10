@@ -529,7 +529,15 @@ class TestMixedSparkNonSparkFiles:
         )
 
     def test_only_spark_file_names_appear_in_output(self, tmp_path: Path) -> None:
-        """Finding output must reference Spark files, not the non-Spark ones."""
+        """Only Spark files should be analysed; non-Spark files must be skipped.
+
+        The terminal reporter embeds the absolute path, which Rich may wrap
+        across lines when tmp_path is long (common in CI).  Asserting on the
+        bare filename is therefore fragile.  Instead we verify the observable
+        behaviour: the Spark file's CRITICAL finding was reported (exit 1 +
+        rule ID present) and the non-Spark file produced no findings of its own
+        (its name never appears as a rule-ID source line).
+        """
         spark = _write_py(tmp_path / "spark_pipeline.py", _BAD_CROSS_JOIN)
         plain = tmp_path / "utils.py"
         plain.write_text("import os\n", encoding="utf-8")
@@ -542,9 +550,14 @@ class TestMixedSparkNonSparkFiles:
             files=[spark, plain],
         )
 
-        assert "spark_pipeline.py" in strip_ansi(result.stdout)
-        # utils.py has no findings so it should not appear as a finding source
-        assert "SPL-" in strip_ansi(result.stdout)  # findings were reported
+        output = strip_ansi(result.stdout)
+        # Spark file has a CRITICAL finding → hook must block
+        assert result.returncode != 0, "Should detect CRITICAL issues in spark file"
+        # A rule ID must be present, proving the Spark file was actually analysed
+        assert "SPL-" in output, "Expected at least one finding rule ID in output"
+        # The non-Spark file has no PySpark imports, so it contributes zero
+        # findings; its name must not appear as a finding source
+        assert "utils.py" not in output, "Non-Spark file should not appear as a finding source"
 
     def test_five_files_two_spark_three_plain(self, tmp_path: Path) -> None:
         """Exactly 2 of 5 files trigger findings; the other 3 are fast-skipped."""
