@@ -91,106 +91,106 @@ rules:
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D04-001 | repartition(1) bottleneck | CRITICAL |
-| SPL-D04-002 | coalesce(1) bottleneck | WARNING |
-| SPL-D04-003 | Repartition with very high partition count | WARNING |
-| SPL-D04-004 | Repartition with very low partition count | WARNING |
-| SPL-D04-005 | Coalesce before write — unbalanced output files | INFO |
-| SPL-D04-006 | Missing partitionBy on write | INFO |
-| SPL-D04-007 | Over-partitioning — high-cardinality partition column | WARNING |
-| SPL-D04-008 | Missing bucketBy for repeatedly joined tables | INFO |
-| SPL-D04-009 | Partition column not used in query filters | WARNING |
-| SPL-D04-010 | Repartition by column different from join key | WARNING |
+| [SPL-D04-001](#spl-d04-001--repartition1-bottleneck) | repartition(1) bottleneck | CRITICAL |
+| [SPL-D04-002](#spl-d04-002--coalesce1-bottleneck) | coalesce(1) bottleneck | WARNING |
+| [SPL-D04-003](#spl-d04-003--repartition-with-very-high-partition-count) | Repartition with very high partition count | WARNING |
+| [SPL-D04-004](#spl-d04-004--repartition-with-very-low-partition-count) | Repartition with very low partition count | WARNING |
+| [SPL-D04-005](#spl-d04-005--coalesce-before-write-unbalanced-output-files) | Coalesce before write — unbalanced output files | INFO |
+| [SPL-D04-006](#spl-d04-006--missing-partitionby-on-write) | Missing partitionBy on write | INFO |
+| [SPL-D04-007](#spl-d04-007--over-partitioning-high-cardinality-partition-column) | Over-partitioning — high-cardinality partition column | WARNING |
+| [SPL-D04-008](#spl-d04-008--missing-bucketby-for-repeatedly-joined-tables) | Missing bucketBy for repeatedly joined tables | INFO |
+| [SPL-D04-009](#spl-d04-009--partition-column-not-used-in-query-filters) | Partition column not used in query filters | WARNING |
+| [SPL-D04-010](#spl-d04-010--repartition-by-column-different-from-join-key) | Repartition by column different from join key | WARNING |
 
 ### D05 · Data Skew (7 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D05-001 | Join on low-cardinality column | WARNING |
-| SPL-D05-002 | GroupBy on low-cardinality column without secondary key | WARNING |
-| SPL-D05-003 | AQE skew join handling disabled | WARNING |
-| SPL-D05-004 | AQE skew threshold too high | INFO |
-| SPL-D05-005 | Missing salting pattern for known skewed keys | INFO |
-| SPL-D05-006 | Window function partitioned by skew-prone column | WARNING |
-| SPL-D05-007 | Null-heavy join key | INFO |
+| [SPL-D05-001](#spl-d05-001--join-on-low-cardinality-column) | Join on low-cardinality column | WARNING |
+| [SPL-D05-002](#spl-d05-002--groupby-on-low-cardinality-column-without-secondary-key) | GroupBy on low-cardinality column without secondary key | WARNING |
+| [SPL-D05-003](#spl-d05-003--aqe-skew-join-handling-disabled) | AQE skew join handling disabled | WARNING |
+| [SPL-D05-004](#spl-d05-004--aqe-skew-threshold-too-high) | AQE skew threshold too high | INFO |
+| [SPL-D05-005](#spl-d05-005--missing-salting-pattern-for-known-skewed-keys) | Missing salting pattern for known skewed keys | INFO |
+| [SPL-D05-006](#spl-d05-006--window-function-partitioned-by-skew-prone-column) | Window function partitioned by skew-prone column | WARNING |
+| [SPL-D05-007](#spl-d05-007--null-heavy-join-key) | Null-heavy join key | INFO |
 
 ### D06 · Caching (8 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D06-001 | cache() without unpersist() | WARNING |
-| SPL-D06-002 | cache() used only once | WARNING |
-| SPL-D06-003 | cache() inside loop | CRITICAL |
-| SPL-D06-004 | cache() before filter | WARNING |
-| SPL-D06-005 | MEMORY_ONLY storage level for potentially large datasets | INFO |
-| SPL-D06-006 | Reused DataFrame without cache | WARNING |
-| SPL-D06-007 | cache() after repartition | INFO |
-| SPL-D06-008 | checkpoint vs cache misuse | INFO |
+| [SPL-D06-001](#spl-d06-001--cache-without-unpersist) | cache() without unpersist() | WARNING |
+| [SPL-D06-002](#spl-d06-002--cache-used-only-once) | cache() used only once | WARNING |
+| [SPL-D06-003](#spl-d06-003--cache-inside-loop) | cache() inside loop | CRITICAL |
+| [SPL-D06-004](#spl-d06-004--cache-before-filter) | cache() before filter | WARNING |
+| [SPL-D06-005](#spl-d06-005--memory_only-storage-level-for-potentially-large-datasets) | MEMORY_ONLY storage level for potentially large datasets | INFO |
+| [SPL-D06-006](#spl-d06-006--reused-dataframe-without-cache) | Reused DataFrame without cache | WARNING |
+| [SPL-D06-007](#spl-d06-007--cache-after-repartition) | cache() after repartition | INFO |
+| [SPL-D06-008](#spl-d06-008--checkpoint-vs-cache-misuse) | checkpoint vs cache misuse | INFO |
 
 ### D07 · I/O and File Formats (10 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D07-001 | CSV/JSON used for analytical workload | WARNING |
-| SPL-D07-002 | Schema inference enabled | WARNING |
-| SPL-D07-003 | select("*") — no column pruning | WARNING |
-| SPL-D07-004 | Filter applied after join — missing predicate pushdown | INFO |
-| SPL-D07-005 | Small file problem on write | INFO |
-| SPL-D07-006 | JDBC read without partition parameters | CRITICAL |
-| SPL-D07-007 | Parquet compression not set | INFO |
-| SPL-D07-008 | Write mode not specified | INFO |
-| SPL-D07-009 | No format specified on read/write | INFO |
-| SPL-D07-010 | mergeSchema enabled without necessity | INFO |
+| [SPL-D07-001](#spl-d07-001--csvjson-used-for-analytical-workload) | CSV/JSON used for analytical workload | WARNING |
+| [SPL-D07-002](#spl-d07-002--schema-inference-enabled) | Schema inference enabled | WARNING |
+| [SPL-D07-003](#spl-d07-003--select-no-column-pruning) | select("*") — no column pruning | WARNING |
+| [SPL-D07-004](#spl-d07-004--filter-applied-after-join-missing-predicate-pushdown) | Filter applied after join — missing predicate pushdown | INFO |
+| [SPL-D07-005](#spl-d07-005--small-file-problem-on-write) | Small file problem on write | INFO |
+| [SPL-D07-006](#spl-d07-006--jdbc-read-without-partition-parameters) | JDBC read without partition parameters | CRITICAL |
+| [SPL-D07-007](#spl-d07-007--parquet-compression-not-set) | Parquet compression not set | INFO |
+| [SPL-D07-008](#spl-d07-008--write-mode-not-specified) | Write mode not specified | INFO |
+| [SPL-D07-009](#spl-d07-009--no-format-specified-on-readwrite) | No format specified on read/write | INFO |
+| [SPL-D07-010](#spl-d07-010--mergeschema-enabled-without-necessity) | mergeSchema enabled without necessity | INFO |
 
 ### D08 · Adaptive Query Execution (7 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D08-001 | AQE disabled | CRITICAL |
-| SPL-D08-002 | AQE coalesce partitions disabled | WARNING |
-| SPL-D08-003 | AQE advisory partition size too small | INFO |
-| SPL-D08-004 | AQE skew join disabled with skew-prone joins detected | WARNING |
-| SPL-D08-005 | AQE skew factor too aggressive | INFO |
-| SPL-D08-006 | AQE local shuffle reader disabled | INFO |
-| SPL-D08-007 | Manual shuffle partition count set high with AQE enabled | INFO |
+| [SPL-D08-001](#spl-d08-001--aqe-disabled) | AQE disabled | CRITICAL |
+| [SPL-D08-002](#spl-d08-002--aqe-coalesce-partitions-disabled) | AQE coalesce partitions disabled | WARNING |
+| [SPL-D08-003](#spl-d08-003--aqe-advisory-partition-size-too-small) | AQE advisory partition size too small | INFO |
+| [SPL-D08-004](#spl-d08-004--aqe-skew-join-disabled-with-skew-prone-joins-detected) | AQE skew join disabled with skew-prone joins detected | WARNING |
+| [SPL-D08-005](#spl-d08-005--aqe-skew-factor-too-aggressive) | AQE skew factor too aggressive | INFO |
+| [SPL-D08-006](#spl-d08-006--aqe-local-shuffle-reader-disabled) | AQE local shuffle reader disabled | INFO |
+| [SPL-D08-007](#spl-d08-007--manual-shuffle-partition-count-set-high-with-aqe-enabled) | Manual shuffle partition count set high with AQE enabled | INFO |
 
 ### D09 · UDF and Code Patterns (12 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D09-001 | Python UDF (row-at-a-time) detected | WARNING |
-| SPL-D09-002 | Python UDF replaceable with native Spark function | WARNING |
-| SPL-D09-003 | withColumn() inside loop | CRITICAL |
-| SPL-D09-004 | Row-by-row iteration over DataFrame | CRITICAL |
-| SPL-D09-005 | .collect() without prior filter or limit | CRITICAL |
-| SPL-D09-006 | .toPandas() on potentially large DataFrame | CRITICAL |
-| SPL-D09-007 | .count() used for emptiness check | WARNING |
-| SPL-D09-008 | .show() in production code | INFO |
-| SPL-D09-009 | .explain() or .printSchema() in production code | INFO |
-| SPL-D09-010 | .rdd conversion dropping out of DataFrame API | WARNING |
-| SPL-D09-011 | pandas_udf without type annotations | INFO |
-| SPL-D09-012 | Nested UDF calls | WARNING |
+| [SPL-D09-001](#spl-d09-001--python-udf-row-at-a-time-detected) | Python UDF (row-at-a-time) detected | WARNING |
+| [SPL-D09-002](#spl-d09-002--python-udf-replaceable-with-native-spark-function) | Python UDF replaceable with native Spark function | WARNING |
+| [SPL-D09-003](#spl-d09-003--withcolumn-inside-loop) | withColumn() inside loop | CRITICAL |
+| [SPL-D09-004](#spl-d09-004--row-by-row-iteration-over-dataframe) | Row-by-row iteration over DataFrame | CRITICAL |
+| [SPL-D09-005](#spl-d09-005--collect-without-prior-filter-or-limit) | .collect() without prior filter or limit | CRITICAL |
+| [SPL-D09-006](#spl-d09-006--topandas-on-potentially-large-dataframe) | .toPandas() on potentially large DataFrame | CRITICAL |
+| [SPL-D09-007](#spl-d09-007--count-used-for-emptiness-check) | .count() used for emptiness check | WARNING |
+| [SPL-D09-008](#spl-d09-008--show-in-production-code) | .show() in production code | INFO |
+| [SPL-D09-009](#spl-d09-009--explain-or-printschema-in-production-code) | .explain() or .printSchema() in production code | INFO |
+| [SPL-D09-010](#spl-d09-010--rdd-conversion-dropping-out-of-dataframe-api) | .rdd conversion dropping out of DataFrame API | WARNING |
+| [SPL-D09-011](#spl-d09-011--pandas_udf-without-type-annotations) | pandas_udf without type annotations | INFO |
+| [SPL-D09-012](#spl-d09-012--nested-udf-calls) | Nested UDF calls | WARNING |
 
 ### D10 · Catalyst Optimizer (6 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D10-001 | UDF blocks predicate pushdown | WARNING |
-| SPL-D10-002 | CBO not enabled for complex queries | WARNING |
-| SPL-D10-003 | Join reordering disabled for multi-table joins | INFO |
-| SPL-D10-004 | Table statistics not collected | INFO |
-| SPL-D10-005 | Non-deterministic function in filter | INFO |
-| SPL-D10-006 | Deep method chain (>20 chained ops) | INFO |
+| [SPL-D10-001](#spl-d10-001--udf-blocks-predicate-pushdown) | UDF blocks predicate pushdown | WARNING |
+| [SPL-D10-002](#spl-d10-002--cbo-not-enabled-for-complex-queries) | CBO not enabled for complex queries | WARNING |
+| [SPL-D10-003](#spl-d10-003--join-reordering-disabled-for-multi-table-joins) | Join reordering disabled for multi-table joins | INFO |
+| [SPL-D10-004](#spl-d10-004--table-statistics-not-collected) | Table statistics not collected | INFO |
+| [SPL-D10-005](#spl-d10-005--non-deterministic-function-in-filter) | Non-deterministic function in filter | INFO |
+| [SPL-D10-006](#spl-d10-006--deep-method-chain-20-chained-ops) | Deep method chain (>20 chained ops) | INFO |
 
 ### D11 · Monitoring and Observability (5 rules)
 
 | Rule ID | Name | Severity |
 |---------|------|----------|
-| SPL-D11-001 | No explain() for plan validation in test file | INFO |
-| SPL-D11-002 | No Spark listener configured | INFO |
-| SPL-D11-003 | No metrics logging in long-running job | INFO |
-| SPL-D11-004 | Missing error handling around Spark actions | INFO |
-| SPL-D11-005 | Hardcoded storage path | INFO |
+| [SPL-D11-001](#spl-d11-001--no-explain-for-plan-validation-in-test-file) | No explain() for plan validation in test file | INFO |
+| [SPL-D11-002](#spl-d11-002--no-spark-listener-configured) | No Spark listener configured | INFO |
+| [SPL-D11-003](#spl-d11-003--no-metrics-logging-in-long-running-job) | No metrics logging in long-running job | INFO |
+| [SPL-D11-004](#spl-d11-004--missing-error-handling-around-spark-actions) | Missing error handling around Spark actions | INFO |
+| [SPL-D11-005](#spl-d11-005--hardcoded-storage-path) | Hardcoded storage path | INFO |
 
 ---
 
@@ -5710,3 +5710,607 @@ No Spark configuration affects this rule.
 
 - **SPL-D09-001** — Row-at-a-time UDF; nested UDFs compound the serialization overhead
 - **SPL-D09-002** — UDF replaceable with native function; check if the nested logic maps to Spark SQL builtins
+
+---
+
+## D10 · Catalyst Optimizer
+
+Catalyst is Spark SQL's query optimizer. It applies rule-based and cost-based transformations to convert a logical plan into an efficient physical plan. The rules in this dimension detect patterns that prevent Catalyst from applying its most powerful optimizations: predicate pushdown, cost-based join reordering, and plan simplification.
+
+---
+
+### SPL-D10-001 — UDF blocks predicate pushdown
+
+| Field | Value |
+|---|---|
+| **Dimension** | D10 · Catalyst Optimizer |
+| **Default Severity** | WARNING |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Full table scan before filter; no partition/row-group elimination |
+
+**Description**
+
+`@udf` creates an opaque boundary that prevents Catalyst from pushing filters below the UDF, forcing a full scan before filtering. Any `filter()` applied to a column produced by a Python UDF cannot be relocated by the optimizer.
+
+**What it detects**
+
+```python
+# BAD — Catalyst cannot push the filter past the opaque UDF boundary
+from pyspark.sql.functions import udf, col
+from pyspark.sql.types import StringType
+
+@udf(returnType=StringType())
+def normalise(s):
+    return s.lower().strip()
+
+df.withColumn("n", normalise(col("s"))).filter(col("n") == "target")
+```
+
+**Why it matters**
+
+Catalyst's predicate pushdown moves `filter()`/`where()` expressions as close to the data source as possible — ideally into the reader itself (Parquet/ORC column pruning, partition elimination). A `@udf` is a black-box from Catalyst's perspective: it cannot inspect the Python function body, so it cannot safely push filters past it. Any `filter()` on a UDF-produced column results in a full scan before the filter is applied, negating partition elimination and row-group skipping.
+
+**How to fix**
+
+```python
+# GOOD — Native functions restore predicate pushdown to the data source
+from pyspark.sql.functions import lower, trim, col
+
+df.filter(trim(lower(col("s"))) == "target")
+# Catalyst can now push this filter into the Parquet reader
+```
+
+**Config options**
+
+| Setting | Default | Notes |
+|---|---|---|
+| `spark.sql.optimizer.excludedRules` | _(none)_ | Do not exclude predicate pushdown rules |
+
+**Related rules**
+
+- **SPL-D09-001** — Row-at-a-time UDF; the serialization overhead is compounded when a full scan is forced first
+- **SPL-D09-002** — UDF replaceable with native function; native replacements also restore predicate pushdown
+- **SPL-D10-002** — CBO not enabled; CBO further refines plans after predicate pushdown is restored
+
+---
+
+### SPL-D10-002 — CBO not enabled for complex queries
+
+| Field | Value |
+|---|---|
+| **Dimension** | D10 · Catalyst Optimizer |
+| **Default Severity** | WARNING |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Sub-optimal join strategies; 5–20× slower plans for multi-join queries |
+
+**Description**
+
+File contains 2+ joins but Cost-Based Optimization is not enabled — Catalyst uses rule-based estimates instead of real table statistics. Without CBO, join strategy selection relies on heuristics that are frequently wrong.
+
+**What it detects**
+
+```python
+# BAD — CBO not configured; Catalyst uses rough size heuristics
+spark = SparkSession.builder.getOrCreate()
+result = a.join(b, "id").join(c, "key")
+```
+
+**Why it matters**
+
+Spark's Cost-Based Optimizer (CBO) uses table and column statistics — collected via `ANALYZE TABLE` — to estimate the cardinality and size of intermediate results. With CBO enabled, Catalyst can choose the correct join strategy (broadcast vs sort-merge vs shuffle-hash), re-order joins to process smaller tables first, and push down filters based on column statistics (min/max ranges). Without CBO, join order follows source order and small tables may trigger expensive sort-merge joins instead of cheaper broadcasts.
+
+**How to fix**
+
+```python
+# GOOD — Enable CBO and collect statistics before running complex joins
+spark = (
+    SparkSession.builder
+    .config("spark.sql.cbo.enabled", "true")
+    .config("spark.sql.cbo.joinReorder.enabled", "true")
+    .getOrCreate()
+)
+spark.sql("ANALYZE TABLE a COMPUTE STATISTICS FOR ALL COLUMNS")
+spark.sql("ANALYZE TABLE b COMPUTE STATISTICS FOR ALL COLUMNS")
+spark.sql("ANALYZE TABLE c COMPUTE STATISTICS FOR ALL COLUMNS")
+result = a.join(b, "id").join(c, "key")
+```
+
+**Config options**
+
+| Spark Config | Default | Recommended |
+|---|---|---|
+| `spark.sql.cbo.enabled` | `false` | `true` |
+| `spark.sql.cbo.joinReorder.enabled` | `false` | `true` |
+| `spark.sql.cbo.planStats.enabled` | `false` | `true` |
+
+**Related rules**
+
+- **SPL-D10-003** — Join reordering disabled; CBO is a prerequisite for join reordering
+- **SPL-D10-004** — Table statistics not collected; CBO is useless without current statistics
+- **SPL-D03-001** — Missing broadcast hint; CBO may emit the broadcast automatically once enabled
+
+---
+
+### SPL-D10-003 — Join reordering disabled for multi-table joins
+
+| Field | Value |
+|---|---|
+| **Dimension** | D10 · Catalyst Optimizer |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Sub-optimal join order; large intermediate DataFrames; possible OOM |
+
+**Description**
+
+File contains 3+ joins but join reordering (CBO) is not enabled — Catalyst executes joins in the order written in source code, which may produce unnecessarily large intermediate DataFrames.
+
+**What it detects**
+
+```python
+# BAD — 3-way join with no CBO; Catalyst follows source order
+result = a.join(huge, "id").join(b, "key").join(small, "ref")
+# If 'huge' is a 10 TB table, the first join is expensive even if
+# 'small' could have been applied first to shrink the dataset.
+```
+
+**Why it matters**
+
+With `spark.sql.cbo.joinReorder.enabled = true` and CBO enabled, Catalyst uses a dynamic-programming algorithm (DP-based bushy join enumeration) to find the lowest-cost ordering of N-way joins. The optimal order can reduce the sizes of intermediate DataFrames dramatically — e.g., joining a small lookup table first shrinks the result before the expensive join. Without reordering, the physical plan mirrors the logical order written by the developer, which is frequently sub-optimal.
+
+**How to fix**
+
+```python
+# GOOD — Enable join reordering; Catalyst will choose the optimal order
+spark.conf.set("spark.sql.cbo.enabled", "true")
+spark.conf.set("spark.sql.cbo.joinReorder.enabled", "true")
+
+# Catalyst will reorder to process small lookup tables first
+result = a.join(huge, "id").join(b, "key").join(small, "ref")
+```
+
+**Config options**
+
+| Spark Config | Default | Recommended |
+|---|---|---|
+| `spark.sql.cbo.joinReorder.enabled` | `false` | `true` |
+| `spark.sql.cbo.joinReorder.dp.threshold` | `12` | `12` (max joins to reorder) |
+
+**Related rules**
+
+- **SPL-D10-002** — CBO not enabled; join reordering requires CBO
+- **SPL-D10-004** — Table statistics not collected; reordering without stats is a no-op
+- **SPL-D03-002** — Missing broadcast for small table; reordering often surfaces the same fix
+
+---
+
+### SPL-D10-004 — Table statistics not collected
+
+| Field | Value |
+|---|---|
+| **Dimension** | D10 · Catalyst Optimizer |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | CBO operates without accurate stats; poor join strategies; missed optimisations |
+
+**Description**
+
+File performs joins but contains no `ANALYZE TABLE` statement — CBO and predicate pushdown lack accurate cardinality estimates, degrading plan quality silently.
+
+**What it detects**
+
+```python
+# BAD — Joins without statistics; Catalyst guesses table sizes
+result = spark.table("events").join(spark.table("users"), "user_id")
+# CBO may be enabled but has no data to work with
+```
+
+**Why it matters**
+
+Spark's Cost-Based Optimizer and runtime adaptive strategies (AQE) rely on per-table and per-column statistics to make accurate estimates. These statistics are populated by running `ANALYZE TABLE t COMPUTE STATISTICS` before the query. Without statistics, join strategy selection defaults to size thresholds, AQE skew detection uses partition byte estimates rather than actual counts, and broadcast decisions may be wrong by orders of magnitude.
+
+**How to fix**
+
+```python
+# GOOD — Collect statistics once per table (or after each write)
+spark.sql("ANALYZE TABLE events COMPUTE STATISTICS FOR ALL COLUMNS")
+spark.sql("ANALYZE TABLE users COMPUTE STATISTICS FOR ALL COLUMNS")
+result = spark.table("events").join(spark.table("users"), "user_id")
+
+# Alternatively, include ANALYZE in the write pipeline:
+events.write.mode("overwrite").saveAsTable("events")
+spark.sql("ANALYZE TABLE events COMPUTE STATISTICS FOR ALL COLUMNS")
+```
+
+**Config options**
+
+No Spark configuration affects this rule directly; the fix is a SQL statement.
+
+**Related rules**
+
+- **SPL-D10-002** — CBO not enabled; enabling CBO without stats has no effect
+- **SPL-D10-003** — Join reordering disabled; reordering relies on statistics
+- **SPL-D08-003** — AQE advisory partition size; AQE also benefits from accurate statistics
+
+---
+
+### SPL-D10-005 — Non-deterministic function in filter
+
+| Field | Value |
+|---|---|
+| **Dimension** | D10 · Catalyst Optimizer |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Non-reproducible results; potential double-evaluation by Catalyst |
+
+**Description**
+
+`filter()`/`where()` contains a non-deterministic function (`rand`, `uuid`, …) — Catalyst may evaluate it multiple times or reorder it unexpectedly, producing non-reproducible results.
+
+**What it detects**
+
+```python
+# BAD — rand() in filter is evaluated non-deterministically
+from pyspark.sql.functions import rand
+
+sample = df.filter(rand() < 0.1)
+# May produce different row counts on each run; Catalyst may re-evaluate
+# rand() during plan rewrites, changing which rows pass the filter.
+```
+
+**Why it matters**
+
+Non-deterministic functions such as `rand()`, `randn()`, `uuid()`, and `monotonically_increasing_id()` return a different value each time Catalyst evaluates them. When used inside `filter()`, Catalyst's rule-based optimizer may evaluate the expression multiple times per row during plan rewrites, or move the filter to a different position in the plan. The correct approach for random sampling is `df.sample()`, which Catalyst understands as a sampling node and handles deterministically (when a seed is provided).
+
+**How to fix**
+
+```python
+# GOOD — Use df.sample() for reproducible random sampling
+sample = df.sample(fraction=0.1, seed=42)
+
+# Or materialise the random column first, then filter:
+from pyspark.sql.functions import rand
+with_rand = df.withColumn("_r", rand(seed=42))
+sample = with_rand.filter("_r < 0.1").drop("_r")
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D10-006** — Deep method chain; long chains amplify plan analysis overhead when non-deterministic nodes are present
+- **SPL-D04-005** — Repartition without seed; similar reproducibility concern
+
+---
+
+### SPL-D10-006 — Deep method chain (>20 chained ops)
+
+| Field | Value |
+|---|---|
+| **Dimension** | D10 · Catalyst Optimizer |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Driver-side plan analysis overhead; risk of plan visitor stack overflow |
+
+**Description**
+
+A single expression chains >20 DataFrame operations, producing a deeply nested logical plan that is slow to analyse and optimise on the driver.
+
+**What it detects**
+
+```python
+# BAD — 20+ chained operations in a single expression
+result = (
+    df.filter("a > 0")
+      .dropDuplicates(["id"])
+      .join(b, "id")
+      .join(c, "key")
+      .groupBy("cat")
+      .agg(sum("val"))
+      .filter("val > 100")
+      .join(d, "cat")
+      .select("cat", "val", "name")
+      .withColumn("rank", dense_rank().over(w))
+      # ... 10+ more operations ...
+)
+```
+
+**Why it matters**
+
+Every chained DataFrame operation adds a node to Spark's logical query plan tree. Catalyst must traverse, analyse, and optimise this tree before generating the physical plan. With very deep chains (>20 nodes), plans take noticeably longer for the driver to analyse — pure driver-side overhead before any data is processed. There is also a documented risk of stack overflow in recursive plan visitors for extremely deep chains. Breaking the chain into named intermediate DataFrames at logical checkpoints is costless at runtime but improves driver-side plan analysis and makes the code more debuggable.
+
+**How to fix**
+
+```python
+# GOOD — Break into named intermediate DataFrames at logical checkpoints
+clean = df.filter("a > 0").dropDuplicates(["id"])
+enriched = clean.join(b, "id").join(c, "key")
+aggregated = enriched.groupBy("cat").agg(sum("val")).filter("val > 100")
+result = (
+    aggregated
+    .join(d, "cat")
+    .select("cat", "val", "name")
+    .withColumn("rank", dense_rank().over(w))
+)
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-003** — `withColumn` in loop; loop-based column additions are a common source of deep chains
+- **SPL-D10-001** — UDF blocks predicate pushdown; UDFs in deep chains further complicate plan analysis
+
+---
+
+## D11 · Monitoring and Observability
+
+Good monitoring closes the feedback loop between code changes and production performance. The rules in this dimension detect missing observability patterns: absent plan validation in tests, no listener registration, missing progress logging, unhandled action errors, and hardcoded paths that prevent environment-specific configuration.
+
+---
+
+### SPL-D11-001 — No explain() for plan validation in test file
+
+| Field | Value |
+|---|---|
+| **Dimension** | D11 · Monitoring and Observability |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Plan regressions (join strategy, pushdown) invisible until production |
+
+**Description**
+
+Test file contains complex Spark operations (join/groupBy/agg) but no `explain()` call — physical plan quality is not validated, so regressions in join strategy or predicate pushdown are invisible until production.
+
+**What it detects**
+
+```python
+# BAD — test validates output correctness but not plan quality
+def test_join():
+    result = users.join(events, "user_id")
+    assert result.count() == expected
+    # A regression from BroadcastHashJoin to SortMergeJoin would pass this test
+```
+
+**Why it matters**
+
+Adding `df.explain()` assertions inside tests allows you to catch performance regressions before they reach production. A join that previously used `BroadcastHashJoin` silently regressing to `SortMergeJoin` can double shuffle cost and turn a 1-minute job into a 10-minute job — yet a correctness-only test will pass. Plan assertions are cheap to add and provide a ratchet against strategy regressions.
+
+**How to fix**
+
+```python
+# GOOD — Assert on the physical query plan, not just output correctness
+def test_join():
+    result = users.join(events, "user_id")
+
+    # Validate that the plan uses the expected strategy
+    plan = result._jdf.queryExecution().explainString("formatted")
+    assert "BroadcastHashJoin" in plan, f"Expected broadcast join, got:\n{plan}"
+    assert result.count() == expected
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D03-001** — Missing broadcast hint; plan assertions catch cases where the hint is lost
+- **SPL-D10-002** — CBO not enabled; plan assertions validate CBO join strategy choices
+- **SPL-D11-002** — No Spark listener; listeners provide runtime metrics to complement plan assertions
+
+---
+
+### SPL-D11-002 — No Spark listener configured
+
+| Field | Value |
+|---|---|
+| **Dimension** | D11 · Monitoring and Observability |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Blind to job performance degradation; metrics only available post-mortem |
+
+**Description**
+
+`SparkSession` is created without registering a listener — job metrics and query events are not captured, making performance degradation invisible until post-mortem log analysis.
+
+**What it detects**
+
+```python
+# BAD — SparkSession with no listener; metrics are only in the UI
+spark = SparkSession.builder.appName("etl").getOrCreate()
+```
+
+**Why it matters**
+
+Spark's listener framework (`SparkListener` / `QueryExecutionListener`) provides hooks for every significant event in a job's lifecycle: task start/end, stage completion, SQL query execution, shuffle read/write bytes, and more. Without a listener, the only observability is what Spark logs to stdout — no structured metrics, no alerting, and no historical trend data. Listeners enable push-based metrics integration with Prometheus, Datadog, or any custom backend, and can be added with a single config line.
+
+**How to fix**
+
+```python
+# GOOD — Register a listener at SparkSession construction time
+spark = (
+    SparkSession.builder
+    .appName("etl")
+    .config("spark.extraListeners", "com.example.MetricsListener")
+    .getOrCreate()
+)
+
+# Or register programmatically for a custom Python listener:
+# spark.sparkContext.addSparkListener(MyListener())
+```
+
+**Config options**
+
+| Spark Config | Default | Notes |
+|---|---|---|
+| `spark.extraListeners` | _(none)_ | Comma-separated list of `SparkListener` class names |
+| `spark.sql.queryExecutionListeners` | _(none)_ | SQL-level `QueryExecutionListener` class names |
+
+**Related rules**
+
+- **SPL-D11-001** — No explain() in tests; listeners complement test-time plan assertions with runtime metrics
+- **SPL-D11-003** — No metrics logging; listeners and Python logging serve different observability needs
+
+---
+
+### SPL-D11-003 — No metrics logging in long-running job
+
+| Field | Value |
+|---|---|
+| **Dimension** | D11 · Monitoring and Observability |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Silent data drops and slow stages invisible without post-mortem log analysis |
+
+**Description**
+
+File has 2+ Spark write operations but no Python logging — job progress and row counts are not recorded, making it impossible to diagnose failures or silent data drops without re-running.
+
+**What it detects**
+
+```python
+# BAD — Multi-stage job with no logging; a silent data drop is invisible
+enriched = raw.join(meta, "id").withColumn("score", compute(col("v")))
+enriched.write.mode("overwrite").parquet("s3://bucket/enriched")
+summary = enriched.groupBy("cat").agg(count("*"))
+summary.write.mode("overwrite").parquet("s3://bucket/summary")
+```
+
+**Why it matters**
+
+Multi-stage Spark jobs that write results in several steps benefit greatly from intermediate logging: recording row counts, elapsed time, and key metrics after each stage makes it trivial to pinpoint where a slow or incorrect run diverged from expectation. Without logging, a job that runs for hours and produces wrong output requires re-running with added instrumentation to diagnose — doubling the time to resolution.
+
+**How to fix**
+
+```python
+# GOOD — Log row counts and timing after each major stage
+import logging
+logger = logging.getLogger(__name__)
+
+enriched = raw.join(meta, "id").withColumn("score", compute(col("v")))
+logger.info("enriched rows: %d", enriched.count())
+enriched.write.mode("overwrite").parquet("s3://bucket/enriched")
+
+summary = enriched.groupBy("cat").agg(count("*"))
+logger.info("summary rows: %d", summary.count())
+summary.write.mode("overwrite").parquet("s3://bucket/summary")
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D11-004** — Missing error handling; logging and error handling are complementary
+- **SPL-D11-002** — No Spark listener; listeners capture structured metrics; Python logging captures business-level context
+
+---
+
+### SPL-D11-004 — Missing error handling around Spark actions
+
+| Field | Value |
+|---|---|
+| **Dimension** | D11 · Monitoring and Observability |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Unhandled driver crashes; partial writes; no error context in logs |
+
+**Description**
+
+Spark action calls (`count`, `collect`, `write`, …) are not wrapped in `try/except` — driver crashes or executor failures propagate unhandled, leaving no context in logs and potentially causing partial writes.
+
+**What it detects**
+
+```python
+# BAD — Spark actions with no error handling
+df = spark.read.parquet(input_path)
+result = df.join(other, "id")
+result.write.mode("overwrite").parquet(output_path)
+# An AnalysisException or SparkException here crashes the driver with no log context
+```
+
+**Why it matters**
+
+Spark actions — `count()`, `collect()`, write operations — submit jobs to the cluster. Failures from executors surface as Python exceptions on the driver: `AnalysisException`, `SparkException`, `IOException`, etc. Without a `try/except` block, these propagate as unhandled errors and crash the driver process. In production pipelines this means silent failure (the job scheduler may mark it as failed with no useful context), partial writes (earlier stages may have completed), and no structured error information in logs for triage.
+
+**How to fix**
+
+```python
+# GOOD — Wrap Spark actions in try/except with structured logging
+import logging
+logger = logging.getLogger(__name__)
+
+try:
+    df = spark.read.parquet(input_path)
+    result = df.join(other, "id")
+    result.write.mode("overwrite").parquet(output_path)
+except Exception:
+    logger.error("Pipeline failed: input=%s output=%s", input_path, output_path, exc_info=True)
+    raise
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D11-003** — No metrics logging; add `logger.info` inside the try block for progress tracking
+- **SPL-D11-005** — Hardcoded storage path; hardcoded paths make error messages less useful in multi-environment setups
+
+---
+
+### SPL-D11-005 — Hardcoded storage path
+
+| Field | Value |
+|---|---|
+| **Dimension** | D11 · Monitoring and Observability |
+| **Default Severity** | INFO |
+| **Effort to Fix** | Minor code change |
+| **Estimated Impact** | Environment coupling; production paths in source control; untestable |
+
+**Description**
+
+A Spark read/write uses a hardcoded string path — paths should be passed as parameters to allow environment-specific configuration and safe testing.
+
+**What it detects**
+
+```python
+# BAD — Production S3 path hardcoded directly in the job
+df = spark.read.parquet("s3://prod-data/events/2024-01/")
+df.write.mode("overwrite").parquet("s3://prod-results/output/")
+```
+
+**Why it matters**
+
+Hardcoded paths (`s3://prod-bucket/...`, `/data/input.parquet`) make jobs difficult to run in multiple environments (dev, staging, and prod point to different buckets), impossible to test safely (tests must not read from or write to production storage), and hard to audit (paths embedded in code bypass infrastructure-as-code reviews). Externalizing paths as arguments or environment variables is a core 12-factor app principle and is also required by most enterprise data governance frameworks.
+
+**How to fix**
+
+```python
+# GOOD — Accept paths as CLI arguments or environment variables
+import argparse
+import os
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input-path", default=os.environ.get("INPUT_PATH"))
+parser.add_argument("--output-path", default=os.environ.get("OUTPUT_PATH"))
+args = parser.parse_args()
+
+df = spark.read.parquet(args.input_path)
+df.write.mode("overwrite").parquet(args.output_path)
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D11-004** — Missing error handling; parameterized paths make error messages more informative
+- **SPL-D07-009** — No format specified; similar code hygiene concern around write configuration
