@@ -1,0 +1,1187 @@
+# =============================================================================
+# decision_matrices.yaml — spark-perf-lint decision engine
+# =============================================================================
+#
+# Structure
+# ---------
+# Top-level key `matrices` is a list of decision matrix entries.
+#
+# Fields per matrix
+# -----------------
+#   id           Unique identifier used in rule messages, e.g. JOIN_STRATEGY
+#   name         Human-readable title
+#   description  What question this matrix answers
+#   inputs       List of input variables the decision depends on:
+#                  name, type (float | int | bool | enum | string),
+#                  description, unit (optional), typical_range (optional)
+#   formulas     Dict of named derived values expressed as Python-like
+#                pseudocode.  These are evaluated before the tree is walked.
+#   tree         The decision logic:
+#                  type: priority_rules — rules are evaluated in order;
+#                        first matching condition wins.
+#                  rules: list of nodes, each with:
+#                    id          short slug
+#                    condition   Python-like boolean expression over inputs
+#                                and formulas; use AND / OR / NOT / >= / <=
+#                    result      the recommended strategy / value / action
+#                    config      dict of Spark config keys → values to apply
+#                                (null when no config change needed)
+#                    rationale   one-sentence justification
+#                  default       result when no rule matches
+#   notes        Free-form context, edge cases, or references
+#
+# Condition conventions
+# ---------------------
+#   - Variable names match the `inputs[].name` or `formulas` keys exactly
+#   - Enum comparisons use == "VALUE" (uppercase string literals)
+#   - Numeric thresholds use >=, <=, >, <
+#   - Logical operators: AND, OR, NOT  (uppercase for readability)
+#   - Formula references appear inline: e.g. smaller_side_gb <= broadcast_gb
+#
+# Coverage
+# --------
+#   1. JOIN_STRATEGY      — 8-rule priority tree (7 strategies + default)
+#   2. PARTITION_COUNT    — 7-rule priority tree + 4 formulas
+#   3. CACHE_DECISION     — 8-rule priority tree + 3 formulas
+#   4. FILE_FORMAT        — 8-rule priority tree
+#   5. SKEW_REMEDIATION   — 8-rule priority tree + 2 formulas
+#   6. MEMORY_SIZING      — 8-rule priority tree + 5 formulas
+#   7. SERIALIZATION      — 6-rule priority tree
+#   8. COMPRESSION        — 8-rule priority tree (split by subsystem)
+# =============================================================================
+
+matrices:
+
+  # ===========================================================================
+  # 1. JOIN_STRATEGY
+  # ===========================================================================
+
+  - id: JOIN_STRATEGY
+    name: "Join Strategy Selection"
+    description: >-
+      Given the sizes of the two sides, the join key's skew profile,
+      bucketing status, and cluster configuration, select the optimal
+      Spark join strategy to minimise total elapsed time.
+
+    inputs:
+      - name: left_size_gb
+        type: float
+        description: Estimated uncompressed size of the left (probe) DataFrame
+        unit: GB
+        typical_range: "0.001 – 10000"
+      - name: right_size_gb
+        type: float
+        description: Estimated uncompressed size of the right (build) DataFrame
+        unit: GB
+        typical_range: "0.001 – 10000"
+      - name: broadcast_threshold_gb
+        type: float
+        description: Value of spark.sql.autoBroadcastJoinThreshold converted to GB
+        unit: GB
+        typical_range: "0.01 – 2"
+      - name: join_type
+        type: enum
+        description: Equality vs non-equality join condition
+        values: [equi, non_equi, cross]
+      - name: aqe_enabled
+        type: bool
+        description: Whether spark.sql.adaptive.enabled is true
+      - name: both_bucketed
+        type: bool
+        description: >-
+          Both tables are bucketed on the join key with the same bucket count
+          and bucket key, metadata visible in the Hive/Spark metastore
+      - name: skew_ratio
+        type: float
+        description: >-
+          max_partition_size / median_partition_size for the join key;
+          1.0 = perfectly uniform, 10+ = severe skew
+        typical_range: "1.0 – 1000"
+      - name: spark_version
+        type: float
+        description: Spark major.minor as a float, e.g. 3.2 for Spark 3.2
+        typical_range: "2.0 – 4.0"
+
+    formulas:
+      smaller_side_gb: "min(left_size_gb, right_size_gb)"
+      larger_side_gb: "max(left_size_gb, right_size_gb)"
+      size_ratio: "larger_side_gb / smaller_side_gb  # 1.0 = equal sizes"
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: non_equi_or_cross
+          condition: "join_type == 'non_equi' OR join_type == 'cross'"
+          result: BROADCAST_NESTED_LOOP
+          config:
+            spark.sql.crossJoin.enabled: "true"
+          rationale: >-
+            Non-equi and cross joins cannot use hash or sort-merge strategies;
+            Spark must evaluate every row-pair combination.
+
+        - id: broadcast_hash
+          condition: "smaller_side_gb <= broadcast_threshold_gb AND join_type == 'equi'"
+          result: BROADCAST_HASH_JOIN
+          config:
+            spark.sql.autoBroadcastJoinThreshold: "104857600"
+          rationale: >-
+            Broadcasting the smaller side eliminates the shuffle entirely;
+            always the fastest strategy when the build side fits in executor memory.
+
+        - id: bucketed_no_shuffle
+          condition: >-
+            both_bucketed == true AND join_type == 'equi'
+            AND skew_ratio < 5
+          result: BUCKETED_SORT_MERGE_JOIN
+          config:
+            spark.sql.sources.bucketing.enabled: "true"
+            spark.sql.autoBroadcastJoinThreshold: "-1"
+          rationale: >-
+            Pre-shuffled bucketed tables skip the Exchange stage; most efficient
+            strategy for repeated joins on the same key at large scale.
+
+        - id: aqe_skew_join
+          condition: >-
+            aqe_enabled == true AND skew_ratio >= 5
+            AND spark_version >= 3.0 AND join_type == 'equi'
+          result: AQE_SKEW_JOIN
+          config:
+            spark.sql.adaptive.enabled: "true"
+            spark.sql.adaptive.skewJoin.enabled: "true"
+            spark.sql.adaptive.skewJoin.skewedPartitionFactor: "5"
+            spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes: "268435456"
+          rationale: >-
+            AQE detects oversized shuffle partitions at runtime and splits them;
+            zero code change required when Spark 3.x and AQE are available.
+
+        - id: salted_join
+          condition: >-
+            skew_ratio >= 10 AND join_type == 'equi'
+            AND (aqe_enabled == false OR spark_version < 3.0)
+          result: SALTED_JOIN
+          config: null
+          rationale: >-
+            Manual salting distributes the dominant key across N tasks when AQE
+            is unavailable; choose salt_factor = ceil(skew_ratio / 5).
+
+        - id: shuffle_hash
+          condition: >-
+            join_type == 'equi' AND size_ratio >= 3
+            AND smaller_side_gb <= 10 AND skew_ratio < 5
+          result: SHUFFLE_HASH_JOIN
+          config:
+            spark.sql.adaptive.enabled: "true"
+          rationale: >-
+            When one side is at least 3x smaller and fits in per-partition memory,
+            SHJ avoids the sort phase of SMJ; AQE may select this automatically.
+
+        - id: sort_merge_large
+          condition: >-
+            join_type == 'equi' AND smaller_side_gb > broadcast_threshold_gb
+            AND skew_ratio < 5
+          result: SORT_MERGE_JOIN
+          config:
+            spark.sql.shuffle.partitions: "200"
+            spark.sql.join.preferSortMergeJoin: "true"
+          rationale: >-
+            Default strategy for large-large equi-joins; sorts both sides,
+            spills gracefully, and scales to arbitrarily large datasets.
+
+        - id: broadcast_skew_replace
+          condition: >-
+            skew_ratio >= 5 AND smaller_side_gb <= 2.0 AND join_type == 'equi'
+          result: BROADCAST_HASH_JOIN
+          config:
+            spark.sql.autoBroadcastJoinThreshold: "2147483648"
+          rationale: >-
+            Raising the broadcast threshold to include the smaller skewed side
+            eliminates the shuffle and therefore eliminates the skew entirely.
+
+      default: SORT_MERGE_JOIN
+
+    notes: |
+      Broadcast threshold defaults to 10 MB (10485760 bytes); raise to 100–512 MB
+      for typical dimension tables.  Always verify the chosen strategy via
+      df.explain() — look for BroadcastHashJoin, SortMergeJoin, or
+      BroadcastNestedLoopJoin in the physical plan output.
+      skew_ratio can be approximated from the Spark UI → Stages → shuffle
+      read metrics (max task / median task).
+
+  # ===========================================================================
+  # 2. PARTITION_COUNT
+  # ===========================================================================
+
+  - id: PARTITION_COUNT
+    name: "Shuffle Partition Count Sizing"
+    description: >-
+      Given dataset size, cluster shape, and AQE availability, compute the
+      optimal spark.sql.shuffle.partitions value and target partition size.
+
+    inputs:
+      - name: data_size_gb
+        type: float
+        description: Total uncompressed data size entering the shuffle stage
+        unit: GB
+        typical_range: "0.1 – 50000"
+      - name: executor_count
+        type: int
+        description: Total number of active executors
+        typical_range: "2 – 10000"
+      - name: cores_per_executor
+        type: int
+        description: Number of CPU cores per executor (spark.executor.cores)
+        typical_range: "1 – 16"
+      - name: target_partition_size_mb
+        type: float
+        description: Desired size per shuffle output partition
+        unit: MB
+        typical_range: "64 – 256"
+      - name: aqe_enabled
+        type: bool
+        description: Whether spark.sql.adaptive.coalescePartitions.enabled is true
+      - name: is_write_stage
+        type: bool
+        description: Whether this partition count is for the final write (vs a shuffle)
+
+    formulas:
+      total_parallelism: "executor_count * cores_per_executor"
+      raw_partition_count: "ceil((data_size_gb * 1024) / target_partition_size_mb)"
+      aqe_upper_bound: "max(raw_partition_count * 2, total_parallelism * 4)"
+      recommended_fixed: "max(raw_partition_count, total_parallelism * 2)"
+      advisory_bytes: "target_partition_size_mb * 1048576"
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: aqe_ceiling
+          condition: "aqe_enabled == true AND is_write_stage == false"
+          result: SET_AQE_UPPER_BOUND
+          config:
+            spark.sql.adaptive.enabled: "true"
+            spark.sql.adaptive.coalescePartitions.enabled: "true"
+            spark.sql.shuffle.partitions: "{{aqe_upper_bound}}"
+            spark.sql.adaptive.advisoryPartitionSizeInBytes: "{{advisory_bytes}}"
+          rationale: >-
+            With AQE, set shuffle.partitions to a generous upper bound and let
+            AQE coalesce down to the advisory target size at runtime.
+
+        - id: write_coalesce
+          condition: "is_write_stage == true AND data_size_gb <= 10"
+          result: COALESCE_BEFORE_WRITE
+          config: null
+          rationale: >-
+            For small write stages, coalesce() avoids a full shuffle while
+            reducing output file count; use df.coalesce(target_file_count).
+
+        - id: write_repartition
+          condition: "is_write_stage == true AND data_size_gb > 10"
+          result: REPARTITION_BEFORE_WRITE
+          config: null
+          rationale: >-
+            For large write stages, repartition(recommended_fixed) produces
+            uniformly sized output files; coalesce would leave skewed file sizes.
+
+        - id: tiny_dataset
+          condition: "data_size_gb < 1 AND aqe_enabled == false"
+          result: SET_FIXED_SMALL
+          config:
+            spark.sql.shuffle.partitions: "{{total_parallelism}}"
+          rationale: >-
+            For small datasets, match partition count to cluster parallelism
+            to avoid task scheduling overhead from many near-empty partitions.
+
+        - id: large_dataset_balanced
+          condition: >-
+            data_size_gb >= 1 AND raw_partition_count >= total_parallelism
+            AND aqe_enabled == false
+          result: SET_FIXED_FORMULA
+          config:
+            spark.sql.shuffle.partitions: "{{recommended_fixed}}"
+          rationale: >-
+            Formula-based fixed count; max(raw_partition_count, 2× parallelism)
+            ensures both target partition size and full core utilization.
+
+        - id: under_parallelized
+          condition: >-
+            raw_partition_count < total_parallelism AND aqe_enabled == false
+          result: SET_FIXED_PARALLELISM_FLOOR
+          config:
+            spark.sql.shuffle.partitions: "{{total_parallelism * 2}}"
+          rationale: >-
+            When raw_partition_count < total_parallelism, cores sit idle;
+            use 2× total_parallelism as the floor to keep all cores busy.
+
+        - id: skew_safety_buffer
+          condition: "data_size_gb > 1000 AND aqe_enabled == false"
+          result: SET_FIXED_WITH_BUFFER
+          config:
+            spark.sql.shuffle.partitions: "{{recommended_fixed * 2}}"
+          rationale: >-
+            For very large datasets (> 1 TB), double the formula count to leave
+            headroom for partition-level skew without OOM.
+
+      default: SET_FIXED_FORMULA
+
+    notes: |
+      Rule of thumb: aim for 100–200 MB per partition for shuffle stages,
+      64–128 MB for write stages.  With AQE, set shuffle.partitions = 1000
+      as a safe ceiling for most clusters; AQE will coalesce to ~10–50 actual
+      partitions for small queries automatically.
+      Formula reference:
+        recommended_fixed = max(ceil(data_gb * 1024 / target_mb), cores * 2)
+        aqe_upper_bound   = max(recommended_fixed * 2, cores * 4)
+
+  # ===========================================================================
+  # 3. CACHE_DECISION
+  # ===========================================================================
+
+  - id: CACHE_DECISION
+    name: "Caching and Persistence Level Selection"
+    description: >-
+      Decide whether to cache a DataFrame and at which StorageLevel, based
+      on reuse count, recomputation cost, available memory, and GC behaviour.
+
+    inputs:
+      - name: reuse_count
+        type: int
+        description: Number of times the same DataFrame is accessed in the application
+        typical_range: "1 – 50"
+      - name: recompute_cost_seconds
+        type: float
+        description: Estimated wall-clock time to recompute from source if evicted
+        unit: seconds
+        typical_range: "1 – 7200"
+      - name: dataframe_size_gb
+        type: float
+        description: Estimated uncompressed in-memory size of the DataFrame
+        unit: GB
+        typical_range: "0.01 – 10000"
+      - name: executor_memory_gb
+        type: float
+        description: spark.executor.memory in GB (excluding overhead)
+        unit: GB
+        typical_range: "1 – 256"
+      - name: executor_count
+        type: int
+        description: Total active executors
+        typical_range: "2 – 10000"
+      - name: is_iterative_algorithm
+        type: bool
+        description: >-
+          True if the DataFrame is accessed in a loop (ML training, graph
+          algorithms) where every iteration reads all partitions
+      - name: gc_overhead_pct
+        type: float
+        description: >-
+          Fraction of executor time spent in GC (from Spark UI / executor
+          metrics); 0.05 = 5 %
+        typical_range: "0.0 – 0.5"
+      - name: lineage_depth
+        type: int
+        description: Number of upstream transformations in the logical plan
+        typical_range: "1 – 500"
+
+    formulas:
+      total_storage_gb: "executor_count * executor_memory_gb * 0.5 * 0.5"
+      fits_in_memory: "dataframe_size_gb <= total_storage_gb * 0.8"
+      fits_with_ser: "dataframe_size_gb * 0.4 <= total_storage_gb * 0.8"
+      cache_roi_ratio: "recompute_cost_seconds * reuse_count / max(recompute_cost_seconds, 1)"
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: no_cache_single_use
+          condition: "reuse_count <= 1 AND is_iterative_algorithm == false"
+          result: NO_CACHE
+          config: null
+          rationale: >-
+            A DataFrame accessed only once gains nothing from caching; the
+            serialization and memory cost exceeds zero benefit.
+
+        - id: no_cache_cheap_recompute
+          condition: >-
+            recompute_cost_seconds < 5 AND is_iterative_algorithm == false
+            AND lineage_depth <= 3
+          result: NO_CACHE
+          config: null
+          rationale: >-
+            When recomputation is trivially cheap (< 5 s, short lineage),
+            caching overhead exceeds the benefit even for multiple uses.
+
+        - id: checkpoint_deep_lineage
+          condition: >-
+            lineage_depth >= 50 OR
+            (is_iterative_algorithm == true AND lineage_depth >= 20)
+          result: CHECKPOINT
+          config:
+            spark.checkpoint.compress: "true"
+          rationale: >-
+            Deep lineage causes StackOverflowError in Catalyst plan visitors
+            and slow re-planning; checkpoint truncates the lineage entirely.
+
+        - id: off_heap_gc_pressure
+          condition: >-
+            gc_overhead_pct >= 0.15 AND fits_in_memory == true
+            AND reuse_count >= 2
+          result: MEMORY_OFF_HEAP
+          config:
+            spark.memory.offHeap.enabled: "true"
+            spark.memory.offHeap.size: "10737418240"
+          rationale: >-
+            When GC overhead exceeds 15 %, heap-resident cache is amplifying
+            GC pressure; moving to off-heap eliminates cached objects from GC.
+
+        - id: memory_only
+          condition: >-
+            fits_in_memory == true AND reuse_count >= 2
+            AND recompute_cost_seconds >= 30
+          result: MEMORY_ONLY
+          config: null
+          rationale: >-
+            DataFrame fits in storage memory and recomputation is expensive;
+            MEMORY_ONLY gives the fastest access with no deserialization cost.
+
+        - id: memory_only_ser
+          condition: >-
+            fits_with_ser == true AND reuse_count >= 2
+            AND recompute_cost_seconds >= 15
+          result: MEMORY_ONLY_SER
+          config: null
+          rationale: >-
+            Serialized storage reduces memory footprint ~2-4x at the cost of
+            deserialization on each access; use when fits_in_memory is false
+            but the serialized version fits.
+
+        - id: memory_and_disk_iterative
+          condition: >-
+            is_iterative_algorithm == true AND recompute_cost_seconds >= 10
+          result: MEMORY_AND_DISK
+          config: null
+          rationale: >-
+            Iterative algorithms (ML, graph) access all partitions every
+            iteration; MEMORY_AND_DISK prevents re-reading from object storage
+            when executor memory is insufficient.
+
+        - id: memory_and_disk_fallback
+          condition: >-
+            fits_in_memory == false AND reuse_count >= 3
+            AND recompute_cost_seconds >= 60
+          result: MEMORY_AND_DISK
+          config: null
+          rationale: >-
+            When the DataFrame does not fit in memory but recomputation is
+            costly, MEMORY_AND_DISK spills overflow partitions to local disk
+            rather than forcing full recomputation on eviction.
+
+      default: NO_CACHE
+
+    notes: |
+      Always call an action (count(), first()) immediately after persist() to
+      force materialization before the cached data is needed.  Unpersist with
+      df.unpersist(blocking=True) when the DataFrame is no longer needed to
+      free storage memory promptly.
+      total_storage_gb formula assumes default spark.memory.fraction = 0.6 and
+      spark.memory.storageFraction = 0.5; adjust for custom memory configs.
+
+  # ===========================================================================
+  # 4. FILE_FORMAT
+  # ===========================================================================
+
+  - id: FILE_FORMAT
+    name: "Storage File Format Selection"
+    description: >-
+      Select the optimal file format for a given write workload based on
+      access pattern, engine ecosystem, update requirements, and data size.
+
+    inputs:
+      - name: access_pattern
+        type: enum
+        description: Predominant read access pattern
+        values: [columnar_scan, row_lookup, mixed, streaming_append]
+      - name: engine_ecosystem
+        type: enum
+        description: Primary query engines that will read this data
+        values: [spark_only, hive_primary, multi_engine, kafka_streaming]
+      - name: update_frequency
+        type: enum
+        description: How often the data is modified after initial write
+        values: [never, batch_overwrite, incremental_upsert, streaming]
+      - name: acid_required
+        type: bool
+        description: Whether ACID transactions (concurrent writes, rollback) are needed
+      - name: size_gb
+        type: float
+        description: Total dataset size on disk
+        unit: GB
+        typical_range: "0.001 – 1000000"
+      - name: schema_evolution
+        type: enum
+        description: Frequency and type of schema changes expected
+        values: [none, additive_only, full_evolution]
+      - name: multi_engine_write
+        type: bool
+        description: Whether non-Spark engines (Flink, Trino) also write to this table
+
+    formulas:
+      is_small: "size_gb < 0.1"
+      is_large: "size_gb >= 100"
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: kafka_avro
+          condition: >-
+            engine_ecosystem == 'kafka_streaming'
+            OR access_pattern == 'streaming_append'
+          result: AVRO
+          config:
+            spark.sql.avro.compression.codec: "snappy"
+          rationale: >-
+            Avro with Schema Registry is the Kafka standard; use at the
+            ingestion boundary then convert to Parquet for analytics.
+
+        - id: delta_databricks
+          condition: >-
+            acid_required == true AND engine_ecosystem == 'spark_only'
+            AND multi_engine_write == false
+          result: DELTA_LAKE
+          config:
+            spark.sql.extensions: "io.delta.sql.DeltaSparkSessionExtension"
+            spark.sql.catalog.spark_catalog: "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+          rationale: >-
+            Delta Lake provides ACID + time travel with the deepest Spark
+            integration; optimal for Databricks or OSS Spark-only stacks.
+
+        - id: iceberg_multi_engine
+          condition: >-
+            acid_required == true AND
+            (engine_ecosystem == 'multi_engine' OR multi_engine_write == true)
+          result: APACHE_ICEBERG
+          config:
+            spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+            spark.sql.catalog.spark_catalog: "org.apache.iceberg.spark.SparkSessionCatalog"
+          rationale: >-
+            Iceberg's open table format spec is engine-agnostic; best when
+            Flink, Trino, or Snowflake also write or read the same table.
+
+        - id: orc_hive
+          condition: >-
+            engine_ecosystem == 'hive_primary' AND acid_required == false
+          result: ORC
+          config:
+            spark.sql.orc.filterPushdown: "true"
+          rationale: >-
+            ORC is Hive's native columnar format; use when Hive is the primary
+            consumer and Delta/Iceberg are not available.
+
+        - id: parquet_large_analytical
+          condition: >-
+            access_pattern == 'columnar_scan' AND is_large == true
+            AND acid_required == false
+          result: PARQUET
+          config:
+            spark.sql.parquet.compression.codec: "snappy"
+            spark.sql.parquet.filterPushdown: "true"
+          rationale: >-
+            Parquet is the best-supported columnar format for large analytical
+            datasets; column pruning and predicate pushdown scale well.
+
+        - id: parquet_medium
+          condition: >-
+            access_pattern == 'columnar_scan' AND acid_required == false
+          result: PARQUET
+          config:
+            spark.sql.parquet.compression.codec: "snappy"
+          rationale: >-
+            Default choice for analytical Spark workloads; universally supported
+            and provides best read performance for column-oriented queries.
+
+        - id: csv_json_small_exchange
+          condition: "is_small == true AND engine_ecosystem == 'multi_engine'"
+          result: CSV_OR_JSON
+          config: null
+          rationale: >-
+            For tiny data exchange tables (< 100 MB) with external systems,
+            text formats are acceptable; always provide an explicit schema.
+
+        - id: parquet_convert_from_csv
+          condition: >-
+            update_frequency == 'batch_overwrite'
+            AND acid_required == false
+          result: PARQUET
+          config:
+            spark.sql.parquet.compression.codec: "snappy"
+            spark.sql.parquet.mergeSchema: "false"
+          rationale: >-
+            Batch-overwritten datasets without ACID requirements are best
+            served as plain Parquet; simple, fast, and widely compatible.
+
+      default: PARQUET
+
+    notes: |
+      Format performance benchmark (approximate, columnar scan of 1 TB):
+        Parquet  (Snappy):  baseline read speed
+        ORC      (Zlib):    ~0.9x Parquet (slightly slower decompress)
+        Delta    (Snappy):  ~0.95x Parquet (small metadata overhead)
+        Iceberg  (Snappy):  ~0.9–0.95x Parquet (manifest scan overhead)
+        Avro     (Snappy):  ~0.1–0.2x Parquet (no column pruning)
+        CSV:               ~0.05–0.1x Parquet (text parsing + no pushdown)
+
+  # ===========================================================================
+  # 5. SKEW_REMEDIATION
+  # ===========================================================================
+
+  - id: SKEW_REMEDIATION
+    name: "Data Skew Remediation Strategy"
+    description: >-
+      Given the skew profile, operation type, hot-key characteristics, and
+      available Spark version, select the most effective skew mitigation.
+
+    inputs:
+      - name: skew_ratio
+        type: float
+        description: max_partition_bytes / median_partition_bytes
+        typical_range: "1.0 – 10000"
+      - name: operation_type
+        type: enum
+        description: The operation exhibiting skew
+        values: [join, groupby_sum, groupby_count_distinct, aggregation, write]
+      - name: hot_key_count
+        type: int
+        description: Number of distinct keys that account for the dominant skew
+        typical_range: "1 – 1000"
+      - name: smaller_side_gb
+        type: float
+        description: Size of the smaller join side (relevant for join skew only)
+        unit: GB
+        typical_range: "0.001 – 10000"
+      - name: broadcast_threshold_gb
+        type: float
+        description: Current autoBroadcastJoinThreshold converted to GB
+        unit: GB
+      - name: aqe_enabled
+        type: bool
+        description: Whether spark.sql.adaptive.enabled is true
+      - name: spark_version
+        type: float
+        description: Spark major.minor as a float
+      - name: exact_distinct_required
+        type: bool
+        description: >-
+          Whether COUNT DISTINCT must be exact (vs approximate via HyperLogLog)
+
+    formulas:
+      recommended_salt_factor: "min(ceil(skew_ratio / 5), 64)"
+      broadcast_headroom_gb: "smaller_side_gb / broadcast_threshold_gb"
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: broadcast_replace_join
+          condition: >-
+            operation_type == 'join'
+            AND smaller_side_gb <= broadcast_threshold_gb * 10
+            AND skew_ratio >= 3
+          result: RAISE_BROADCAST_THRESHOLD
+          config:
+            spark.sql.autoBroadcastJoinThreshold: "{{smaller_side_gb * 1073741824}}"
+          rationale: >-
+            Broadcasting the smaller side eliminates the shuffle and therefore
+            the skew; most effective fix when the smaller side can fit in memory.
+
+        - id: aqe_skew_join
+          condition: >-
+            aqe_enabled == true AND spark_version >= 3.0
+            AND operation_type == 'join' AND skew_ratio >= 5
+          result: AQE_SKEW_JOIN
+          config:
+            spark.sql.adaptive.skewJoin.enabled: "true"
+            spark.sql.adaptive.skewJoin.skewedPartitionFactor: "5"
+            spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes: "268435456"
+          rationale: >-
+            AQE splits oversized join partitions at runtime with zero code change;
+            prefer over manual salting when Spark 3.x is available.
+
+        - id: hot_key_isolation
+          condition: >-
+            hot_key_count <= 10 AND skew_ratio >= 5
+            AND (operation_type == 'join' OR operation_type == 'aggregation')
+          result: HOT_KEY_ISOLATION
+          config: null
+          rationale: >-
+            When a small number of specific hot keys are known, route them through
+            a broadcast join / separate aggregation path, then union the results.
+
+        - id: approx_count_distinct
+          condition: >-
+            operation_type == 'groupby_count_distinct'
+            AND exact_distinct_required == false
+          result: APPROX_COUNT_DISTINCT
+          config: null
+          rationale: >-
+            approx_count_distinct() uses HyperLogLog (1–5 % error) and is always
+            single-phase; eliminates aggregation skew without code complexity.
+
+        - id: two_phase_agg_distinct
+          condition: >-
+            operation_type == 'groupby_count_distinct'
+            AND exact_distinct_required == true AND skew_ratio >= 5
+          result: TWO_PHASE_AGGREGATION
+          config:
+            spark.sql.adaptive.enabled: "true"
+          rationale: >-
+            Exact COUNT DISTINCT on a skewed key requires two-phase aggregation:
+            salt + partial dedup in phase 1, final count in phase 2.
+
+        - id: salting_join
+          condition: >-
+            operation_type == 'join' AND skew_ratio >= 10
+            AND smaller_side_gb > broadcast_threshold_gb * 10
+          result: SALTED_JOIN
+          config: null
+          rationale: >-
+            When the smaller side is too large to broadcast and AQE cannot handle
+            the skew, manual salting distributes hot-key rows across N tasks;
+            use recommended_salt_factor = ceil(skew_ratio / 5).
+
+        - id: salting_aggregation
+          condition: >-
+            operation_type == 'groupby_sum' AND skew_ratio >= 10
+            AND aqe_enabled == false
+          result: TWO_PHASE_AGGREGATION
+          config: null
+          rationale: >-
+            Sum aggregation on a skewed key can be split into a salted partial
+            sum (phase 1) and a final sum over partial results (phase 2).
+
+        - id: repartition_uniform
+          condition: "skew_ratio >= 3 AND skew_ratio < 10"
+          result: REPARTITION_UNIFORM
+          config: null
+          rationale: >-
+            For mild skew (3x–10x), uniform repartition before the operation
+            redistributes rows evenly; effective when original key is not
+            required for the downstream operation.
+
+      default: AQE_SKEW_JOIN
+
+    notes: |
+      Measure skew_ratio from Spark UI → Stage → shuffle read metrics:
+        skew_ratio = max_task_duration / median_task_duration
+      or from partition byte stats:
+        skew_ratio = max_partition_bytes / median_partition_bytes
+      recommended_salt_factor = min(ceil(skew_ratio / 5), 64)
+        skew_ratio  5 → salt_factor  1  (AQE preferred)
+        skew_ratio 10 → salt_factor  2
+        skew_ratio 50 → salt_factor 10
+        skew_ratio 100 → salt_factor 20
+
+  # ===========================================================================
+  # 6. MEMORY_SIZING
+  # ===========================================================================
+
+  - id: MEMORY_SIZING
+    name: "Executor Memory Sizing"
+    description: >-
+      Given workload characteristics and observed failure modes, compute
+      executor memory, overhead, and fraction recommendations.
+
+    inputs:
+      - name: cores_per_executor
+        type: int
+        description: spark.executor.cores
+        typical_range: "1 – 16"
+      - name: peak_shuffle_data_gb_per_core
+        type: float
+        description: >-
+          Maximum shuffle read + write GB observed per core during execution
+          (from Spark UI stage metrics)
+        unit: GB
+        typical_range: "0.1 – 50"
+      - name: cached_data_gb
+        type: float
+        description: Total data persisted in executor memory across all DataFrames
+        unit: GB
+        typical_range: "0 – 1000"
+      - name: broadcast_size_mb
+        type: float
+        description: Total size of all broadcast variables in the job
+        unit: MB
+        typical_range: "0 – 4096"
+      - name: failure_mode
+        type: enum
+        description: Observed failure type if any, or 'none'
+        values: [none, heap_oom, gc_overhead_exceeded, shuffle_spill_excessive,
+                 broadcast_oom, off_heap_oom]
+      - name: gc_overhead_pct
+        type: float
+        description: Fraction of executor time in GC (0.0 – 1.0)
+        typical_range: "0.0 – 0.5"
+      - name: executor_count
+        type: int
+        description: Total active executors
+        typical_range: "2 – 10000"
+
+    formulas:
+      execution_memory_gb_per_core: "peak_shuffle_data_gb_per_core * 1.5"
+      storage_memory_gb: "cached_data_gb / executor_count * 1.25"
+      base_executor_memory_gb: "max(execution_memory_gb_per_core * cores_per_executor + storage_memory_gb, 4)"
+      recommended_executor_memory_gb: "ceil(base_executor_memory_gb * 1.2)"
+      memory_overhead_mb: "max(384, recommended_executor_memory_gb * 1024 * 0.1)"
+      storage_fraction: "min(storage_memory_gb / (recommended_executor_memory_gb * 0.6), 0.8)"
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: broadcast_oom
+          condition: "failure_mode == 'broadcast_oom'"
+          result: REDUCE_BROADCAST_THRESHOLD
+          config:
+            spark.sql.autoBroadcastJoinThreshold: "33554432"
+            spark.driver.memory: "8g"
+          rationale: >-
+            Broadcast OOM occurs at the driver (serialization) or executor
+            (deserialization); reduce threshold to prevent large broadcasts or
+            increase driver memory.
+
+        - id: heap_oom_cached_data
+          condition: >-
+            failure_mode == 'heap_oom' AND cached_data_gb > 0
+            AND gc_overhead_pct >= 0.15
+          result: INCREASE_MEMORY_OR_OFFHEAP
+          config:
+            spark.memory.offHeap.enabled: "true"
+            spark.memory.offHeap.size: "{{storage_memory_gb * 1073741824}}"
+          rationale: >-
+            OOM + high GC indicates the cached data is crowding out execution
+            memory; move cached data to off-heap to eliminate GC pressure.
+
+        - id: heap_oom_shuffle
+          condition: >-
+            failure_mode == 'heap_oom' OR
+            failure_mode == 'shuffle_spill_excessive'
+          result: INCREASE_EXECUTOR_MEMORY
+          config:
+            spark.executor.memory: "{{recommended_executor_memory_gb}}g"
+            spark.executor.memoryOverhead: "{{memory_overhead_mb}}m"
+          rationale: >-
+            Shuffle data does not fit in execution memory; increase executor
+            memory to recommended_executor_memory_gb.
+
+        - id: gc_overhead
+          condition: "failure_mode == 'gc_overhead_exceeded' OR gc_overhead_pct >= 0.2"
+          result: TUNE_GC_AND_FRACTIONS
+          config:
+            spark.executor.extraJavaOptions: "-XX:+UseG1GC -XX:G1HeapRegionSize=16m"
+            spark.memory.fraction: "0.7"
+            spark.memory.storageFraction: "0.3"
+          rationale: >-
+            High GC overhead indicates heap fragmentation; switch to G1GC and
+            reduce storage fraction to give execution memory more headroom.
+
+        - id: storage_dominated
+          condition: "cached_data_gb > 0 AND storage_memory_gb > base_executor_memory_gb * 0.4"
+          result: INCREASE_STORAGE_FRACTION
+          config:
+            spark.memory.fraction: "0.6"
+            spark.memory.storageFraction: "{{min(storage_fraction, 0.7)}}"
+          rationale: >-
+            Cache occupies a large fraction of memory; raise storage fraction
+            to prevent execution from evicting cache partitions.
+
+        - id: small_executors_many_cores
+          condition: "cores_per_executor >= 5 AND base_executor_memory_gb < cores_per_executor * 2"
+          result: INCREASE_MEMORY_PER_CORE
+          config:
+            spark.executor.memory: "{{cores_per_executor * 4}}g"
+            spark.executor.memoryOverhead: "{{cores_per_executor * 512}}m"
+          rationale: >-
+            With many cores per executor, concurrent tasks compete for memory;
+            target at least 4 GB per core to avoid execution spills.
+
+        - id: well_sized
+          condition: "failure_mode == 'none' AND gc_overhead_pct < 0.1"
+          result: NO_CHANGE
+          config: null
+          rationale: >-
+            No failures and low GC overhead indicates current sizing is adequate;
+            monitor for regressions as data volume grows.
+
+        - id: baseline_sizing
+          condition: "failure_mode == 'none'"
+          result: APPLY_FORMULA
+          config:
+            spark.executor.memory: "{{recommended_executor_memory_gb}}g"
+            spark.executor.memoryOverhead: "{{memory_overhead_mb}}m"
+            spark.memory.fraction: "0.6"
+          rationale: >-
+            Apply formula-derived baseline: max(1.5 × shuffle_gb × cores +
+            1.25 × cached_gb / executors, 4 GB) × 1.2 safety factor.
+
+      default: APPLY_FORMULA
+
+    notes: |
+      Memory hierarchy per executor:
+        Total container memory = executor.memory + executor.memoryOverhead
+        Spark managed memory   = executor.memory × memory.fraction          (default 60 %)
+          Execution memory     = managed × (1 - storageFraction)           (default 50 % of managed)
+          Storage memory       = managed × storageFraction                  (default 50 % of managed)
+        User memory            = executor.memory × (1 - memory.fraction)   (default 40 %)
+        Off-heap (optional)    = memory.offHeap.size (separate from above)
+      Overhead minimum is max(384 MB, 10 % of executor.memory).
+      For YARN: total YARN container = executor.memory + memoryOverhead.
+
+  # ===========================================================================
+  # 7. SERIALIZATION
+  # ===========================================================================
+
+  - id: SERIALIZATION
+    name: "Serialization Library Selection"
+    description: >-
+      Select the optimal Spark serialization library based on workload type,
+      data class characteristics, and shuffle/broadcast intensity.
+
+    inputs:
+      - name: has_custom_classes
+        type: bool
+        description: Whether the job uses custom Java/Scala/Python classes in RDD operations
+      - name: shuffle_intensity
+        type: enum
+        description: Relative volume of shuffle data in the job
+        values: [low, medium, high]
+      - name: has_registered_classes
+        type: bool
+        description: Whether all custom classes are registered with KryoRegistrator
+      - name: uses_python_udf
+        type: bool
+        description: Whether the job uses Python UDFs or PySpark RDD API (Python pickling path)
+      - name: spark_version
+        type: float
+        description: Spark major.minor as a float
+      - name: uses_rdd_api
+        type: bool
+        description: Whether the job uses RDD operations (vs pure DataFrame/Dataset API)
+
+    formulas: null
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: python_pickle
+          condition: "uses_python_udf == true OR (uses_rdd_api == true AND spark_version >= 2.0)"
+          result: PYTHON_PICKLE_FOR_PYTHON_OBJECTS
+          config:
+            spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+          rationale: >-
+            Python UDF data crosses the JVM→Python boundary via pickle regardless
+            of spark.serializer; set Kryo for JVM-side shuffle and broadcast data.
+
+        - id: kryo_registered
+          condition: >-
+            shuffle_intensity == 'high' AND has_custom_classes == true
+            AND has_registered_classes == true
+          result: KRYO_WITH_REGISTRATION
+          config:
+            spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+            spark.kryo.registrationRequired: "true"
+            spark.kryo.classesToRegister: "<com.example.MyClass,…>"
+          rationale: >-
+            Kryo with full class registration gives maximum serialization speed
+            (~10x Java) and smallest serialized size; safe when all types are known.
+
+        - id: kryo_unregistered
+          condition: "shuffle_intensity == 'high' AND has_custom_classes == true"
+          result: KRYO_WITHOUT_REGISTRATION
+          config:
+            spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+            spark.kryo.registrationRequired: "false"
+          rationale: >-
+            Kryo without forced registration is safe for mixed codebases; still
+            10x faster than Java for primitive and common types; unregistered
+            types fall back to slower serialization automatically.
+
+        - id: kryo_shuffle_only
+          condition: "shuffle_intensity == 'high' AND has_custom_classes == false"
+          result: KRYO_DEFAULT
+          config:
+            spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+            spark.kryo.registrationRequired: "false"
+          rationale: >-
+            For primitive and standard library types, Kryo provides 3-5x smaller
+            shuffle payloads and 10x faster serialization with no registration needed.
+
+        - id: java_safe_fallback
+          condition: "shuffle_intensity == 'low' AND has_custom_classes == true"
+          result: JAVA_SERIALIZER
+          config:
+            spark.serializer: "org.apache.spark.serializer.JavaSerializer"
+          rationale: >-
+            Java serialization is universally safe for all Serializable types;
+            acceptable when shuffle volume is low and simplicity is preferred
+            over performance.
+
+        - id: kryo_dataset_api
+          condition: "uses_rdd_api == false AND shuffle_intensity != 'low'"
+          result: KRYO_DEFAULT
+          config:
+            spark.serializer: "org.apache.spark.serializer.KryoSerializer"
+          rationale: >-
+            Pure DataFrame/Dataset API jobs use Tungsten binary format internally
+            but still use spark.serializer for shuffle network transfer and
+            broadcast; Kryo reduces that overhead.
+
+      default: KRYO_DEFAULT
+
+    notes: |
+      spark.serializer affects: shuffle data transfer, broadcast variable
+      serialization, RDD persistence (when not using Tungsten).
+      It does NOT affect DataFrame internal execution — Tungsten's binary
+      row format is always used for in-memory DataFrame operations regardless
+      of spark.serializer.
+      To register classes: implement SparkContext.registerKryoClasses() or set
+      spark.kryo.classesToRegister = "com.example.A,com.example.B".
+
+  # ===========================================================================
+  # 8. COMPRESSION
+  # ===========================================================================
+
+  - id: COMPRESSION
+    name: "Compression Codec Selection"
+    description: >-
+      Select the optimal compression codec for each Spark subsystem —
+      Parquet/ORC writes, shuffle data, broadcast variables, and RDD persistence —
+      balancing storage cost, CPU cost, and read latency.
+
+    inputs:
+      - name: subsystem
+        type: enum
+        description: The Spark subsystem being tuned
+        values: [parquet_write, orc_write, shuffle, broadcast, rdd_persist, streaming_kafka]
+      - name: priority
+        type: enum
+        description: Primary optimization target
+        values: [storage_size, cpu_speed, balanced]
+      - name: cpu_cores_available
+        type: int
+        description: Spare CPU capacity per executor during compression-intensive operations
+        typical_range: "1 – 16"
+      - name: storage_cost_sensitive
+        type: bool
+        description: Whether storage cost is a primary constraint (e.g. S3 egress billing)
+      - name: spark_version
+        type: float
+        description: Spark major.minor as a float
+
+    formulas: null
+
+    tree:
+      type: priority_rules
+      rules:
+
+        - id: parquet_zstd_storage
+          condition: >-
+            subsystem == 'parquet_write' AND
+            (priority == 'storage_size' OR storage_cost_sensitive == true)
+            AND spark_version >= 2.3
+          result: PARQUET_ZSTD
+          config:
+            spark.sql.parquet.compression.codec: "zstd"
+          rationale: >-
+            Zstd achieves the best compression ratio for Parquet (typically 20-30 %
+            smaller than Snappy) with acceptable CPU overhead and fast decompression;
+            use when S3/GCS storage cost matters.
+
+        - id: parquet_snappy_balanced
+          condition: "subsystem == 'parquet_write' AND priority == 'balanced'"
+          result: PARQUET_SNAPPY
+          config:
+            spark.sql.parquet.compression.codec: "snappy"
+          rationale: >-
+            Snappy is the Parquet default: fast compression and decompression,
+            ~2-3x size reduction, and universally supported across all engines.
+
+        - id: parquet_lz4_cpu_speed
+          condition: >-
+            subsystem == 'parquet_write' AND priority == 'cpu_speed'
+            AND spark_version >= 3.2
+          result: PARQUET_LZ4
+          config:
+            spark.sql.parquet.compression.codec: "lz4"
+          rationale: >-
+            LZ4 provides the lowest CPU overhead for Parquet writes with slightly
+            larger file sizes than Snappy; best for CPU-bound write-heavy workloads.
+
+        - id: orc_zlib_storage
+          condition: >-
+            subsystem == 'orc_write' AND
+            (priority == 'storage_size' OR storage_cost_sensitive == true)
+          result: ORC_ZLIB
+          config:
+            spark.sql.orc.compression.codec: "zlib"
+          rationale: >-
+            Zlib (deflate) provides the best ORC compression ratio; standard for
+            Hive/ORC workloads where read latency is acceptable.
+
+        - id: orc_snappy_balanced
+          condition: "subsystem == 'orc_write' AND priority != 'storage_size'"
+          result: ORC_SNAPPY
+          config:
+            spark.sql.orc.compression.codec: "snappy"
+          rationale: >-
+            Snappy for ORC balances compression ratio and decompression speed;
+            preferred when query latency matters more than storage size.
+
+        - id: shuffle_lz4_default
+          condition: "subsystem == 'shuffle' AND priority != 'storage_size'"
+          result: SHUFFLE_LZ4
+          config:
+            spark.io.compression.codec: "lz4"
+            spark.shuffle.compress: "true"
+            spark.shuffle.spill.compress: "true"
+          rationale: >-
+            LZ4 minimizes CPU overhead on the shuffle write path; critical since
+            shuffle compression runs on every mapper, and compress latency directly
+            adds to stage wall-clock time.
+
+        - id: shuffle_zstd_storage
+          condition: "subsystem == 'shuffle' AND priority == 'storage_size'"
+          result: SHUFFLE_ZSTD
+          config:
+            spark.io.compression.codec: "zstd"
+            spark.shuffle.compress: "true"
+          rationale: >-
+            Zstd for shuffle reduces network transfer volume at the cost of higher
+            CPU overhead on the write path; worthwhile when network is the bottleneck.
+
+        - id: broadcast_snappy
+          condition: "subsystem == 'broadcast'"
+          result: BROADCAST_SNAPPY
+          config:
+            spark.broadcast.compress: "true"
+            spark.io.compression.codec: "snappy"
+          rationale: >-
+            Broadcast variables are serialized once and deserialized on every
+            executor; Snappy gives fast decompression which matters more than
+            compression ratio for broadcast data.
+
+      default: SNAPPY_BALANCED
+
+    notes: |
+      Codec comparison summary (approximate, Parquet columnar data):
+        Codec    Compress speed   Decompress speed   Compression ratio
+        NONE     ∞                ∞                  1.0x
+        LZ4      ~500 MB/s/core   ~1500 MB/s/core    ~2.0–2.5x
+        Snappy   ~400 MB/s/core   ~1200 MB/s/core    ~2.0–2.5x
+        Zstd-1   ~300 MB/s/core   ~900 MB/s/core     ~2.5–3.5x
+        Zlib/gzip ~50 MB/s/core   ~300 MB/s/core     ~2.8–4.0x
+      For shuffle, prefer LZ4 (speed) over Snappy on CPU-constrained clusters.
+      Zstd with level 1 is a good Snappy replacement: similar speed, better ratio.
+      Parquet and ORC have separate codec settings from spark.io.compression.codec,
+      which only governs shuffle, broadcast, and RDD persistence.
