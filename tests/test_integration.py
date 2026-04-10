@@ -750,9 +750,9 @@ class TestCLICommands:
         _, output = self._run("rules", "--dimension", "D03", "--format", "json")
         rules = json.loads(output)
         from spark_perf_lint.rules.registry import RuleRegistry
+
         expected = sum(
-            1 for r in RuleRegistry.instance().get_all_rules()
-            if r.rule_id.startswith("SPL-D03")
+            1 for r in RuleRegistry.instance().get_all_rules() if r.rule_id.startswith("SPL-D03")
         )
         assert len(rules) == expected
 
