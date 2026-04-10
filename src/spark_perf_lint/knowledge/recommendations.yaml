@@ -3032,3 +3032,184 @@ rules:
     estimated_speedup: "Reduces driver-side plan analysis time; eliminates plan visitor stack overflow risk"
     effort: MINOR_CODE_CHANGE
     common_in: "Notebook-originated pipelines, complex feature engineering, iteratively built transformation chains"
+
+  # ---------------------------------------------------------------------------
+  # D11 — Monitoring and Observability (SPL-D11-001 through SPL-D11-005)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D11-001
+    short_recommendation: >-
+      Add explain() plan assertions to test files that exercise joins or
+      aggregations — catch join strategy regressions before production.
+    detailed_recommendation: |
+      Adding df.explain() (or explain(mode='formatted')) inside tests allows you to
+      assert on the physical query plan, catching performance regressions early:
+      join strategy validation asserts that a BroadcastHashJoin is chosen for small
+      lookup tables — a regression to SortMergeJoin doubles shuffle cost; predicate
+      pushdown assertions confirm filters appear before scan nodes; partition pruning
+      assertions verify only expected partitions are read. Capture the plan string
+      and assert on substrings:
+        plan = df._jdf.queryExecution().explainString('formatted')
+        assert 'BroadcastHashJoin' in plan
+      This pattern makes query-plan regressions as visible as logic regressions and
+      is especially valuable after Spark version upgrades or config changes.
+    before_code: |
+      # test_etl.py
+      def test_join():
+          result = users.join(events, 'user_id')
+          assert result.count() == expected
+    after_code: |
+      # test_etl.py
+      def test_join():
+          result = users.join(events, 'user_id')
+          plan = result._jdf.queryExecution().explainString('formatted')
+          assert 'BroadcastHashJoin' in plan  # validate join strategy
+          assert result.count() == expected
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.explain.html"
+    estimated_speedup: "Catches join strategy and predicate pushdown regressions in CI before production"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Test suites for PySpark ETL, join-heavy query validation, Spark version upgrade testing"
+
+  - rule_id: SPL-D11-002
+    short_recommendation: >-
+      Register a Spark listener via spark.extraListeners or addSparkListener()
+      to capture per-job metrics, shuffle stats, and query execution events.
+    detailed_recommendation: |
+      Spark's listener framework (SparkListener / QueryExecutionListener) provides
+      hooks for every significant event in a job's lifecycle: task start/end, stage
+      completion, SQL query execution, shuffle read/write bytes, and more. Without a
+      listener, the only observability is what Spark itself logs to stdout.
+      Listeners can be registered two ways: (1) Config:
+      spark.conf.set('spark.extraListeners', 'com.example.MyListener'); (2)
+      Programmatic: spark.sparkContext.addSparkListener(MyListener()). Common use
+      cases: emit per-job duration, shuffle bytes, and spill metrics to a metrics
+      backend (Datadog, Prometheus, Grafana); forward SQL query events to an audit
+      log; detect slow stages and alert on-call. Without listeners, SLA breaches
+      are only discovered retroactively via Spark History Server — often after users
+      have already noticed degradation.
+    before_code: |
+      spark = SparkSession.builder.appName('etl').getOrCreate()
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .appName('etl')
+          .config('spark.extraListeners', 'com.example.MetricsListener')
+          .config('spark.sql.queryExecutionListeners', 'com.example.QueryAuditListener')
+          .getOrCreate()
+      )
+    config_changes:
+      spark.extraListeners: "com.example.MetricsListener"
+      spark.sql.queryExecutionListeners: "com.example.QueryAuditListener"
+    spark_docs_link: "https://spark.apache.org/docs/latest/monitoring.html#sparklistener-interface"
+    estimated_speedup: "Enables proactive alerting; captures shuffle/spill metrics for capacity planning"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Production ETL pipelines, streaming jobs, multi-tenant Spark clusters"
+
+  - rule_id: SPL-D11-003
+    short_recommendation: >-
+      Add Python logging (import logging) and log row counts after each major
+      stage in multi-write jobs to make data drops and slow stages visible.
+    detailed_recommendation: |
+      Multi-stage Spark jobs that write results in several steps benefit greatly from
+      intermediate logging: recording row counts, elapsed time, and key metrics after
+      each stage makes it trivial to pinpoint where a slow or incorrect run diverged
+      from expectation. Without logging: a job that runs for hours and produces wrong
+      output requires re-running with added instrumentation to diagnose; silent data
+      drops (a filter removes all rows) are invisible; capacity planning is guesswork
+      without recorded row counts over time. Recommended pattern:
+        n = df.count()
+        logger.info('stage enriched: %d rows', n)
+      Use Python's built-in logging module rather than print() so that log level,
+      timestamps, and destination can be controlled at runtime.
+    before_code: |
+      enriched = raw.join(meta, 'id').withColumn('score', compute(col('v')))
+      enriched.write.mode('overwrite').parquet('s3://bucket/enriched')
+      summary = enriched.groupBy('cat').agg(count('*'))
+      summary.write.mode('overwrite').parquet('s3://bucket/summary')
+    after_code: |
+      import logging
+      logger = logging.getLogger(__name__)
+
+      enriched = raw.join(meta, 'id').withColumn('score', compute(col('v')))
+      logger.info('enriched rows: %d', enriched.count())
+      enriched.write.mode('overwrite').parquet('s3://bucket/enriched')
+
+      summary = enriched.groupBy('cat').agg(count('*'))
+      logger.info('summary rows: %d', summary.count())
+      summary.write.mode('overwrite').parquet('s3://bucket/summary')
+    config_changes: null
+    spark_docs_link: "https://docs.python.org/3/library/logging.html"
+    estimated_speedup: "Silent data drops and slow stages become visible; enables row-count trend analysis"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Multi-stage ETL pipelines, batch data processing, overnight reporting jobs"
+
+  - rule_id: SPL-D11-004
+    short_recommendation: >-
+      Wrap Spark action calls in try/except Exception and re-raise with
+      logger.error(exc_info=True) to capture executor failures with context.
+    detailed_recommendation: |
+      Spark actions — count(), collect(), write operations — submit jobs to the
+      cluster. Failures from executors surface as Python exceptions on the driver:
+      AnalysisException, SparkException, IOException, etc. Without a try/except
+      block, these exceptions propagate as unhandled errors and crash the driver
+      process. In production pipelines this means: silent failure — the job exits
+      with a non-zero code and downstream jobs proceed with stale/missing data; no
+      context — the stack trace does not capture job parameters, input sizes, or the
+      specific partition that failed; no cleanup — temp tables, locks, or partial
+      writes are not rolled back. Wrap each logical pipeline stage in try/except and
+      log the exception with enough context to reproduce the failure. Always re-raise
+      after logging so the scheduler marks the job as failed.
+    before_code: |
+      df = spark.read.parquet(input_path)
+      result = df.join(other, 'id')
+      result.write.mode('overwrite').parquet(output_path)
+    after_code: |
+      try:
+          df = spark.read.parquet(input_path)
+          result = df.join(other, 'id')
+          result.write.mode('overwrite').parquet(output_path)
+      except Exception as e:
+          logger.error('pipeline failed: input=%s', input_path, exc_info=True)
+          raise
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.write.html"
+    estimated_speedup: "Contextual error capture; prevents silent downstream failures; enables partial-write cleanup"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Production pipeline scripts, batch ETL jobs, scheduled Spark applications"
+
+  - rule_id: SPL-D11-005
+    short_recommendation: >-
+      Replace hardcoded storage paths with runtime parameters (argparse, os.environ,
+      or a config file) to enable environment promotion without code changes.
+    detailed_recommendation: |
+      Hardcoded paths (s3://prod-bucket/..., /data/input.parquet) make jobs
+      difficult to run in multiple environments — dev, staging, and prod point to
+      different buckets/paths and hardcoded values require file edits per env; test
+      safely — tests must not read from or write to production storage; audit —
+      paths embedded in code bypass infrastructure-as-code reviews. Replace
+      hardcoded paths with: CLI arguments via argparse or click; environment
+      variables (os.environ.get('INPUT_PATH')); config files loaded at runtime
+      (YAML/JSON); or Spark job parameters (--conf spark.myapp.inputPath=...).
+      This pattern separates code from configuration and is a prerequisite for
+      environment promotion without code changes (the 12-Factor App config
+      principle).
+    before_code: |
+      df = spark.read.parquet('s3://prod-data/events/2024-01/')
+      result = df.filter('status = "active"')
+      result.write.mode('overwrite').parquet('s3://prod-data/active-events/')
+    after_code: |
+      import argparse
+      parser = argparse.ArgumentParser()
+      parser.add_argument('--input-path', required=True)
+      parser.add_argument('--output-path', required=True)
+      args = parser.parse_args()
+
+      df = spark.read.parquet(args.input_path)
+      result = df.filter('status = "active"')
+      result.write.mode('overwrite').parquet(args.output_path)
+    config_changes: null
+    spark_docs_link: "https://12factor.net/config"
+    estimated_speedup: "Environment-agnostic code; safe test isolation; paths auditable via IaC"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Ad-hoc Spark scripts, early pipeline implementations, notebook-converted production jobs"
