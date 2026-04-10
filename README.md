@@ -12,11 +12,19 @@
 
 ---
 
-## What This Tool Is
+# What This Tool Is
 
-`spark-perf-lint` is a static analysis linter for PySpark code that catches performance anti-patterns at the earliest possible moment — in your editor, at commit time, and in CI — long before a job runs on hundreds of millions of records and costs you hours of cluster time and thousands of dollars. Unlike generic Python linters, every finding is Spark-aware: it knows the difference between a `groupByKey` that serialises all values to the driver and a `reduceByKey` that aggregates map-side, and it tells you *exactly* how much that difference costs.
+`spark-perf-lint` is a static analysis linter for PySpark code that catches performance anti-patterns before they reach production — in your editor, at commit time, and in CI.
 
-The tool operates across **three tiers**: Tier 1 is a pure-Python AST scanner (zero Spark dependency) that runs in milliseconds as a pre-commit hook; Tier 2 adds optional Claude LLM enrichment in CI for cross-file pattern detection and root-cause analysis; Tier 3 provides a Jupyter-based deep audit against a live Spark runtime with physical plan inspection and synthetic benchmark datasets. Each finding carries a six-layer structure — what was found, why it hurts (referencing Spark internals), a concrete fix, before/after code, quantified impact, and remediation effort — so engineers never have to look anything up.
+Unlike generic Python linters, every finding is Spark-aware. It knows the difference between a `groupByKey` that serialises all values to the driver and a `reduceByKey` that aggregates map-side, and it tells you exactly what that difference costs.
+
+It operates across three tiers:
+
+- **Tier 1** — A pure-Python AST scanner (zero Spark dependency) that runs in milliseconds as a pre-commit hook
+- **Tier 2** — Optional Claude LLM enrichment in CI for cross-file pattern detection and root-cause analysis
+- **Tier 3** — A Jupyter-based deep audit against a live Spark runtime with physical plan inspection and synthetic benchmark datasets
+
+Each finding carries a six-layer structure: what was found, why it hurts, a concrete fix, before/after code, quantified impact, and remediation effort.
 
 ---
 
@@ -165,43 +173,86 @@ jobs:
 ## Three-Tier Architecture
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {
-  "primaryColor": "#4F46E5",
-  "primaryTextColor": "#FFFFFF",
-  "primaryBorderColor": "#3730A3",
-  "lineColor": "#6366F1",
-  "secondaryColor": "#EEF2FF",
-  "tertiaryColor": "#FFFEF2",
-  "background": "#FFFEF2",
-  "clusterBkg": "#EEF2FF",
-  "clusterBorder": "#818CF8",
-  "titleColor": "#1E1B4B",
-  "edgeLabelBackground": "#FFFEF2",
-  "fontFamily": "ui-monospace, monospace"
-}}}%%
-flowchart TD
-    subgraph T1["🔵 Tier 1 — Pre-commit Hook  (offline, &lt;1s)"]
-        A[PySpark source file] --> B[Python AST Parser]
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#ffffff',
+    'primaryTextColor': '#1e293b',
+    'primaryBorderColor': '#94a3b8',
+    'lineColor': '#64748b',
+    'secondaryColor': '#f8fafc',
+    'tertiaryColor': '#ffffff',
+    'fontFamily': 'Segoe UI, Roboto, sans-serif',
+    'fontSize': '14px'
+  }
+}}%%
+
+graph TD
+    %% TIER 1: THE BUILD
+    subgraph T1 [ ]
+        direction TB
+        T1_Title["<div style='padding:10px'><b>TIER 1: PRE-COMMIT</b><br/><small>Offline | < 1s</small></div>"]
+        
+        A([PySpark Source File]) --- B[Python AST Parser]
         B --> C{93 Rule Engine}
-        C --> D[Finding\nrule_id · severity\nmessage · fix · code diff]
+        C --> D[/Finding Output/]
     end
 
-    subgraph T2["🟣 Tier 2 — CI / PR Analysis  (Claude API, ~30s)"]
-        E[AuditReport from Tier 1] --> F[LLMAnalyzer]
-        F --> G[Per-finding enrichment\nroot cause · impact quantification]
-        F --> H[Cross-file pattern detection\nsystemic issues · hotspot ranking]
-        F --> I[Executive summary\nrisk score · top 3 actions]
+    %% TIER 2: THE INTELLIGENCE
+    subgraph T2 [ ]
+        direction TB
+        T2_Title["<div style='padding:10px; color:#4338ca'><b>TIER 2: CI / PR ANALYSIS</b><br/><small>Claude API | ~30s</small></div>"]
+        
+        E[Audit Report] --> F[[LLM Analyzer]]
+        F --> G[Finding Enrichment]
+        F --> H[Pattern Detection]
+        F --> I[Executive Summary]
     end
 
-    subgraph T3["🟠 Tier 3 — Deep Audit  (Spark runtime, minutes)"]
-        J[Live SparkSession] --> K[Physical Plan Analyzer\nExchange · Join type · AQE]
-        J --> L[Synthetic Data Generators\nskewed · join · wide table]
-        J --> M[Benchmarks\njoin strategies · partition counts · cache]
-        K & L & M --> N[Jupyter Notebook Report]
+    %% TIER 3: THE RUNTIME
+    subgraph T3 [ ]
+        direction TB
+        T3_Title["<div style='padding:10px; color:#047857'><b>TIER 3: DEEP AUDIT</b><br/><small>Spark Runtime | Minutes</small></div>"]
+        
+        J((Live Spark Session))
+        J --> K[Physical Plan Analyzer]
+        J --> L[Synthetic Data Gen]
+        J --> M[Benchmarks]
+        K & L & M --> N([Jupyter Notebook Report])
     end
 
-    D -->|enriches| E
-    I -->|informs| J
+    %% FLOW CONNECTIONS
+    D -.-> E
+    I -.-> J
+
+    %% 3D ELEVATION STYLING
+    %% We use darker borders (stroke) and lighter fills to create depth
+    
+    %% Tier 1: Neutral Slate
+    style T1 fill:#f1f5f9,stroke:#cbd5e1,stroke-width:2px,rx:15
+    classDef t1Node fill:#ffffff,stroke:#475569,stroke-width:2px,color:#1e293b
+    
+    %% Tier 2: Deep Indigo 
+    style T2 fill:#eef2ff,stroke:#c7d2fe,stroke-width:2px,rx:15
+    classDef t2Node fill:#ffffff,stroke:#4338ca,stroke-width:2px,color:#1e293b
+    classDef t2Focus fill:#4338ca,stroke:#312e81,stroke-width:3px,color:#ffffff
+    
+    %% Tier 3: Emerald Green
+    style T3 fill:#ecfdf5,stroke:#a7f3d0,stroke-width:2px,rx:15
+    classDef t3Node fill:#ffffff,stroke:#059669,stroke-width:2px,color:#1e293b
+    classDef t3Focus fill:#059669,stroke:#064e3b,stroke-width:3px,color:#ffffff
+
+    %% Assigning Classes
+    class A,B,C,D t1Node
+    class E,G,H,I t2Node
+    class F t2Focus
+    class K,L,M t3Node
+    class J,N t3Focus
+    
+    %% Hide Title Backgrounds
+    style T1_Title fill:none,stroke:none
+    style T2_Title fill:none,stroke:none
+    style T3_Title fill:none,stroke:none
 ```
 
 <details>
@@ -734,25 +785,6 @@ spark-perf-lint/
 - [x] Observability layer: file tracer + HTML trend report
 - [x] Tier 3: physical plan analyzer, synthetic data generators, benchmarks
 - [x] Deep audit Jupyter notebook
-
-### v0.2.0 — Next (Q3 2026)
-
-- [ ] `spark-perf-lint fix` — automated one-click remediation for safe rules
-- [ ] LangSmith tracing backend (complete stub → production)
-- [ ] VS Code extension with inline diagnostics
-- [ ] Delta Lake dimension (D12): Z-ORDER, OPTIMIZE, VACUUM, time-travel anti-patterns
-- [ ] Streaming dimension (D13): watermark missing, stateful op without checkpoint
-- [ ] `spark-perf-lint rules --format html` — self-hosted rule catalogue site
-- [ ] Per-file suppression comments (`# noqa: SPL-D03-001`)
-- [ ] Severity trend alerting via GitHub Issues
-
-### v0.3.0 — Future (Q4 2026)
-
-- [ ] Spark Connect / Databricks Connect support
-- [ ] Cost estimation: map findings to approximate cluster-hour savings
-- [ ] Team leaderboard: track finding density per engineer over time
-- [ ] SQL dialect support (Spark SQL `.sql()` calls in Python strings)
-- [ ] Integration with Databricks Asset Bundles CI pipeline
 
 ---
 
