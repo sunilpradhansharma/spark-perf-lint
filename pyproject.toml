@@ -5,10 +5,28 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "spark-perf-lint"
 version = "0.1.0"
-description = "Enterprise-grade Apache Spark performance linter"
+description = "Enterprise-grade Apache Spark performance linter — 93 rules across 11 dimensions"
 readme = "README.md"
-license = { text = "Apache-2.0" }
-authors = [{ name = "Sucandra Dasa" }]
+license = "Apache-2.0"
+authors = [{ name = "Sucandra Dasa", email = "sucandra.dasa@gmail.com" }]
+maintainers = [{ name = "Sucandra Dasa", email = "sucandra.dasa@gmail.com" }]
+keywords = [
+    "spark", "pyspark", "linter", "performance", "static-analysis",
+    "pre-commit", "data-engineering",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.0",
@@ -27,7 +45,16 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.9",
     "pre-commit>=3.0",
+    "build>=1.0",
+    "twine>=5.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/sucandra-dasa/spark-perf-lint"
+Repository = "https://github.com/sucandra-dasa/spark-perf-lint"
+Documentation = "https://github.com/sucandra-dasa/spark-perf-lint/tree/main/docs"
+Changelog = "https://github.com/sucandra-dasa/spark-perf-lint/blob/main/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/sucandra-dasa/spark-perf-lint/issues"
 
 [project.scripts]
 spark-perf-lint = "spark_perf_lint.cli:main"

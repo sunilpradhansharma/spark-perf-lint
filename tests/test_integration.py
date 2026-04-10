@@ -746,10 +746,15 @@ class TestCLICommands:
             assert "rule_id" in rule
             assert "severity" in rule
 
-    def test_rules_d03_json_returns_7_rules(self) -> None:
+    def test_rules_d03_json_returns_all_d03_rules(self) -> None:
         _, output = self._run("rules", "--dimension", "D03", "--format", "json")
         rules = json.loads(output)
-        assert len(rules) == 7
+        from spark_perf_lint.rules.registry import RuleRegistry
+        expected = sum(
+            1 for r in RuleRegistry.instance().get_all_rules()
+            if r.rule_id.startswith("SPL-D03")
+        )
+        assert len(rules) == expected
 
     # explain -----------------------------------------------------------
 
