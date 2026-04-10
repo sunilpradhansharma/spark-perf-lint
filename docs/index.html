@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>spark-perf-lint — Apache Spark Performance Linter</title>
+<meta name="description" content="Enterprise-grade Apache Spark performance linter — 93 rules, 11 dimensions, 3 tiers">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ─── Reset & Base ─────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{background:#0d1117;color:#c9d1d9;font-family:'DM Sans',sans-serif;line-height:1.6;overflow-x:hidden}
+a{color:#7c6ff7;text-decoration:none}
+a:hover{color:#a89cf7}
+code,pre{font-family:'JetBrains Mono',monospace}
+h1,h2,h3,h4{font-family:'Playfair Display',serif;line-height:1.2}
+
+/* ─── Scrollbar ─────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#0d1117}
+::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+
+/* ─── Animations ────────────────────────────────────────────────── */
+@keyframes shimmer{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideInLeft{from{opacity:0;transform:translateX(-20px)}to{opacity:1;transform:translateX(0)}}
+@keyframes glowPulse{0%,100%{box-shadow:0 0 20px rgba(124,111,247,0.3)}50%{box-shadow:0 0 40px rgba(124,111,247,0.6)}}
+.fade-up{opacity:0;transform:translateY(30px);transition:opacity 0.6s ease,transform 0.6s ease}
+.fade-up.visible{opacity:1;transform:translateY(0)}
+.slide-in{opacity:0;transform:translateX(-20px);animation:slideInLeft 0.4s ease forwards}
+
+/* ─── Layout ────────────────────────────────────────────────────── */
+.layout{display:flex;min-height:100vh}
+.main-content{margin-left:260px;flex:1;max-width:100%}
+@media(max-width:768px){.main-content{margin-left:0}}
+
+/* ─── Header ────────────────────────────────────────────────────── */
+.header{position:sticky;top:0;z-index:100;background:rgba(13,17,23,0.95);backdrop-filter:blur(10px);border-bottom:1px solid #21262d;padding:0 2rem;height:60px;display:flex;align-items:center;justify-content:space-between}
+.header-logo{font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;color:#e6edf3;display:flex;align-items:center;gap:0.5rem}
+.header-logo span{font-size:1.4rem}
+.header-nav{display:flex;align-items:center;gap:1.5rem}
+.header-nav a{color:#8b949e;font-size:0.875rem;font-weight:500;transition:color 0.2s}
+.header-nav a:hover{color:#7c6ff7}
+.header-right{display:flex;align-items:center;gap:1rem}
+.version-badge{background:#1c2333;border:1px solid #30363d;color:#7c6ff7;font-size:0.75rem;padding:2px 10px;border-radius:20px;font-family:'JetBrains Mono',monospace}
+.github-link{display:flex;align-items:center;gap:0.4rem;color:#8b949e;font-size:0.875rem;transition:color 0.2s}
+.github-link:hover{color:#e6edf3}
+.hamburger{display:none;flex-direction:column;gap:5px;cursor:pointer;padding:4px}
+.hamburger span{display:block;width:22px;height:2px;background:#8b949e;border-radius:2px;transition:all 0.3s}
+@media(max-width:768px){.header-nav{display:none}.hamburger{display:flex}}
+
+/* ─── Sidebar ───────────────────────────────────────────────────── */
+.sidebar{position:fixed;left:0;top:60px;width:260px;height:calc(100vh - 60px);background:#161b22;border-right:1px solid #21262d;overflow-y:auto;padding:1.5rem 0;z-index:50;transition:transform 0.3s ease}
+.sidebar-section{margin-bottom:1.5rem}
+.sidebar-label{font-size:0.7rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#484f58;padding:0 1.25rem;margin-bottom:0.5rem}
+.sidebar-link{display:flex;align-items:center;gap:0.6rem;padding:0.45rem 1.25rem;color:#8b949e;font-size:0.875rem;cursor:pointer;transition:all 0.2s;border-left:3px solid transparent}
+.sidebar-link:hover{color:#c9d1d9;background:rgba(124,111,247,0.08);border-left-color:#7c6ff7}
+.sidebar-link.active{color:#a89cf7;background:rgba(124,111,247,0.12);border-left-color:#7c6ff7;font-weight:500}
+.sidebar-link .dim-icon{font-size:1rem;width:20px;text-align:center}
+.rule-count{margin-left:auto;background:#1c2333;border:1px solid #30363d;color:#484f58;font-size:0.65rem;padding:1px 6px;border-radius:10px;font-family:'JetBrains Mono',monospace}
+@media(max-width:768px){.sidebar{transform:translateX(-100%)}.sidebar.open{transform:translateX(0)}}
+
+/* ─── Sections ──────────────────────────────────────────────────── */
+section{padding:5rem 3rem}
+@media(max-width:768px){section{padding:3rem 1.25rem}}
+.section-label{font-size:0.75rem;font-weight:600;letter-spacing:0.15em;text-transform:uppercase;color:#7c6ff7;margin-bottom:1rem}
+.section-title{font-size:2.25rem;color:#e6edf3;margin-bottom:1rem}
+.section-subtitle{color:#8b949e;font-size:1.05rem;max-width:600px}
+
+/* ─── Hero ──────────────────────────────────────────────────────── */
+#home{background:radial-gradient(ellipse at 60% 0%,rgba(124,111,247,0.12) 0%,transparent 60%),#0d1117;min-height:calc(100vh - 60px);display:flex;align-items:center;justify-content:center;text-align:center;padding:4rem 2rem}
+.hero-inner{max-width:780px}
+.hero-label{font-size:0.75rem;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;color:#7c6ff7;margin-bottom:1.5rem}
+.hero-title{font-size:clamp(3rem,8vw,5.5rem);font-weight:900;background:linear-gradient(135deg,#7c6ff7 0%,#a89cf7 30%,#e8d5b7 60%,#7c6ff7 100%);background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:shimmer 5s ease infinite;margin-bottom:1.5rem;line-height:1.05}
+.hero-tagline{font-size:1.15rem;color:#8b949e;margin-bottom:2.5rem;line-height:1.7;max-width:580px;margin-left:auto;margin-right:auto}
+.hero-buttons{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap}
+.btn-primary{background:#7c6ff7;color:#fff;padding:0.75rem 1.75rem;border-radius:8px;font-weight:600;font-size:0.95rem;transition:all 0.2s;border:none;cursor:pointer;display:inline-block}
+.btn-primary:hover{background:#6b5ee6;box-shadow:0 0 20px rgba(124,111,247,0.4);color:#fff;transform:translateY(-1px)}
+.btn-ghost{background:transparent;color:#c9d1d9;padding:0.75rem 1.75rem;border-radius:8px;font-weight:500;font-size:0.95rem;border:1px solid #30363d;transition:all 0.2s;display:inline-block;cursor:pointer}
+.btn-ghost:hover{border-color:#7c6ff7;color:#a89cf7;transform:translateY(-1px)}
+
+/* ─── Stats ─────────────────────────────────────────────────────── */
+#stats{background:#0d1117;padding:3rem}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1.25rem;max-width:900px;margin:0 auto}
+.stat-card{background:#1c2333;border:1px solid #30363d;border-radius:12px;padding:1.75rem 1.5rem;text-align:center;transition:all 0.3s;cursor:default}
+.stat-card:hover{border-color:#7c6ff7;box-shadow:0 0 24px rgba(124,111,247,0.2);transform:translateY(-3px)}
+.stat-number{font-family:'Playfair Display',serif;font-size:2.75rem;font-weight:900;line-height:1;margin-bottom:0.4rem}
+.stat-label{font-size:0.85rem;color:#8b949e;font-weight:500}
+.stat-sub{font-size:0.75rem;color:#484f58;margin-top:0.25rem}
+@media(max-width:768px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+
+/* ─── Quick Start ───────────────────────────────────────────────── */
+#quickstart{background:#0d1117}
+.code-block{background:#0a0e14;border:1px solid #21262d;border-radius:12px;overflow:hidden;max-width:680px}
+.code-block-header{background:#161b22;border-bottom:1px solid #21262d;padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.5rem}
+.dot{width:12px;height:12px;border-radius:50%}
+.dot-red{background:#ff5f57}
+.dot-yellow{background:#febc2e}
+.dot-green{background:#28c840}
+.code-block-title{font-size:0.8rem;color:#484f58;margin-left:auto;font-family:'JetBrains Mono',monospace}
+.code-block pre{padding:1.5rem;line-height:1.8;font-size:0.88rem;overflow-x:auto}
+.cm{color:#484f58}
+.cc{color:#4ecdc4}
+.qs-grid{display:grid;grid-template-columns:1fr 1fr;gap:2rem;align-items:start;margin-top:2rem}
+.qs-right h3{font-size:1.1rem;color:#e6edf3;margin-bottom:1rem}
+.qs-steps{display:flex;flex-direction:column;gap:0.75rem}
+.qs-step{display:flex;gap:0.75rem;align-items:flex-start}
+.step-num{background:#7c6ff7;color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:700;flex-shrink:0;margin-top:1px}
+.step-text{color:#8b949e;font-size:0.9rem}
+.step-text strong{color:#c9d1d9}
+@media(max-width:768px){.qs-grid{grid-template-columns:1fr}}
+
+/* ─── Output Example ────────────────────────────────────────────── */
+#output{background:#0d1117}
+.terminal{background:#010409;border:1px solid #21262d;border-radius:12px;overflow:hidden;max-width:760px;font-family:'JetBrains Mono',monospace;font-size:0.82rem}
+.terminal-header{background:#161b22;border-bottom:1px solid #21262d;padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.5rem}
+.terminal-body{padding:1.5rem;line-height:2}
+.t-prompt{color:#484f58}
+.t-cmd{color:#e6edf3}
+.t-blank{height:0.5rem}
+.t-critical{color:#ef4444}
+.t-warning{color:#f59e0b}
+.t-info{color:#3b82f6}
+.t-fix{color:#4ecdc4;padding-left:2.5rem;font-size:0.78rem}
+.t-muted{color:#484f58}
+.t-summary{color:#8b949e;border-top:1px solid #21262d;margin-top:0.75rem;padding-top:0.75rem}
+.t-fail{color:#ef4444;font-weight:700}
+
+/* ─── Dimensions ────────────────────────────────────────────────── */
+#dimensions{background:#0d1117}
+.dim-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.25rem;margin-top:2.5rem}
+.dim-card{background:#161b22;border:1px solid #21262d;border-radius:12px;padding:1.5rem;transition:all 0.3s;cursor:pointer;text-decoration:none;display:block}
+.dim-card:hover{border-color:#7c6ff7;box-shadow:0 0 20px rgba(124,111,247,0.15);transform:translateY(-3px)}
+.dim-card-header{display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem}
+.dim-icon{font-size:1.75rem}
+.dim-id{font-size:0.7rem;color:#484f58;font-family:'JetBrains Mono',monospace;font-weight:600;letter-spacing:0.05em}
+.dim-name{font-size:1rem;color:#e6edf3;font-weight:600;font-family:'DM Sans',sans-serif}
+.dim-desc{font-size:0.82rem;color:#8b949e;line-height:1.5;margin-bottom:0.75rem}
+.dim-badge{display:inline-flex;align-items:center;gap:0.3rem;background:#1c2333;border:1px solid #30363d;border-radius:20px;padding:2px 10px;font-size:0.72rem;color:#7c6ff7;font-family:'JetBrains Mono',monospace}
+.dim-total{background:linear-gradient(135deg,rgba(124,111,247,0.15),rgba(78,205,196,0.1));border:1px solid #7c6ff7;animation:glowPulse 3s ease-in-out infinite}
+.dim-total .stat-number{font-size:3rem;color:#7c6ff7}
+.dim-total .stat-label{color:#a89cf7;font-size:1rem;font-weight:600}
+@media(max-width:768px){.dim-grid{grid-template-columns:1fr}}
+@media(min-width:769px) and (max-width:1024px){.dim-grid{grid-template-columns:repeat(2,1fr)}}
+
+/* ─── Three Tiers ───────────────────────────────────────────────── */
+#tiers{background:#0d1117}
+.tiers-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:2.5rem}
+.tier-card{background:#161b22;border:1px solid #21262d;border-radius:16px;padding:2rem;transition:all 0.3s}
+.tier-card:hover{transform:translateY(-4px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+.tier-icon{font-size:2.5rem;margin-bottom:1rem}
+.tier-label{font-size:0.7rem;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;margin-bottom:0.5rem}
+.tier-name{font-size:1.3rem;color:#e6edf3;margin-bottom:0.75rem;font-family:'DM Sans',sans-serif;font-weight:600}
+.tier-desc{font-size:0.875rem;color:#8b949e;line-height:1.6;margin-bottom:1.25rem}
+.tier-stats{display:grid;grid-template-columns:1fr 1fr;gap:0.5rem}
+.tier-stat{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:0.6rem 0.75rem}
+.tier-stat-val{font-size:0.95rem;font-weight:600;color:#c9d1d9;font-family:'JetBrains Mono',monospace}
+.tier-stat-key{font-size:0.7rem;color:#484f58;margin-top:1px}
+@media(max-width:768px){.tiers-grid{grid-template-columns:1fr}}
+
+/* ─── Pre-commit ────────────────────────────────────────────────── */
+#precommit{background:#0d1117}
+.steps-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:2rem;margin-bottom:3rem}
+.step-card{background:#161b22;border:1px solid #21262d;border-radius:12px;padding:1.5rem}
+.step-card-num{font-size:0.7rem;color:#7c6ff7;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.5rem;font-family:'JetBrains Mono',monospace}
+.step-card-title{font-size:1rem;color:#e6edf3;font-weight:600;margin-bottom:0.5rem;font-family:'DM Sans',sans-serif}
+.step-card-desc{font-size:0.85rem;color:#8b949e}
+@media(max-width:768px){.steps-grid{grid-template-columns:1fr}}
+
+/* ─── Rules Detail ──────────────────────────────────────────────── */
+#rules{background:#0d1117}
+.rules-dim-section{margin-bottom:3rem;scroll-margin-top:80px}
+.rules-dim-header{display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem;padding-bottom:0.75rem;border-bottom:1px solid #21262d}
+.rules-dim-icon{font-size:1.75rem}
+.rules-dim-title{font-size:1.3rem;color:#e6edf3;font-family:'DM Sans',sans-serif;font-weight:600}
+.rules-dim-count{margin-left:auto;background:#1c2333;border:1px solid #30363d;color:#7c6ff7;font-size:0.75rem;padding:3px 10px;border-radius:20px;font-family:'JetBrains Mono',monospace}
+.rules-table{width:100%;border-collapse:collapse;font-size:0.85rem}
+.rules-table th{text-align:left;padding:0.6rem 0.75rem;font-size:0.72rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#484f58;border-bottom:1px solid #21262d}
+.rules-table td{padding:0.6rem 0.75rem;border-bottom:1px solid #161b22;vertical-align:top}
+.rules-table tr:hover td{background:rgba(124,111,247,0.04)}
+.rule-id{font-family:'JetBrains Mono',monospace;color:#7c6ff7;font-size:0.8rem;white-space:nowrap}
+.badge{display:inline-block;padding:1px 8px;border-radius:4px;font-size:0.72rem;font-weight:600;font-family:'JetBrains Mono',monospace;letter-spacing:0.03em}
+.badge-critical{background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3)}
+.badge-warning{background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.3)}
+.badge-info{background:rgba(59,130,246,0.15);color:#3b82f6;border:1px solid rgba(59,130,246,0.3)}
+.rule-name{color:#c9d1d9;font-weight:500}
+.rule-desc{color:#8b949e;font-size:0.8rem;margin-top:2px}
+details summary{cursor:pointer;list-style:none;color:#7c6ff7;font-size:0.78rem}
+details summary::-webkit-details-marker{display:none}
+details[open] summary{margin-bottom:0.5rem}
+.rule-detail{background:#0a0e14;border:1px solid #21262d;border-radius:8px;padding:1rem;margin-top:0.5rem;font-size:0.8rem}
+.rule-detail pre{background:#010409;border:1px solid #161b22;border-radius:6px;padding:0.75rem;margin-top:0.25rem;overflow-x:auto;line-height:1.6;color:#8b949e}
+.detail-label{font-size:0.7rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#484f58;margin-bottom:0.25rem;margin-top:0.75rem}
+.detail-label:first-child{margin-top:0}
+.impact-text{color:#4ecdc4;font-size:0.82rem}
+
+/* ─── Footer ────────────────────────────────────────────────────── */
+footer{background:#161b22;border-top:1px solid #21262d;padding:2.5rem 3rem;text-align:center;color:#484f58;font-size:0.875rem}
+footer a{color:#7c6ff7}
+footer a:hover{color:#a89cf7}
+.footer-inner{max-width:600px;margin:0 auto}
+.footer-logo{font-family:'Playfair Display',serif;font-size:1.5rem;color:#e6edf3;margin-bottom:0.75rem}
+.footer-links{display:flex;justify-content:center;gap:1.5rem;margin-top:1rem;flex-wrap:wrap}
+
+/* ─── Divider ───────────────────────────────────────────────────── */
+.section-divider{height:1px;background:linear-gradient(90deg,transparent,#21262d 20%,#21262d 80%,transparent);margin:0 3rem}
+</style>
+</head>
+<body>
+
+<!-- ══ HEADER ══════════════════════════════════════════════════════ -->
+<header class="header">
+  <div class="header-logo">
+    <span>⚡</span> spark-perf-lint
+  </div>
+  <nav class="header-nav">
+    <a href="#home">Home</a>
+    <a href="#quickstart">Getting Started</a>
+    <a href="#tiers">Architecture</a>
+    <a href="#rules">Rules</a>
+    <a href="#dimensions">Dimensions</a>
+    <a href="#precommit">Pre-Commit</a>
+  </nav>
+  <div class="header-right">
+    <span class="version-badge">v0.1.0</span>
+    <a href="https://github.com/sunilpradhansharma/spark-perf-lint" class="github-link" target="_blank" rel="noopener">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      GitHub
+    </a>
+    <div class="hamburger" id="hamburger" onclick="toggleSidebar()">
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+
+<!-- ══ SIDEBAR ═════════════════════════════════════════════════════ -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-section">
+    <div class="sidebar-label">Navigation</div>
+    <a class="sidebar-link active" href="#home">🏠 Home</a>
+    <a class="sidebar-link" href="#quickstart">🚀 Getting Started</a>
+    <a class="sidebar-link" href="#tiers">🏗️ Architecture</a>
+    <a class="sidebar-link" href="#dimensions">📐 Dimensions</a>
+    <a class="sidebar-link" href="#output">🖥️ Example Output</a>
+    <a class="sidebar-link" href="#precommit">🔒 Pre-Commit</a>
+    <a class="sidebar-link" href="#rules">📋 All Rules</a>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">Rules by Dimension</div>
+    <a class="sidebar-link" href="#rules-d01"><span class="dim-icon">⚙️</span>D01: Cluster Config<span class="rule-count">10</span></a>
+    <a class="sidebar-link" href="#rules-d02"><span class="dim-icon">🔀</span>D02: Shuffle &amp; Sort<span class="rule-count">8</span></a>
+    <a class="sidebar-link" href="#rules-d03"><span class="dim-icon">🔗</span>D03: Joins<span class="rule-count">10</span></a>
+    <a class="sidebar-link" href="#rules-d04"><span class="dim-icon">📦</span>D04: Partitioning<span class="rule-count">10</span></a>
+    <a class="sidebar-link" href="#rules-d05"><span class="dim-icon">⚖️</span>D05: Data Skew<span class="rule-count">7</span></a>
+    <a class="sidebar-link" href="#rules-d06"><span class="dim-icon">💾</span>D06: Caching<span class="rule-count">8</span></a>
+    <a class="sidebar-link" href="#rules-d07"><span class="dim-icon">📂</span>D07: I/O &amp; Formats<span class="rule-count">10</span></a>
+    <a class="sidebar-link" href="#rules-d08"><span class="dim-icon">🧠</span>D08: AQE<span class="rule-count">7</span></a>
+    <a class="sidebar-link" href="#rules-d09"><span class="dim-icon">🐍</span>D09: UDFs &amp; Code<span class="rule-count">12</span></a>
+    <a class="sidebar-link" href="#rules-d10"><span class="dim-icon">🔍</span>D10: Catalyst<span class="rule-count">6</span></a>
+    <a class="sidebar-link" href="#rules-d11"><span class="dim-icon">📊</span>D11: Monitoring<span class="rule-count">5</span></a>
+  </div>
+</aside>
+
+<!-- ══ MAIN ═════════════════════════════════════════════════════════ -->
+<main class="main-content">
+
+<!-- HERO -->
+<section id="home">
+  <div class="hero-inner fade-up">
+    <div class="hero-label">Apache Spark Performance Linter</div>
+    <h1 class="hero-title">spark-perf-lint</h1>
+    <p class="hero-tagline">Enterprise-grade static analysis for PySpark — catches anti-patterns before they reach production, explains <em>why</em> they hurt, and hands you a concrete fix.</p>
+    <div class="hero-buttons">
+      <a href="#quickstart" class="btn-primary">Get Started →</a>
+      <a href="https://github.com/sunilpradhansharma/spark-perf-lint" class="btn-ghost" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- STATS -->
+<section id="stats">
+  <div class="stats-grid">
+    <div class="stat-card fade-up">
+      <div class="stat-number" style="color:#7c6ff7">93</div>
+      <div class="stat-label">Performance Rules</div>
+      <div class="stat-sub">CRITICAL · WARNING · INFO</div>
+    </div>
+    <div class="stat-card fade-up" style="transition-delay:0.1s">
+      <div class="stat-number" style="color:#a89cf7">11</div>
+      <div class="stat-label">Dimensions</div>
+      <div class="stat-sub">Config · Shuffle · Joins · …</div>
+    </div>
+    <div class="stat-card fade-up" style="transition-delay:0.2s">
+      <div class="stat-number" style="color:#4ecdc4">3</div>
+      <div class="stat-label">Tiers</div>
+      <div class="stat-sub">Pre-commit · CI/LLM · Runtime</div>
+    </div>
+    <div class="stat-card fade-up" style="transition-delay:0.3s">
+      <div class="stat-number" style="color:#f59e0b">&lt;3s</div>
+      <div class="stat-label">Pre-commit Speed</div>
+      <div class="stat-sub">Zero Spark dependency</div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- QUICK START -->
+<section id="quickstart">
+  <div class="section-label">Installation</div>
+  <h2 class="section-title">Quick Start</h2>
+  <p class="section-subtitle">Up and running in 30 seconds. No Spark installation required for Tier 1.</p>
+  <div class="qs-grid fade-up" style="margin-top:2rem">
+    <div class="code-block">
+      <div class="code-block-header">
+        <div class="dot dot-red"></div><div class="dot dot-yellow"></div><div class="dot dot-green"></div>
+        <span class="code-block-title">terminal</span>
+      </div>
+      <pre><span class="cm"># Install</span>
+<span class="cc">pip install spark-perf-lint</span>
+
+<span class="cm"># Scan your PySpark code</span>
+<span class="cc">spark-perf-lint scan src/</span>
+
+<span class="cm"># Or add as pre-commit hook</span>
+<span class="cc">spark-perf-lint init &amp;&amp; pre-commit install</span></pre>
+    </div>
+    <div class="qs-right">
+      <h3>How it works</h3>
+      <div class="qs-steps">
+        <div class="qs-step"><div class="step-num">1</div><div class="step-text"><strong>Discovers</strong> .py files that import PySpark</div></div>
+        <div class="qs-step"><div class="step-num">2</div><div class="step-text"><strong>Parses</strong> Python AST — no Spark runtime needed</div></div>
+        <div class="qs-step"><div class="step-num">3</div><div class="step-text"><strong>Matches</strong> 93 rules across 11 performance dimensions</div></div>
+        <div class="qs-step"><div class="step-num">4</div><div class="step-text"><strong>Reports</strong> findings with severity, fix, and impact</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- OUTPUT EXAMPLE -->
+<section id="output">
+  <div class="section-label">Example Output</div>
+  <h2 class="section-title">What You'll See</h2>
+  <p class="section-subtitle">Clear, actionable findings with severity levels and concrete recommendations.</p>
+  <div class="terminal fade-up" style="margin-top:2rem">
+    <div class="terminal-header">
+      <div class="dot dot-red"></div><div class="dot dot-yellow"></div><div class="dot dot-green"></div>
+      <span style="color:#484f58;font-size:0.8rem;margin-left:0.5rem">bash</span>
+    </div>
+    <div class="terminal-body">
+      <div><span class="t-prompt">$ </span><span class="t-cmd">spark-perf-lint scan etl/customer_pipeline.py</span></div>
+      <div class="t-blank"></div>
+      <div><span class="t-critical">✗ CRITICAL</span> <span style="color:#484f58">SPL-D03-001</span> &nbsp;etl/customer_pipeline.py:42</div>
+      <div style="padding-left:2rem;color:#c9d1d9">Cross join / cartesian product</div>
+      <div class="t-fix">→ df.join(other, on='id', how='inner')</div>
+      <div class="t-blank"></div>
+      <div><span class="t-critical">✗ CRITICAL</span> <span style="color:#484f58">SPL-D09-005</span> &nbsp;etl/customer_pipeline.py:87</div>
+      <div style="padding-left:2rem;color:#c9d1d9">.collect() without prior filter or limit</div>
+      <div class="t-fix">→ df.join(other, 'id').limit(1000).collect()</div>
+      <div class="t-blank"></div>
+      <div><span class="t-warning">⚠ WARNING &nbsp;</span> <span style="color:#484f58">SPL-D06-001</span> &nbsp;etl/customer_pipeline.py:55</div>
+      <div style="padding-left:2rem;color:#c9d1d9">.cache() without .unpersist()</div>
+      <div class="t-fix">→ Call df_cached.unpersist() when done</div>
+      <div class="t-blank"></div>
+      <div><span class="t-warning">⚠ WARNING &nbsp;</span> <span style="color:#484f58">SPL-D01-010</span> &nbsp;etl/customer_pipeline.py:12</div>
+      <div style="padding-left:2rem;color:#c9d1d9">Default shuffle partitions unchanged (200)</div>
+      <div class="t-fix">→ .config("spark.sql.shuffle.partitions", "400")</div>
+      <div class="t-blank"></div>
+      <div><span class="t-info">ℹ INFO &nbsp;&nbsp;&nbsp;&nbsp;</span> <span style="color:#484f58">SPL-D07-003</span> &nbsp;etl/customer_pipeline.py:31</div>
+      <div style="padding-left:2rem;color:#c9d1d9">select("*") disables column pruning</div>
+      <div class="t-fix">→ df.select('status').groupBy('status').count()</div>
+      <div class="t-summary">──────────────────────────────────────────────</div>
+      <div class="t-summary">Scanned 1 file · 5 findings · <span style="color:#ef4444">2 critical</span> · <span style="color:#f59e0b">2 warnings</span> · <span style="color:#3b82f6">1 info</span></div>
+      <div class="t-fail">✗ FAILED (2 critical findings)</div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- DIMENSIONS -->
+<section id="dimensions">
+  <div class="section-label">Coverage</div>
+  <h2 class="section-title">11 Dimensions of Spark Performance</h2>
+  <p class="section-subtitle">Every dimension of PySpark performance, from cluster configuration to production observability.</p>
+  <div class="dim-grid" style="margin-top:2.5rem">
+    <a class="dim-card fade-up" href="#rules-d01">
+      <div class="dim-card-header"><div class="dim-icon">⚙️</div><div><div class="dim-id">D01</div><div class="dim-name">Cluster Config</div></div></div>
+      <div class="dim-desc">Serializer, memory settings, executor sizing, timeouts, and dynamic allocation.</div>
+      <span class="dim-badge">10 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d02" style="transition-delay:0.05s">
+      <div class="dim-card-header"><div class="dim-icon">🔀</div><div><div class="dim-id">D02</div><div class="dim-name">Shuffle &amp; Sort</div></div></div>
+      <div class="dim-desc">groupByKey vs reduceByKey, redundant repartition, orderBy without limit.</div>
+      <span class="dim-badge">8 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d03" style="transition-delay:0.1s">
+      <div class="dim-card-header"><div class="dim-icon">🔗</div><div><div class="dim-id">D03</div><div class="dim-name">Joins</div></div></div>
+      <div class="dim-desc">Cross joins, missing broadcast hints, join inside loop, CBO settings.</div>
+      <span class="dim-badge">10 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d04" style="transition-delay:0.15s">
+      <div class="dim-card-header"><div class="dim-icon">📦</div><div><div class="dim-id">D04</div><div class="dim-name">Partitioning</div></div></div>
+      <div class="dim-desc">repartition(1) bottlenecks, over/under-partitioning, bucketBy strategy.</div>
+      <span class="dim-badge">10 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d05" style="transition-delay:0.2s">
+      <div class="dim-card-header"><div class="dim-icon">⚖️</div><div><div class="dim-id">D05</div><div class="dim-name">Data Skew</div></div></div>
+      <div class="dim-desc">Low-cardinality join keys, missing salting patterns, null-heavy keys.</div>
+      <span class="dim-badge">7 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d06" style="transition-delay:0.25s">
+      <div class="dim-card-header"><div class="dim-icon">💾</div><div><div class="dim-id">D06</div><div class="dim-name">Caching</div></div></div>
+      <div class="dim-desc">cache without unpersist, cache inside loop, wrong storage level.</div>
+      <span class="dim-badge">8 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d07" style="transition-delay:0.3s">
+      <div class="dim-card-header"><div class="dim-icon">📂</div><div><div class="dim-id">D07</div><div class="dim-name">I/O &amp; Formats</div></div></div>
+      <div class="dim-desc">CSV for analytics, schema inference, JDBC without partitioning, mergeSchema.</div>
+      <span class="dim-badge">10 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d08" style="transition-delay:0.35s">
+      <div class="dim-card-header"><div class="dim-icon">🧠</div><div><div class="dim-id">D08</div><div class="dim-name">AQE</div></div></div>
+      <div class="dim-desc">AQE disabled, coalesce disabled, skew join off, advisory partition size.</div>
+      <span class="dim-badge">7 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d09" style="transition-delay:0.4s">
+      <div class="dim-card-header"><div class="dim-icon">🐍</div><div><div class="dim-id">D09</div><div class="dim-name">UDFs &amp; Code</div></div></div>
+      <div class="dim-desc">Python UDFs, withColumn in loop, collect without filter, toPandas on large data.</div>
+      <span class="dim-badge">12 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d10" style="transition-delay:0.45s">
+      <div class="dim-card-header"><div class="dim-icon">🔍</div><div><div class="dim-id">D10</div><div class="dim-name">Catalyst</div></div></div>
+      <div class="dim-desc">UDF blocks pushdown, CBO disabled, missing table statistics, deep chains.</div>
+      <span class="dim-badge">6 rules</span>
+    </a>
+    <a class="dim-card fade-up" href="#rules-d11" style="transition-delay:0.5s">
+      <div class="dim-card-header"><div class="dim-icon">📊</div><div><div class="dim-id">D11</div><div class="dim-name">Monitoring</div></div></div>
+      <div class="dim-desc">No Spark listeners, no metrics logging, hardcoded paths, missing error handling.</div>
+      <span class="dim-badge">5 rules</span>
+    </a>
+    <div class="dim-card dim-total fade-up" style="transition-delay:0.55s;text-align:center;justify-content:center;display:flex;flex-direction:column;align-items:center;gap:0.5rem">
+      <div class="stat-number" style="font-size:3rem;color:#7c6ff7;font-family:'Playfair Display',serif;font-weight:900">93</div>
+      <div class="stat-label" style="color:#a89cf7;font-size:1rem;font-weight:600">Total Rules</div>
+      <div style="font-size:0.8rem;color:#484f58">across 11 dimensions</div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- THREE TIERS -->
+<section id="tiers">
+  <div class="section-label">Architecture</div>
+  <h2 class="section-title">Three-Tier Architecture</h2>
+  <p class="section-subtitle">From fast pre-commit hook to deep runtime analysis — use the tier that fits your workflow.</p>
+  <div class="tiers-grid fade-up" style="margin-top:2.5rem">
+    <div class="tier-card" style="border-color:rgba(78,205,196,0.3)">
+      <div class="tier-icon">🔒</div>
+      <div class="tier-label" style="color:#4ecdc4">Tier 1</div>
+      <div class="tier-name">Pre-Commit Hook</div>
+      <div class="tier-desc">Pure Python AST analysis. Runs on every <code>git commit</code>, scanning only staged files. Zero Spark dependency — works in any environment.</div>
+      <div class="tier-stats">
+        <div class="tier-stat"><div class="tier-stat-val" style="color:#4ecdc4">&lt;3s</div><div class="tier-stat-key">Scan time</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">Free</div><div class="tier-stat-key">Cost</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">No</div><div class="tier-stat-key">Spark needed</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">93</div><div class="tier-stat-key">Rules</div></div>
+      </div>
+    </div>
+    <div class="tier-card" style="border-color:rgba(124,111,247,0.3)">
+      <div class="tier-icon">🔍</div>
+      <div class="tier-label" style="color:#7c6ff7">Tier 2</div>
+      <div class="tier-name">CI/PR Analysis</div>
+      <div class="tier-desc">Claude API enrichment. Sends full file context to Claude for context-aware explanations and refactoring suggestions. Runs on pull requests.</div>
+      <div class="tier-stats">
+        <div class="tier-stat"><div class="tier-stat-val" style="color:#7c6ff7">10–30s</div><div class="tier-stat-key">Scan time</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">~$0.05</div><div class="tier-stat-key">Per PR</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">No</div><div class="tier-stat-key">Spark needed</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">API key</div><div class="tier-stat-key">Required</div></div>
+      </div>
+    </div>
+    <div class="tier-card" style="border-color:rgba(245,158,11,0.3)">
+      <div class="tier-icon">🔬</div>
+      <div class="tier-label" style="color:#f59e0b">Tier 3</div>
+      <div class="tier-name">Deep Audit</div>
+      <div class="tier-desc">Live Spark runtime analysis. Inspects physical query plans, runs benchmark comparisons, and profiles real execution metrics against a running cluster.</div>
+      <div class="tier-stats">
+        <div class="tier-stat"><div class="tier-stat-val" style="color:#f59e0b">5–15m</div><div class="tier-stat-key">Scan time</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">Cluster</div><div class="tier-stat-key">Cost</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">Yes</div><div class="tier-stat-key">Spark needed</div></div>
+        <div class="tier-stat"><div class="tier-stat-val">Notebook</div><div class="tier-stat-key">Interface</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- PRE-COMMIT -->
+<section id="precommit">
+  <div class="section-label">Integration</div>
+  <h2 class="section-title">Pre-Commit Hook Setup</h2>
+  <p class="section-subtitle">Block bad PySpark from ever reaching your repo. Installs in 60 seconds.</p>
+  <div class="steps-grid fade-up" style="margin-top:2rem">
+    <div class="step-card">
+      <div class="step-card-num">Step 01</div>
+      <div class="step-card-title">Install pre-commit</div>
+      <div class="step-card-desc"><code style="color:#4ecdc4">pip install pre-commit</code></div>
+    </div>
+    <div class="step-card">
+      <div class="step-card-num">Step 02</div>
+      <div class="step-card-title">Add to .pre-commit-config.yaml</div>
+      <div class="step-card-desc">Add the repo stanza shown below</div>
+    </div>
+    <div class="step-card">
+      <div class="step-card-num">Step 03</div>
+      <div class="step-card-title">Install the hook</div>
+      <div class="step-card-desc"><code style="color:#4ecdc4">pre-commit install</code></div>
+    </div>
+    <div class="step-card">
+      <div class="step-card-num">Step 04</div>
+      <div class="step-card-title">Test it</div>
+      <div class="step-card-desc"><code style="color:#4ecdc4">pre-commit run --all-files</code></div>
+    </div>
+  </div>
+  <div class="code-block fade-up" style="max-width:580px;margin-top:1.5rem">
+    <div class="code-block-header">
+      <div class="dot dot-red"></div><div class="dot dot-yellow"></div><div class="dot dot-green"></div>
+      <span class="code-block-title">.pre-commit-config.yaml</span>
+    </div>
+    <pre style="color:#c9d1d9"><span style="color:#484f58">repos:</span>
+  <span style="color:#484f58">- repo:</span> <span style="color:#4ecdc4">https://github.com/sunilpradhansharma/spark-perf-lint</span>
+    <span style="color:#484f58">rev:</span> <span style="color:#7c6ff7">v0.1.0</span>
+    <span style="color:#484f58">hooks:</span>
+      <span style="color:#484f58">- id:</span> <span style="color:#e6edf3">spark-perf-lint</span></pre>
+  </div>
+  <div class="terminal fade-up" style="max-width:680px;margin-top:1.5rem">
+    <div class="terminal-header">
+      <div class="dot dot-red"></div><div class="dot dot-yellow"></div><div class="dot dot-green"></div>
+      <span style="color:#484f58;font-size:0.8rem;margin-left:0.5rem">What happens on commit</span>
+    </div>
+    <div class="terminal-body">
+      <div><span class="t-prompt">$ </span><span class="t-cmd">git commit -m "add customer ETL pipeline"</span></div>
+      <div class="t-blank"></div>
+      <div style="color:#8b949e">spark-perf-lint...................................................<span class="t-fail">Failed</span></div>
+      <div class="t-blank"></div>
+      <div class="t-critical">✗ CRITICAL  SPL-D08-001  etl/pipeline.py:8</div>
+      <div style="padding-left:2rem;color:#c9d1d9">AQE disabled — spark.sql.adaptive.enabled = false</div>
+      <div class="t-fix">→ Remove the line — AQE is on by default in Spark 3.2+</div>
+      <div class="t-blank"></div>
+      <div style="color:#484f58">Commit blocked. Fix findings and try again.</div>
+      <div style="color:#8b949e;margin-top:0.5rem">Use <span style="color:#f59e0b">git commit --no-verify</span> to bypass (emergencies only)</div>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"></div>
+
+<!-- RULES DETAIL -->
+<section id="rules">
+  <div class="section-label">Complete Reference</div>
+  <h2 class="section-title">All 93 Rules</h2>
+  <p class="section-subtitle">Every rule with ID, severity, description, and expandable before/after examples.</p>
+
+  <!-- D01 -->
+  <div class="rules-dim-section fade-up" id="rules-d01" style="margin-top:2.5rem">
+    <div class="rules-dim-header">
+      <span class="rules-dim-icon">⚙️</span>
+      <span class="rules-dim-title">D01 — Cluster Configuration</span>
+      <span class="rules-dim-count">10 rules</span>
+    </div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D01-001</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Missing Kryo serializer</div><div class="rule-desc">spark.serializer not set — 10× slower Java serializer used. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">10× serialization speedup; 3–5× reduction in shuffle data size</div><div class="detail-label">Before</div><pre>SparkSession.builder.appName("job").getOrCreate()</pre><div class="detail-label">After</div><pre>spark = (SparkSession.builder
+  .config("spark.serializer",
+    "org.apache.spark.serializer.KryoSerializer")
+  .getOrCreate())</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D01-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Executor memory not configured</div><div class="rule-desc">spark.executor.memory not set — cluster default (often 1g) used.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-003</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Driver memory not configured</div><div class="rule-desc">spark.driver.memory not set — risk of OOM on collect or broadcast.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-004</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Dynamic allocation not enabled</div><div class="rule-desc">spark.dynamicAllocation.enabled not true — idle executors waste resources.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-005</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Executor cores set too high</div><div class="rule-desc">spark.executor.cores above 5 — HDFS throughput degrades, GC pauses increase.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-006</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Memory overhead too low</div><div class="rule-desc">spark.executor.memoryOverhead below 384 MB — container killed without OOM log.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-007</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Missing PySpark worker memory config</div><div class="rule-desc">Python UDFs present but spark.python.worker.memory not set.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-008</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Network timeout too low</div><div class="rule-desc">spark.network.timeout below 120s — false-positive executor evictions during GC.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-009</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Speculation not enabled</div><div class="rule-desc">spark.speculation not enabled — slow nodes stall entire stages.</div></td></tr>
+        <tr><td class="rule-id">SPL-D01-010</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Default shuffle partitions unchanged</div><div class="rule-desc">spark.sql.shuffle.partitions at default 200 — too low for large data, too high for small.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D02 -->
+  <div class="rules-dim-section fade-up" id="rules-d02">
+    <div class="rules-dim-header"><span class="rules-dim-icon">🔀</span><span class="rules-dim-title">D02 — Shuffle &amp; Sort</span><span class="rules-dim-count">8 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D02-001</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">groupByKey() instead of reduceByKey()</div><div class="rule-desc">groupByKey shuffles all values — use reduceByKey for 10–100× less shuffle data. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">10–100× shuffle data reduction for aggregation workloads</div><div class="detail-label">Before</div><pre>rdd.groupByKey().mapValues(sum)</pre><div class="detail-label">After</div><pre>rdd.reduceByKey(lambda a, b: a + b)</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D02-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Default shuffle partitions unchanged</div><div class="rule-desc">spark.sql.shuffle.partitions at default 200 — causes spill on large data.</div></td></tr>
+        <tr><td class="rule-id">SPL-D02-003</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Unnecessary repartition before join</div><div class="rule-desc">repartition() before join() causes a redundant shuffle — join already shuffles on key.</div></td></tr>
+        <tr><td class="rule-id">SPL-D02-004</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">orderBy/sort without limit</div><div class="rule-desc">Global sort without .limit() is O(n log n) — add limit for top-N patterns.</div></td></tr>
+        <tr><td class="rule-id">SPL-D02-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">distinct() without prior filter</div><div class="rule-desc">distinct() triggers full shuffle — apply filters first to reduce data volume.</div></td></tr>
+        <tr><td class="rule-id">SPL-D02-006</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Shuffle followed by coalesce</div><div class="rule-desc">coalesce() after shuffle creates unbalanced partitions — use repartition().</div></td></tr>
+        <tr><td class="rule-id">SPL-D02-007</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Multiple shuffles in sequence</div><div class="rule-desc">Two or more shuffle operations in sequence without intermediate caching.</div></td></tr>
+        <tr><td class="rule-id">SPL-D02-008</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Shuffle file buffer too small</div><div class="rule-desc">spark.shuffle.file.buffer below 1 MB — up to 32× more syscalls per shuffle write.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D03 -->
+  <div class="rules-dim-section fade-up" id="rules-d03">
+    <div class="rules-dim-header"><span class="rules-dim-icon">🔗</span><span class="rules-dim-title">D03 — Joins</span><span class="rules-dim-count">10 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D03-001</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">Cross join / cartesian product</div><div class="rule-desc">crossJoin() creates O(n²) rows — almost always unintentional, can OOM indefinitely. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">Unbounded row explosion; can OOM or run indefinitely</div><div class="detail-label">Before</div><pre>df.crossJoin(other)  # O(n²) rows!</pre><div class="detail-label">After</div><pre>df.join(other, on='id', how='inner')</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D03-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Missing broadcast hint on small DataFrame</div><div class="rule-desc">join() without broadcast hint — small lookup tables should be broadcast to eliminate shuffle.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-003</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">Broadcast threshold disabled</div><div class="rule-desc">autoBroadcastJoinThreshold = -1 disables all broadcast joins — every join shuffles both sides.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-004</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Join without prior filter/select</div><div class="rule-desc">join() on unfiltered read — push filter/select before join to reduce shuffle volume.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-005</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Join key type mismatch risk</div><div class="rule-desc">Joining on different column names — type mismatch produces silent empty results.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-006</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Multiple joins without intermediate repartition</div><div class="rule-desc">3+ joins without broadcast/repartition hints — each adds a full shuffle.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-007</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Self-join that could be window function</div><div class="rule-desc">Self-join doubles shuffle — window functions accomplish the same with zero cross-node transfer.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-008</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">Join inside loop</div><div class="rule-desc">join() in a loop creates N shuffles and O(N) plan growth — causes driver OOM for large N. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">N shuffles where N = loop iterations; plan explosion for large loops</div><div class="detail-label">Before</div><pre>for date in date_range:
+    result = result.join(
+        daily_df.filter(f'date="{date}"'), 'id')</pre><div class="detail-label">After</div><pre>all_dates = spark.createDataFrame(date_range)
+daily_all = daily_df.join(all_dates, 'date')
+result = result.join(daily_all, 'id')</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D03-009</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Left join without null handling</div><div class="rule-desc">Left join without null handling — nulls propagate silently, causing wrong aggregations.</div></td></tr>
+        <tr><td class="rule-id">SPL-D03-010</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">CBO/statistics not enabled for complex joins</div><div class="rule-desc">spark.sql.cbo.enabled not set — Catalyst uses heuristics instead of cost-based join ordering.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D04 -->
+  <div class="rules-dim-section fade-up" id="rules-d04">
+    <div class="rules-dim-header"><span class="rules-dim-icon">📦</span><span class="rules-dim-title">D04 — Partitioning</span><span class="rules-dim-count">10 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D04-001</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">repartition(1) bottleneck</div><div class="rule-desc">repartition(1) forces all data through one task — eliminates all parallelism.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">coalesce(1) bottleneck</div><div class="rule-desc">coalesce(1) reduces to one partition — all downstream stages run single-threaded.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-003</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Repartition with very high partition count</div><div class="rule-desc">repartition(n) above 10,000 — driver OOM, millions of shuffle files, slow task scheduling.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-004</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Repartition with very low partition count</div><div class="rule-desc">repartition(n) where n &lt; 10 — cluster cores sit idle, up to 25× slower.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Coalesce before write — unbalanced output files</div><div class="rule-desc">coalesce() before write creates unbalanced files — use repartition() for even output.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-006</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Missing partitionBy on write</div><div class="rule-desc">Writing without partitionBy — every query does a full table scan, no pruning possible.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-007</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Over-partitioning — high-cardinality partition column</div><div class="rule-desc">partitionBy on user_id / *_id creates millions of tiny files — driver OOM on partition listing.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-008</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Missing bucketBy for repeatedly joined tables</div><div class="rule-desc">saveAsTable() without bucketBy — every future join on this table requires a full shuffle.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-009</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Partition column not used in query filters</div><div class="rule-desc">Reading partitioned table without a partition filter — full table scan instead of pruned scan.</div></td></tr>
+        <tr><td class="rule-id">SPL-D04-010</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Repartition by column different from join key</div><div class="rule-desc">repartition(col_A) then join on col_B — two full shuffles instead of one.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D05 -->
+  <div class="rules-dim-section fade-up" id="rules-d05">
+    <div class="rules-dim-header"><span class="rules-dim-icon">⚖️</span><span class="rules-dim-title">D05 — Data Skew</span><span class="rules-dim-count">7 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D05-001</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Join on low-cardinality column</div><div class="rule-desc">join() on status/type/is_* — dominant value routes to one task, rest of cluster idles.</div></td></tr>
+        <tr><td class="rule-id">SPL-D05-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">GroupBy on low-cardinality column without secondary key</div><div class="rule-desc">groupBy on low-cardinality column creates unbalanced partitions — dominant group straggler.</div></td></tr>
+        <tr><td class="rule-id">SPL-D05-003</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">AQE skew join handling disabled</div><div class="rule-desc">skewJoin.enabled = false — skewed partitions not auto-split, straggler tasks persist.</div></td></tr>
+        <tr><td class="rule-id">SPL-D05-004</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">AQE skew threshold too high</div><div class="rule-desc">Skew detection threshold exceeds 1 GB — moderate skew silently degrades performance.</div></td></tr>
+        <tr><td class="rule-id">SPL-D05-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Missing salting pattern for known skewed keys</div><div class="rule-desc">join() on potentially skewed ID column without rand()/explode() salting pattern.</div></td></tr>
+        <tr><td class="rule-id">SPL-D05-006</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Window function partitioned by skew-prone column</div><div class="rule-desc">Window.partitionBy on low-cardinality column — executor OOM for dominant partition.</div></td></tr>
+        <tr><td class="rule-id">SPL-D05-007</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Null-heavy join key</div><div class="rule-desc">join() on null-heavy column without isNotNull filter — all nulls hash to same partition.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D06 -->
+  <div class="rules-dim-section fade-up" id="rules-d06">
+    <div class="rules-dim-header"><span class="rules-dim-icon">💾</span><span class="rules-dim-title">D06 — Caching &amp; Persistence</span><span class="rules-dim-count">8 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D06-001</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">cache() without unpersist()</div><div class="rule-desc">Cached DataFrame never released — memory leak causes OOM in long-running jobs.</div></td></tr>
+        <tr><td class="rule-id">SPL-D06-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">cache() used only once</div><div class="rule-desc">Caching a DataFrame that is only read once — serialisation overhead with no benefit.</div></td></tr>
+        <tr><td class="rule-id">SPL-D06-003</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">cache() inside loop</div><div class="rule-desc">cache() in a loop accumulates memory each iteration — OOM after O(N) iterations. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">OOM after O(N) iterations; executor memory accumulates without release</div><div class="detail-label">Before</div><pre>for epoch in range(10):
+    df = model.transform(df).cache()</pre><div class="detail-label">After</div><pre>for epoch in range(10):
+    prev = df
+    df = model.transform(df).checkpoint()
+    prev.unpersist()</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D06-004</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">cache() before filter</div><div class="rule-desc">filter() after cache() — caches all rows when only filtered subset is needed.</div></td></tr>
+        <tr><td class="rule-id">SPL-D06-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">MEMORY_ONLY storage level for potentially large datasets</div><div class="rule-desc">MEMORY_ONLY silently drops partitions under pressure — prefer MEMORY_AND_DISK.</div></td></tr>
+        <tr><td class="rule-id">SPL-D06-006</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Reused DataFrame without cache</div><div class="rule-desc">Expensive DataFrame (join/groupBy) used multiple times without cache — N recomputations.</div></td></tr>
+        <tr><td class="rule-id">SPL-D06-007</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">cache() after repartition</div><div class="rule-desc">cache() after repartition() is wasteful if the result is only used once.</div></td></tr>
+        <tr><td class="rule-id">SPL-D06-008</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">checkpoint vs cache misuse</div><div class="rule-desc">checkpoint() in non-iterative code — unnecessary disk write, use cache() instead.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D07 -->
+  <div class="rules-dim-section fade-up" id="rules-d07">
+    <div class="rules-dim-header"><span class="rules-dim-icon">📂</span><span class="rules-dim-title">D07 — I/O &amp; File Formats</span><span class="rules-dim-count">10 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D07-001</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">CSV/JSON used for analytical workload</div><div class="rule-desc">Row-oriented formats — no column pruning or predicate pushdown, 5–20× slower than Parquet.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Schema inference enabled</div><div class="rule-desc">inferSchema=True reads data twice — 2× I/O per job, unstable schemas in production.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-003</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">select("*") — no column pruning</div><div class="rule-desc">select("*") forces all columns to be decoded from storage — defeats columnar pruning.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-004</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Filter applied after join — missing predicate pushdown</div><div class="rule-desc">filter() after join() — push filter before join to reduce shuffle volume.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Small file problem on write</div><div class="rule-desc">partitionBy() without controlling partition count — creates O(partitions × values) small files.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-006</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">JDBC read without partition parameters</div><div class="rule-desc">JDBC read without partitionColumn/numPartitions — single-thread sequential read, does not scale. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">Sequential single-thread read; does not scale to large JDBC tables</div><div class="detail-label">Before</div><pre>df = spark.read.jdbc(url, 'orders')</pre><div class="detail-label">After</div><pre>df = spark.read.jdbc(
+  url, 'orders',
+  column='order_id',
+  lowerBound=1,
+  upperBound=10_000_000,
+  numPartitions=50)</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D07-007</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Parquet compression not set</div><div class="rule-desc">Writing Parquet without explicit compression — cluster-dependent codec, may write uncompressed.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-008</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Write mode not specified</div><div class="rule-desc">write without .mode() defaults to 'error' — job fails on re-run if output exists.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-009</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">No format specified on read/write</div><div class="rule-desc">read.load()/write.save() without .format() — format depends on cluster config.</div></td></tr>
+        <tr><td class="rule-id">SPL-D07-010</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">mergeSchema enabled without necessity</div><div class="rule-desc">mergeSchema=true reads footer of every Parquet file — O(files) metadata scan on every read.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D08 -->
+  <div class="rules-dim-section fade-up" id="rules-d08">
+    <div class="rules-dim-header"><span class="rules-dim-icon">🧠</span><span class="rules-dim-title">D08 — Adaptive Query Execution</span><span class="rules-dim-count">7 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D08-001</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">AQE disabled</div><div class="rule-desc">spark.sql.adaptive.enabled = false — loses partition coalescing, skew join, and join strategy switching.</div></td></tr>
+        <tr><td class="rule-id">SPL-D08-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">AQE coalesce partitions disabled</div><div class="rule-desc">coalescePartitions.enabled = false — hundreds of tiny tasks, high driver scheduling overhead.</div></td></tr>
+        <tr><td class="rule-id">SPL-D08-003</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">AQE advisory partition size too small</div><div class="rule-desc">advisoryPartitionSizeInBytes below 16 MB — too many small post-coalesce partitions.</div></td></tr>
+        <tr><td class="rule-id">SPL-D08-004</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">AQE skew join disabled with skew-prone joins detected</div><div class="rule-desc">skewJoin.enabled = false with joins present — skewed partitions not auto-split at runtime.</div></td></tr>
+        <tr><td class="rule-id">SPL-D08-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">AQE skew factor too aggressive</div><div class="rule-desc">skewedPartitionFactor below 2 — every above-median partition treated as skewed, excessive splits.</div></td></tr>
+        <tr><td class="rule-id">SPL-D08-006</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">AQE local shuffle reader disabled</div><div class="rule-desc">localShuffleReader.enabled = false — forces remote reads even for locally available shuffle data.</div></td></tr>
+        <tr><td class="rule-id">SPL-D08-007</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Manual shuffle partition count set high with AQE enabled</div><div class="rule-desc">shuffle.partitions > 400 with AQE on — unnecessary map-side overhead; tune advisoryPartitionSizeInBytes instead.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D09 -->
+  <div class="rules-dim-section fade-up" id="rules-d09">
+    <div class="rules-dim-header"><span class="rules-dim-icon">🐍</span><span class="rules-dim-title">D09 — UDFs &amp; Code Patterns</span><span class="rules-dim-count">12 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D09-001</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Python UDF (row-at-a-time) detected</div><div class="rule-desc">@udf executes row-at-a-time across the JVM↔Python boundary — 2–10× slowdown, blocks Catalyst.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Python UDF replaceable with native Spark function</div><div class="rule-desc">@udf applies a built-in string method — use native SQL function (lower, trim, etc.) instead.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-003</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">withColumn() inside loop</div><div class="rule-desc">withColumn() in a loop rebuilds the full query plan each iteration — O(N²) plan growth, driver hangs for N&gt;100. <details><summary>▸ details</summary><div class="rule-detail"><div class="detail-label">Impact</div><div class="impact-text">O(N²) plan building; driver hangs for N &gt; 100 columns</div><div class="detail-label">Before</div><pre>for col_name in column_list:
+    df = df.withColumn(col_name, f(col(col_name)))</pre><div class="detail-label">After</div><pre>exprs = [f(col(c)).alias(c) for c in column_list]
+df = df.select('*', *exprs)</pre></div></details></div></td></tr>
+        <tr><td class="rule-id">SPL-D09-004</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">Row-by-row iteration over DataFrame</div><div class="rule-desc">Iterating over df.collect() — forces all data to driver, entire cluster idles.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-005</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">.collect() without prior filter or limit</div><div class="rule-desc">.collect() on unbounded DataFrame — driver OOM for datasets larger than heap.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-006</td><td><span class="badge badge-critical">CRITICAL</span></td><td><div class="rule-name">.toPandas() on potentially large DataFrame</div><div class="rule-desc">.toPandas() without limit() — materialises entire dataset in driver memory.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-007</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">.count() used for emptiness check</div><div class="rule-desc">df.count() == 0 triggers full table scan — use df.isEmpty (Spark 3.3+) instead.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-008</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">.show() in production code</div><div class="rule-desc">.show() triggers materialisation and prints to stdout — remove before production.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-009</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">.explain() or .printSchema() in production code</div><div class="rule-desc">Debugging tools that print to stdout — remove or guard with a debug flag.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-010</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">.rdd conversion dropping out of DataFrame API</div><div class="rule-desc">.rdd access deserialises columnar rows to Python Row objects — bypasses Catalyst and Tungsten.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-011</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">pandas_udf without type annotations</div><div class="rule-desc">@pandas_udf without type hints — relies on runtime inference, uses deprecated API.</div></td></tr>
+        <tr><td class="rule-id">SPL-D09-012</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">Nested UDF calls</div><div class="rule-desc">A UDF calls another UDF — each adds a separate JVM↔Python serialisation boundary.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D10 -->
+  <div class="rules-dim-section fade-up" id="rules-d10">
+    <div class="rules-dim-header"><span class="rules-dim-icon">🔍</span><span class="rules-dim-title">D10 — Catalyst Optimizer</span><span class="rules-dim-count">6 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D10-001</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">UDF blocks predicate pushdown</div><div class="rule-desc">@udf creates opaque boundary — Catalyst cannot push filters below the UDF, full scan required.</div></td></tr>
+        <tr><td class="rule-id">SPL-D10-002</td><td><span class="badge badge-warning">WARNING</span></td><td><div class="rule-name">CBO not enabled for complex queries</div><div class="rule-desc">File has 2+ joins but CBO disabled — Catalyst uses heuristics, 5–20× sub-optimal plans.</div></td></tr>
+        <tr><td class="rule-id">SPL-D10-003</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Join reordering disabled for multi-table joins</div><div class="rule-desc">3+ joins without CBO join reordering — executed left-to-right, may produce large intermediates.</div></td></tr>
+        <tr><td class="rule-id">SPL-D10-004</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Table statistics not collected</div><div class="rule-desc">Joins present but no ANALYZE TABLE — CBO operates without accurate row counts or cardinalities.</div></td></tr>
+        <tr><td class="rule-id">SPL-D10-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Non-deterministic function in filter</div><div class="rule-desc">rand()/uuid() in filter() — potential double-evaluation by Catalyst, non-reproducible results.</div></td></tr>
+        <tr><td class="rule-id">SPL-D10-006</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Deep method chain (&gt;20 chained ops)</div><div class="rule-desc">Single expression with 20+ chained operations — plan visitor stack overflow risk, hard to debug.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- D11 -->
+  <div class="rules-dim-section fade-up" id="rules-d11">
+    <div class="rules-dim-header"><span class="rules-dim-icon">📊</span><span class="rules-dim-title">D11 — Monitoring &amp; Observability</span><span class="rules-dim-count">5 rules</span></div>
+    <table class="rules-table">
+      <thead><tr><th>Rule ID</th><th>Severity</th><th>Name &amp; Description</th></tr></thead>
+      <tbody>
+        <tr><td class="rule-id">SPL-D11-001</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">No explain() for plan validation in test file</div><div class="rule-desc">Test file has complex Spark ops but no explain() — plan regressions invisible until production.</div></td></tr>
+        <tr><td class="rule-id">SPL-D11-002</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">No Spark listener configured</div><div class="rule-desc">SparkSession without a listener — job metrics and query events not captured in production.</div></td></tr>
+        <tr><td class="rule-id">SPL-D11-003</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">No metrics logging in long-running job</div><div class="rule-desc">2+ write operations but no Python logging — silent data drops and slow stages invisible.</div></td></tr>
+        <tr><td class="rule-id">SPL-D11-004</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Missing error handling around Spark actions</div><div class="rule-desc">Spark actions (count, collect, write) not in try/except — partial writes, no error context in logs.</div></td></tr>
+        <tr><td class="rule-id">SPL-D11-005</td><td><span class="badge badge-info">INFO</span></td><td><div class="rule-name">Hardcoded storage path</div><div class="rule-desc">Spark read/write uses hardcoded string path — environment coupling, production paths in source control.</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">⚡ spark-perf-lint</div>
+    <div>Free to use for any purpose including commercial. Credit to <a href="https://www.linkedin.com/in/sunil-p-sharma/" target="_blank" rel="noopener">Sunil Pradhan Sharma</a> required.</div>
+    <div style="margin-top:0.5rem">Copyright &copy; 2026 Sunil Pradhan Sharma</div>
+    <div class="footer-links">
+      <a href="https://github.com/sunilpradhansharma/spark-perf-lint" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/sunilpradhansharma/spark-perf-lint/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+      <a href="https://github.com/sunilpradhansharma/spark-perf-lint/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+      <a href="https://www.linkedin.com/in/sunil-p-sharma/" target="_blank" rel="noopener">LinkedIn</a>
+      <a href="https://pypi.org/project/spark-perf-lint/" target="_blank" rel="noopener">PyPI</a>
+    </div>
+  </div>
+</footer>
+
+</main>
+</div>
+
+<script>
+// ── Scroll animations ────────────────────────────────────────────
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+      observer.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+
+document.querySelectorAll('.fade-up').forEach(el => observer.observe(el));
+
+// ── Active sidebar link ──────────────────────────────────────────
+const sections = document.querySelectorAll('section[id], div[id^="rules-d"]');
+const sidebarLinks = document.querySelectorAll('.sidebar-link');
+
+const sectionObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const id = entry.target.id;
+      sidebarLinks.forEach(link => {
+        link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+      });
+    }
+  });
+}, { threshold: 0.3 });
+
+sections.forEach(s => sectionObserver.observe(s));
+
+// ── Sidebar toggle (mobile) ──────────────────────────────────────
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+}
+
+// Close sidebar when a link is clicked on mobile
+document.querySelectorAll('.sidebar-link').forEach(link => {
+  link.addEventListener('click', () => {
+    if (window.innerWidth <= 768) {
+      document.getElementById('sidebar').classList.remove('open');
+    }
+  });
+});
+
+// ── Sidebar slide-in animation ───────────────────────────────────
+document.querySelectorAll('.sidebar-link').forEach((link, i) => {
+  link.style.animationDelay = `${i * 0.04}s`;
+  link.classList.add('slide-in');
+});
+</script>
+</body>
+</html>
