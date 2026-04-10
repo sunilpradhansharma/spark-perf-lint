@@ -183,76 +183,59 @@ jobs:
     'secondaryColor': '#f8fafc',
     'tertiaryColor': '#ffffff',
     'fontFamily': 'Segoe UI, Roboto, sans-serif',
-    'fontSize': '14px'
+    'fontSize': '12px'
   }
 }}%%
 
 graph TD
-    %% TIER 1: THE BUILD
-    subgraph T1 [ ]
+    %% TIER 1
+    subgraph T1 ["T1: PRE-COMMIT (<1s)"]
         direction TB
-        T1_Title["<div style='padding:10px'><b>TIER 1: PRE-COMMIT</b><br/><small>Offline | < 1s</small></div>"]
-        
         A([PySpark Source File]) --- B[Python AST Parser]
         B --> C{93 Rule Engine}
         C --> D[/Finding Output/]
     end
 
-    %% TIER 2: THE INTELLIGENCE
-    subgraph T2 [ ]
+    %% TIER 2
+    subgraph T2 ["T2: CI / PR (Claude ~30s)"]
         direction TB
-        T2_Title["<div style='padding:10px; color:#4338ca'><b>TIER 2: CI / PR ANALYSIS</b><br/><small>Claude API | ~30s</small></div>"]
-        
-        E[Audit Report] --> F[[LLM Analyzer]]
-        F --> G[Finding Enrichment]
-        F --> H[Pattern Detection]
-        F --> I[Executive Summary]
+        E[Audit Report] --> F[[<b>LLM Analyzer</b>]]
+        F --> G[Enrichment]
+        F --> H[Patterns]
+        F --> I[Summary]
     end
 
-    %% TIER 3: THE RUNTIME
-    subgraph T3 [ ]
+    %% TIER 3
+    subgraph T3 ["T3: DEEP AUDIT (Minutes)"]
         direction TB
-        T3_Title["<div style='padding:10px; color:#047857'><b>TIER 3: DEEP AUDIT</b><br/><small>Spark Runtime | Minutes</small></div>"]
-        
-        J((Live Spark Session))
-        J --> K[Physical Plan Analyzer]
-        J --> L[Synthetic Data Gen]
+        J((Spark Session))
+        J --> K[Plan Analyzer]
+        J --> L[Data Gen]
         J --> M[Benchmarks]
-        K & L & M --> N([Jupyter Notebook Report])
+        K & L & M --> N([Jupyter Report])
     end
 
-    %% FLOW CONNECTIONS
+    %% FORCED VERTICAL ALIGNMENT (The Fix)
     D -.-> E
     I -.-> J
 
-    %% 3D ELEVATION STYLING
-    %% We use darker borders (stroke) and lighter fills to create depth
-    
-    %% Tier 1: Neutral Slate
-    style T1 fill:#f1f5f9,stroke:#cbd5e1,stroke-width:2px,rx:15
-    classDef t1Node fill:#ffffff,stroke:#475569,stroke-width:2px,color:#1e293b
-    
-    %% Tier 2: Deep Indigo 
-    style T2 fill:#eef2ff,stroke:#c7d2fe,stroke-width:2px,rx:15
-    classDef t2Node fill:#ffffff,stroke:#4338ca,stroke-width:2px,color:#1e293b
-    classDef t2Focus fill:#4338ca,stroke:#312e81,stroke-width:3px,color:#ffffff
-    
-    %% Tier 3: Emerald Green
-    style T3 fill:#ecfdf5,stroke:#a7f3d0,stroke-width:2px,rx:15
-    classDef t3Node fill:#ffffff,stroke:#059669,stroke-width:2px,color:#1e293b
-    classDef t3Focus fill:#059669,stroke:#064e3b,stroke-width:3px,color:#ffffff
+    %% STYLING
+    style T1 fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px,rx:8
+    style T2 fill:#f5f3ff,stroke:#c7d2fe,stroke-width:1px,rx:8
+    style T3 fill:#f0fdf4,stroke:#a7f3d0,stroke-width:1px,rx:8
 
-    %% Assigning Classes
+    %% Optimized Classes
+    classDef t1Node fill:#ffffff,stroke:#475569,stroke-width:1.5px,color:#1e293b,rx:5
+    classDef t2Node fill:#ffffff,stroke:#4338ca,stroke-width:1.5px,color:#1e293b,rx:5
+    classDef t2Focus fill:#4338ca,stroke:#312e81,stroke-width:1.5px,color:#ffffff,rx:5
+    classDef t3Node fill:#ffffff,stroke:#059669,stroke-width:1.5px,color:#1e293b,rx:5
+    classDef t3Focus fill:#059669,stroke:#064e3b,stroke-width:1.5px,color:#ffffff,rx:5
+
     class A,B,C,D t1Node
     class E,G,H,I t2Node
     class F t2Focus
     class K,L,M t3Node
     class J,N t3Focus
-    
-    %% Hide Title Backgrounds
-    style T1_Title fill:none,stroke:none
-    style T2_Title fill:none,stroke:none
-    style T3_Title fill:none,stroke:none
 ```
 
 <details>
