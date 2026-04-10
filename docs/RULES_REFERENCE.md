@@ -3716,3 +3716,1997 @@ for iteration in range(100):
 - **SPL-D06-003** — cache() inside loop; checkpoint() is the correct replacement for cache() inside loops
 - **SPL-D06-001** — cache() without unpersist(); cache() introduced by this fix needs cleanup
 - **SPL-D06-005** — MEMORY_ONLY storage level; if memory pressure is the concern, use MEMORY_AND_DISK instead of checkpoint()
+
+---
+
+## D07 · I/O and File Formats
+
+Every byte that crosses the storage layer costs network bandwidth, deserialization CPU, and
+driver memory for metadata. These rules enforce columnar formats, explicit schemas, predicate
+push-down discipline, and safe write semantics — the cheapest category of improvements because
+most fixes are one-line changes that benefit every future job execution.
+
+---
+
+### SPL-D07-001 — CSV/JSON Used for Analytical Workload
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | WARNING |
+| **Effort** | Major refactor |
+| **Impact** | 5–20× slower scans vs Parquet; no column pruning or predicate pushdown |
+
+**Description**
+
+The job reads from CSV or JSON for an analytical workload. These row-oriented text formats have
+no column pruning, no predicate pushdown, and no built-in compression — making them 5–20× slower
+than Parquet or ORC for any query that touches only a subset of columns.
+
+**What it detects**
+
+A `spark.read.csv(...)` or `spark.read.json(...)` call (or `.format("csv")` / `.format("json")`).
+
+```python
+# Triggers SPL-D07-001
+df = spark.read.csv("data/", header=True, inferSchema=True)
+df = spark.read.json("events/")
+```
+
+**Why it matters**
+
+Parquet and ORC store data in column-major order: all values for a given column are stored
+together, encoded with column-specific codecs, and annotated with min/max statistics per row
+group. Spark exploits this to read only the columns referenced in the query (column pruning)
+and skip row groups whose statistics rule out any matching rows (predicate pushdown). CSV and
+JSON have none of this — every byte of every column must be read, decoded from UTF-8, and
+type-cast on every scan. A query that needs 3 of 50 columns from a 500 GB CSV file reads
+500 GB; the same query on Parquet reads roughly 30 GB. The 16× difference compounds across
+every job execution for the lifetime of the dataset.
+
+**How to fix**
+
+```python
+# Wrong: row-oriented text format — full file scan always
+df = spark.read.csv("data/", header=True, inferSchema=True)
+
+# Right: convert once, read as columnar format forever
+# Step 1: one-time conversion job
+spark.read.csv("data/", header=True, schema=my_schema) \
+    .write.mode("overwrite") \
+    .partitionBy("date") \
+    .parquet("data_parquet/")
+
+# Step 2: all subsequent reads
+df = spark.read.parquet("data_parquet/")
+
+# For streaming ingestion requiring ACID + schema evolution: use Delta Lake
+df.write.format("delta").partitionBy("date").save("data_delta/")
+```
+
+**Config options**
+
+No Spark configuration changes the cost of reading CSV/JSON. The fix is a format migration.
+
+**Related rules**
+
+- **SPL-D07-002** — Schema inference; CSV reads commonly include `inferSchema=True`, doubling the I/O cost
+- **SPL-D04-006** — Missing partitionBy; migrate to Parquet and partition at the same time
+- **SPL-D07-003** — select("*"); columnar formats only benefit from column pruning when explicit selects are used
+
+---
+
+### SPL-D07-002 — Schema Inference Enabled
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | 2× I/O per job; unstable schemas cause intermittent type errors |
+
+**Description**
+
+`inferSchema=True` (or `option("inferSchema", "true")`) is set on a reader. Spark performs a
+full pass over the entire input to detect column types before running the actual query,
+doubling I/O on every execution.
+
+**What it detects**
+
+Any reader call with `.option("inferSchema", "true")` or `inferSchema=True` as a keyword
+argument.
+
+```python
+# Triggers SPL-D07-002
+df = spark.read.option("inferSchema", "true").csv("path/")
+df = spark.read.csv("path/", inferSchema=True)
+```
+
+**Why it matters**
+
+Schema inference works by reading the entire dataset twice: first to sample types, then to
+execute the query. For a 500 GB CSV file, this is 1 TB of I/O per job execution. Beyond
+performance, inferred schemas are fragile: a single malformed row or a file with an extra
+column changes the inferred schema, causing downstream jobs to fail with `AnalysisException`
+or to silently produce wrong results when a column shifts position. An explicit schema is a
+contract that makes the job deterministic regardless of data anomalies.
+
+**How to fix**
+
+```python
+# Wrong: 2× I/O; schema changes with data anomalies
+df = spark.read.csv("path/", inferSchema=True, header=True)
+
+# Right: explicit schema — 1× I/O; deterministic behavior
+from pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType
+
+schema = StructType([
+    StructField("id",     LongType(),   nullable=False),
+    StructField("name",   StringType(), nullable=True),
+    StructField("amount", DoubleType(), nullable=True),
+])
+df = spark.read.schema(schema).csv("path/", header=True)
+
+# DDL string syntax (more concise):
+df = spark.read.schema("id LONG NOT NULL, name STRING, amount DOUBLE").csv("path/", header=True)
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D07-001** — CSV/JSON format; `inferSchema` is only relevant for text formats
+- **SPL-D03-005** — Join key type mismatch; inferred schemas are the leading cause of type mismatch bugs on joins
+
+---
+
+### SPL-D07-003 — select("*") — No Column Pruning
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | All columns decoded from storage; no columnar pruning benefit |
+
+**Description**
+
+`select("*")` (or `select(col("*"))`) is a no-op that retains every column. For columnar
+formats it defeats column pruning: the storage layer must deserialize every column even when
+only a few are needed downstream.
+
+**What it detects**
+
+Any `.select("*")` or `.select(col("*"))` call.
+
+```python
+# Triggers SPL-D07-003
+df.select("*").groupBy("status").count()
+df.select(col("*")).filter("active = true")
+```
+
+**Why it matters**
+
+Parquet and ORC column pruning is one of Spark's most effective I/O optimizations: it instructs
+the reader to deserialize only the columns referenced in the query plan. `select("*")` injects
+a wildcard projection into the plan that references all columns, forcing the reader to
+deserialize everything. On a 200-column table where the query only needs 3 columns, removing
+`select("*")` reduces deserialization work by 66× and cuts network I/O proportionally. The
+fix is to replace `select("*")` with an explicit column list or to simply remove it — a bare
+`df.groupBy("status").count()` prunes columns automatically.
+
+**How to fix**
+
+```python
+# Wrong: reads and decodes all 200 columns
+df.select("*").groupBy("status").count()
+
+# Right: explicit columns — only status is read from disk
+df.select("status").groupBy("status").count()
+
+# Or simply omit the select entirely (Catalyst prunes automatically):
+df.groupBy("status").count()
+
+# When building a derived DataFrame and you need all columns plus new ones:
+# Avoid select("*", new_col) — instead use withColumn:
+df.withColumn("score", col("amount") * 1.1)  # appends without wildcard select
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D07-001** — CSV/JSON format; column pruning only applies to columnar formats (Parquet, ORC)
+- **SPL-D04-009** — Partition column not used in filters; combine column pruning with partition pruning for maximum I/O reduction
+- **SPL-D03-004** — Join without prior filter/select; `select("*")` in a join chain doubles this problem
+
+---
+
+### SPL-D07-004 — Filter Applied After Join — Missing Predicate Pushdown
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Shuffle includes rows that will be discarded; wasted network I/O |
+
+**Description**
+
+`filter()` or `where()` is applied after `join()` when the filter predicate is on a column
+from one of the join inputs. Moving the filter before the join reduces the data shuffled by the
+join.
+
+**What it detects**
+
+A `filter()` or `where()` call that follows a `join()` call in the same method chain.
+
+```python
+# Triggers SPL-D07-004
+df.join(other, "id").filter('status = "active"').groupBy("x").count()
+```
+
+**Why it matters**
+
+Catalyst's predicate pushdown optimizer moves `filter()` conditions as close to the data source
+as possible — ideally into the Parquet row-group reader for predicate pushdown, or at minimum
+before the shuffle for join inputs. However, when the filter is written after the join in
+source code, Catalyst can only push it down if it can prove the predicate does not depend on
+any column produced by the join. For filters on original input columns (not derived columns),
+manual reordering makes the intent unambiguous and avoids any analysis ambiguity. Every row
+that passes the filter but would have been discarded post-join represents wasted serialization,
+network transfer, and deserialization in the shuffle.
+
+**How to fix**
+
+```python
+# Wrong: join shuffles unfiltered rows; filter discards them after the fact
+df.join(other, "id").filter('status = "active"').groupBy("x").count()
+
+# Right: filter before the join reduces shuffle payload
+df.filter('status = "active"').join(other, "id").groupBy("x").count()
+
+# Filter both sides when possible:
+(
+    df.filter('status = "active"')
+    .join(other.filter('region = "EU"'), "id")
+    .groupBy("x").count()
+)
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.optimizer.nestedSchemaPruning.enabled` | `true` (default Spark 3+); ensures Catalyst pushes struct field access into the reader |
+
+**Related rules**
+
+- **SPL-D03-004** — Join without prior filter/select; the full join-filtering guidance
+- **SPL-D04-009** — Partition column not used in filters; partition pruning is the most impactful form of pre-join filtering
+- **SPL-D10-001** — UDF blocks predicate pushdown; UDFs prevent Catalyst from pushing filters through them
+
+---
+
+### SPL-D07-005 — Small File Problem on Write
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | O(partitions × partition_values) small files; slow reads and metastore overload |
+
+**Description**
+
+`write.partitionBy()` is used without a preceding `coalesce()` or `repartition()`. With
+Spark's default of 200 shuffle partitions, a dataset spanning many partition values can produce
+thousands of tiny output files — one per (shuffle partition × partition value).
+
+**What it detects**
+
+A `.write.partitionBy(...)` call in a chain that does not include `coalesce()` or `repartition()`
+within 5 preceding lines.
+
+```python
+# Triggers SPL-D07-005
+df.write.partitionBy("date").parquet("s3://bucket/data")
+# With 200 shuffle partitions and 365 date values: up to 73,000 output files
+```
+
+**Why it matters**
+
+`write.partitionBy("date")` writes one file per Spark partition per unique date value. With 200
+shuffle partitions and 365 days of data, Spark creates up to 200 × 365 = 73,000 files. Object
+storage (S3, GCS) must open a separate HTTP connection per file during reads; the Spark driver
+must LIST all 73,000 file paths and hold them in memory; the Hive Metastore must track each
+file as a separate partition entry. Each tiny file reads slowly because the storage overhead
+(open, seek, read footer, close) dominates the actual data-read time. Target files of 128–256 MB.
+
+**How to fix**
+
+```python
+# Wrong: 200 shuffle partitions × N date values = many tiny files
+df.write.partitionBy("date").parquet("s3://bucket/data")
+
+# Right: coalesce to a reasonable file count per date partition
+# If you have ~10 GB per date and want ~128 MB files: 10 GB / 128 MB ≈ 80 files per date
+df.coalesce(80).write.partitionBy("date").parquet("s3://bucket/data")
+
+# Alternative: repartition by date so each date gets one or a few partitions
+df.repartition(365, "date").write.partitionBy("date").parquet("s3://bucket/data")
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.shuffle.partitions` | Reduce to limit initial file count per partition value |
+| `spark.sql.adaptive.enabled` | AQE coalesces small post-shuffle partitions, which reduces file count |
+
+**Related rules**
+
+- **SPL-D04-007** — High-cardinality partition column; both rules address the small-files problem from different angles
+- **SPL-D04-005** — Coalesce before write — unbalanced files; covers the general pre-write coalesce guidance
+- **SPL-D04-006** — Missing partitionBy; the pair to this rule — write with `partitionBy`, but control file count
+
+---
+
+### SPL-D07-006 — JDBC Read Without Partition Parameters
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | CRITICAL |
+| **Effort** | Minor code change |
+| **Impact** | Sequential single-thread read; does not scale to large JDBC tables |
+
+**Description**
+
+`spark.read.jdbc(url, table)` is called without `column`, `lowerBound`, `upperBound`, and
+`numPartitions` parameters. Without these, Spark creates exactly one partition and reads the
+entire table through a single JDBC connection on the driver, serializing all I/O through one
+thread.
+
+**What it detects**
+
+A `spark.read.jdbc(...)` call that lacks both `column` and `numPartitions` arguments.
+
+```python
+# Triggers SPL-D07-006
+df = spark.read.jdbc(url, "orders")
+df = spark.read.format("jdbc").option("url", url).option("dbtable", "orders").load()
+```
+
+**Why it matters**
+
+The JDBC data source creates one Spark partition per query range. Without partition parameters,
+there is only one range — `SELECT * FROM orders` — executed by a single thread on the driver.
+A table with 1 billion rows will block the driver for hours, using 0% of the executor cluster.
+The driver also accumulates all fetched rows before distributing them, risking driver OOM. The
+partition parameters split the query into `numPartitions` sub-queries with `WHERE column
+BETWEEN lowerBound AND upperBound / numPartitions`, each executed in parallel by a separate
+executor task.
+
+**How to fix**
+
+```python
+# Wrong: single JDBC connection, entire table on driver thread
+df = spark.read.jdbc(url, "orders")
+
+# Right: parallel reads using partition column ranges
+df = spark.read.jdbc(
+    url,
+    "orders",
+    column="order_id",       # numeric column for range partitioning
+    lowerBound=0,
+    upperBound=10_000_000,   # approximate max value
+    numPartitions=20,        # 20 parallel JDBC connections
+    properties={"user": "...", "password": "..."},
+)
+
+# For non-numeric partition columns, use predicates:
+predicates = [
+    "region = 'NA'",
+    "region = 'EU'",
+    "region = 'APAC'",
+]
+df = spark.read.jdbc(url, "orders", predicates=predicates, properties={...})
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.executor.extraJavaOptions` | Add JDBC driver JAR path if not already on classpath |
+
+**Related rules**
+
+- **SPL-D04-004** — Repartition with very low count; the resulting single-partition DataFrame has the same parallelism problem
+- **SPL-D07-002** — Schema inference; JDBC reads also support explicit schema via `.schema()`
+
+---
+
+### SPL-D07-007 — Parquet Compression Not Set
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Cluster-dependent codec; may write uncompressed on some environments |
+
+**Description**
+
+Writing Parquet without an explicit `.option("compression", ...)` relies on the cluster default
+(`spark.sql.parquet.compression.codec`), which varies by Spark version and deployment
+configuration. The code becomes non-deterministic across environments.
+
+**What it detects**
+
+A `.parquet(...)` write call that does not include `.option("compression", ...)` in the chain.
+
+```python
+# Triggers SPL-D07-007
+df.write.mode("overwrite").parquet("s3://bucket/data")
+```
+
+**Why it matters**
+
+In Spark 1.x the Parquet compression default was `uncompressed`; in Spark 2.0+ it changed to
+`snappy`. Jobs migrated between clusters with different Spark versions silently change their
+output file sizes. An uncompressed 500 GB file becomes a 166 GB snappy file (3× compression
+typical), confusing downstream size-based monitoring. More practically: `snappy` offers good
+read/write speed with moderate compression; `zstd` offers higher compression (roughly 2× better
+than snappy) with comparable speed on modern hardware. `gzip` offers the best compression but is
+not splittable within a file, limiting parallelism for large files.
+
+**How to fix**
+
+```python
+# Wrong: codec depends on cluster configuration
+df.write.mode("overwrite").parquet("s3://bucket/data")
+
+# Right: explicit codec — deterministic behavior across all environments
+df.write.mode("overwrite").option("compression", "snappy").parquet("s3://bucket/data")
+
+# For better compression with similar read performance (Spark 3+):
+df.write.mode("overwrite").option("compression", "zstd").parquet("s3://bucket/data")
+
+# For maximum compatibility (e.g., reading with older tools):
+df.write.mode("overwrite").option("compression", "gzip").parquet("s3://bucket/data")
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.parquet.compression.codec` | `snappy` | Sets the default; explicit option overrides this |
+
+**Related rules**
+
+- **SPL-D07-008** — Write mode not specified; both settings affect write determinism across environments
+- **SPL-D07-009** — No format specified; format + compression + mode together define fully deterministic writes
+
+---
+
+### SPL-D07-008 — Write Mode Not Specified
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Job fails on re-run if output path exists; silent data duplication on 'append' |
+
+**Description**
+
+A `write` call does not include `.mode(...)`. Spark's default write mode is `"error"` (also
+known as `"errorifexists"`), which raises `AnalysisException` if the output path already
+exists. Production pipelines that need to refresh output must specify the mode explicitly.
+
+**What it detects**
+
+A write terminal (`.parquet()`, `.orc()`, `.csv()`, `.json()`, `.save()`, `.saveAsTable()`)
+in a chain that does not include `.mode(...)`.
+
+```python
+# Triggers SPL-D07-008
+df.write.parquet("s3://bucket/output")
+```
+
+**Why it matters**
+
+The default `"error"` mode is intentionally conservative — it prevents accidental overwrites
+during development. In production, however, virtually every pipeline re-runs to refresh data,
+and a failed write due to an existing path produces a confusing `AnalysisException: path
+already exists` that does not hint at the root cause. `"append"` mode is equally dangerous
+without documentation: silently appending to an existing dataset on re-run creates duplicate
+rows that downstream consumers cannot detect without row counts. Explicit mode declarations
+make the pipeline's intent clear and prevent accidental data loss.
+
+**How to fix**
+
+```python
+# Wrong: fails on re-run if output exists
+df.write.parquet("s3://bucket/output")
+
+# Right: explicit overwrite for refresh semantics
+df.write.mode("overwrite").parquet("s3://bucket/output")
+
+# For incremental append pipelines — document the intent with a comment:
+df.write.mode("append").parquet("s3://bucket/output")  # idempotency handled by upstream dedup
+
+# For Delta Lake tables: prefer 'overwrite' with replaceWhere for partial partition refresh:
+df.write.format("delta").mode("overwrite").option("replaceWhere", "date = '2024-01-01'") \
+    .save("s3://bucket/delta_table")
+```
+
+**Config options**
+
+No Spark configuration changes the default write mode behavior.
+
+**Related rules**
+
+- **SPL-D07-007** — Parquet compression not set; both are write-determinism issues
+- **SPL-D04-006** — Missing partitionBy; all three write options (mode, format, partitioning) should be set explicitly
+
+---
+
+### SPL-D07-009 — No Format Specified on Read/Write
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Format depends on cluster config; silent mismatches across environments |
+
+**Description**
+
+`spark.read.load("path")` or `df.write.save("path")` is called without `.format(...)`. These
+generic methods rely on `spark.sql.sources.default` (default: `"parquet"` in Spark 2+), making
+the actual format implicit and cluster-dependent.
+
+**What it detects**
+
+A `.load("path")` read or `.save("path")` write call that is not preceded by `.format(...)` in
+the same chain.
+
+```python
+# Triggers SPL-D07-009
+df = spark.read.load("path/")
+df.write.save("output/")
+```
+
+**Why it matters**
+
+`spark.sql.sources.default` can be overridden at the cluster level. A job that relies on the
+default format reads Parquet in one environment and ORC in another — or reads nothing at all
+when deployed to a cluster where the default is `"com.databricks.spark.csv"`. Format-specific
+reader methods (`.parquet()`, `.orc()`, `.csv()`) are unambiguous: the format is encoded in
+the source code, not in a runtime configuration value that may vary.
+
+**How to fix**
+
+```python
+# Wrong: format inferred from spark.sql.sources.default
+df = spark.read.load("path/")
+df.write.save("output/")
+
+# Right: explicit format — unambiguous across all environments
+df = spark.read.parquet("path/")
+df.write.mode("overwrite").parquet("output/")
+
+# Or using the .format() fluent API:
+df = spark.read.format("parquet").load("path/")
+df.write.format("parquet").mode("overwrite").save("output/")
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.sources.default` | `parquet` (default Spark 2+); avoid relying on this |
+
+**Related rules**
+
+- **SPL-D07-008** — Write mode not specified; both rules address implicit write behavior
+- **SPL-D07-007** — Parquet compression not set; use all three explicit write options together
+
+---
+
+### SPL-D07-010 — mergeSchema Enabled Without Necessity
+
+| | |
+|---|---|
+| **Dimension** | D07 I/O and File Formats |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | O(files) metadata scan on every read; seconds to minutes for tables with many files |
+
+**Description**
+
+`option("mergeSchema", "true")` or `spark.sql.parquet.mergeSchema = true` is set. This
+instructs Spark to read the schema footer from every Parquet file in the dataset on every
+read — an O(files) metadata operation regardless of how much data is actually read.
+
+**What it detects**
+
+A reader with `.option("mergeSchema", "true")` or a SparkSession configured with
+`spark.sql.parquet.mergeSchema = true`.
+
+```python
+# Triggers SPL-D07-010
+df = spark.read.option("mergeSchema", "true").parquet("path/")
+```
+
+**Why it matters**
+
+A Parquet dataset built over time may accumulate files with slightly different schemas (added
+or removed columns). `mergeSchema=true` reconciles these differences by reading the footer
+metadata from every file before returning a unified schema. For a table with 10,000 Parquet
+files, this is 10,000 footer reads — each requiring a network round-trip to object storage —
+on every single query, regardless of whether the schema has changed since the last read.
+For tables where the schema is stable, this is pure overhead. If schema evolution is a
+genuine requirement, Delta Lake handles it transparently without per-read overhead.
+
+**How to fix**
+
+```python
+# Wrong: O(files) footer scan on every read
+df = spark.read.option("mergeSchema", "true").parquet("path/")
+
+# Right option 1: define schema explicitly and remove mergeSchema
+from pyspark.sql.types import StructType, StructField, LongType, StringType
+schema = StructType([
+    StructField("id",   LongType(),   True),
+    StructField("name", StringType(), True),
+    StructField("ts",   LongType(),   True),
+])
+df = spark.read.schema(schema).parquet("path/")
+
+# Right option 2: if schema evolution is required, use Delta Lake
+df = spark.read.format("delta").load("delta_path/")  # schema tracked in transaction log
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.parquet.mergeSchema` | `false` (default); do not set to `true` globally |
+
+**Related rules**
+
+- **SPL-D07-002** — Schema inference; both trade schema safety for I/O cost; prefer explicit schemas for both
+- **SPL-D07-001** — CSV/JSON format; migrating to Delta Lake also eliminates `mergeSchema` concerns
+
+---
+
+## D08 · Adaptive Query Execution
+
+Adaptive Query Execution (AQE, enabled by default in Spark 3.2+) re-optimizes query plans at
+runtime using shuffle statistics collected after each stage. Its three core features —
+partition coalescing, skew join splitting, and dynamic join strategy switching — each require
+specific configuration. These rules detect cases where AQE is disabled, misconfigured, or
+working against itself.
+
+---
+
+### SPL-D08-001 — AQE Disabled
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | CRITICAL |
+| **Effort** | Config only |
+| **Impact** | Loses automatic partition coalescing, skew handling, and join strategy adaptation |
+
+**Description**
+
+`spark.sql.adaptive.enabled` is explicitly set to `false`, disabling all three AQE
+optimizations. In Spark 3.2+ AQE is enabled by default; an explicit `false` override
+removes a significant class of automatic runtime optimizations with no compensating benefit.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.enabled", "false")` call.
+
+```python
+# Triggers SPL-D08-001
+spark = SparkSession.builder.config("spark.sql.adaptive.enabled", "false").getOrCreate()
+```
+
+**Why it matters**
+
+AQE operates in three phases after each shuffle stage completes, using the actual shuffle map
+statistics: (1) **Partition coalescing** merges small output partitions into ones near the
+advisory size, eliminating hundreds of tiny tasks; (2) **Skew join splitting** detects
+partitions disproportionately larger than the median and runs multiple tasks against them,
+eliminating straggler bottlenecks; (3) **Dynamic join strategy** upgrades a sort-merge join
+to a broadcast hash join at runtime when the actual smaller side is below the broadcast
+threshold — even if the planner estimated it would be large. All three optimizations apply
+at zero developer cost. AQE was disabled by default only in Spark 3.0 and 3.1 due to
+maturity concerns; it is stable and on-by-default since Spark 3.2.
+
+**How to fix**
+
+```python
+# Wrong: disables all AQE optimizations
+spark = SparkSession.builder.config("spark.sql.adaptive.enabled", "false").getOrCreate()
+
+# Right: remove the override entirely (Spark 3.2+ default is true)
+spark = SparkSession.builder.getOrCreate()
+
+# Or set explicitly if running on Spark 3.0/3.1:
+spark = SparkSession.builder.config("spark.sql.adaptive.enabled", "true").getOrCreate()
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.enabled` | `true` (default Spark 3.2+) | Remove the `false` override |
+| `spark.sql.adaptive.coalescePartitions.enabled` | `true` (default) | Partition coalescing sub-feature |
+| `spark.sql.adaptive.skewJoin.enabled` | `true` (default) | Skew join sub-feature |
+
+**Related rules**
+
+- **SPL-D08-002** — AQE coalesce partitions disabled; check that sub-features are also enabled
+- **SPL-D05-003** — AQE skew join handling disabled; specific sub-feature disable
+- **SPL-D01-010** — Default shuffle partitions; AQE mitigates a wrong partition count via coalescing
+
+---
+
+### SPL-D08-002 — AQE Coalesce Partitions Disabled
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | WARNING |
+| **Effort** | Config only |
+| **Impact** | Hundreds of tiny tasks per stage; driver scheduling overhead |
+
+**Description**
+
+`spark.sql.adaptive.coalescePartitions.enabled` is explicitly set to `false`. This disables the
+AQE sub-feature that merges small post-shuffle partitions, forcing every stage to run with the
+full `spark.sql.shuffle.partitions` count regardless of actual data volume.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.coalescePartitions.enabled", "false")` call.
+
+```python
+# Triggers SPL-D08-002
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+    .getOrCreate()
+```
+
+**Why it matters**
+
+After a shuffle, AQE examines the actual size of each output partition. When consecutive
+partitions are each smaller than `advisoryPartitionSizeInBytes` (default 64 MB), AQE merges
+them into a single partition and assigns them to one task. Without coalescing, a 10 GB dataset
+with `shuffle.partitions = 200` produces 200 tasks of ~50 MB each — harmless but slightly
+inefficient. A 100 MB dataset with the same setting produces 200 tasks of 500 KB each, with
+task-startup overhead dominating actual computation time. The driver must schedule, track, and
+clean up 200 tasks when 2 would suffice.
+
+**How to fix**
+
+```python
+# Wrong: disables partition coalescing
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.coalescePartitions.enabled", "false") \
+    .getOrCreate()
+
+# Right: remove the override — coalescing is enabled by default with AQE
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .getOrCreate()
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.coalescePartitions.enabled` | `true` (default) | Remove the `false` override |
+| `spark.sql.adaptive.advisoryPartitionSizeInBytes` | `67108864` (64 MB, default) | Target size after coalescing |
+| `spark.sql.adaptive.coalescePartitions.minPartitionNum` | `1` | Minimum partitions after coalescing |
+
+**Related rules**
+
+- **SPL-D08-001** — AQE disabled; coalescing requires AQE to be enabled
+- **SPL-D08-003** — AQE advisory partition size too small; complementary tuning of the coalesce target size
+- **SPL-D01-010** — Default shuffle partitions; AQE coalescing compensates for over-partitioning
+
+---
+
+### SPL-D08-003 — AQE Advisory Partition Size Too Small
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | INFO |
+| **Effort** | Config only |
+| **Impact** | Too many small post-coalesce partitions; task scheduling overhead |
+
+**Description**
+
+`spark.sql.adaptive.advisoryPartitionSizeInBytes` is set below 16 MB. AQE coalesces partitions
+to reach this target size; too small a target produces many small post-coalesce partitions that
+incur task-scheduling overhead without meaningful parallelism benefit.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.advisoryPartitionSizeInBytes", X)` call where `X` parses to
+fewer than 16 MB.
+
+```python
+# Triggers SPL-D08-003 (4 MB << 64 MB recommended)
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "4m") \
+    .getOrCreate()
+```
+
+**Why it matters**
+
+`advisoryPartitionSizeInBytes` is the target size AQE aims for when merging adjacent shuffle
+output partitions. Setting it very low (e.g., 4 MB) means AQE coalesces fewer partitions than
+it could — the result is many 4 MB tasks rather than fewer 64 MB tasks. For a 10 GB post-shuffle
+dataset: at 4 MB target → 2,500 tasks; at 64 MB target → 156 tasks. The 2,500-task version
+spends proportionally more time on task scheduling, heartbeat processing, and result
+serialization overhead than the 156-task version, with no parallelism advantage on a cluster
+with fewer than 2,500 cores.
+
+**How to fix**
+
+```python
+# Wrong: 4 MB target produces excessive task counts
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "4m") \
+    .getOrCreate()
+
+# Right: 64–128 MB target balances parallelism and overhead
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "67108864")  # 64 MB
+    .getOrCreate()
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.advisoryPartitionSizeInBytes` | `67108864`–`134217728` (64–128 MB) | Target post-coalesce partition size |
+
+**Related rules**
+
+- **SPL-D08-002** — AQE coalesce partitions disabled; set the target size only after enabling coalescing
+- **SPL-D08-007** — High shuffle partitions with AQE; use `advisoryPartitionSizeInBytes` instead of a high initial count
+
+---
+
+### SPL-D08-004 — AQE Skew Join Disabled With Skew-Prone Joins Detected
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | WARNING |
+| **Effort** | Config only |
+| **Impact** | Skewed partitions on joins not auto-split; straggler tasks persist |
+
+**Description**
+
+`spark.sql.adaptive.skewJoin.enabled` is set to `false` while the file contains `join()` calls
+on columns that commonly produce skewed output (columns matching low-cardinality or power-law
+naming patterns). The combination means skew will manifest but AQE will not mitigate it.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.skewJoin.enabled", "false")` call in a file that also contains
+join operations on skew-prone column names.
+
+```python
+# Triggers SPL-D08-004
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.skewJoin.enabled", "false") \
+    .getOrCreate()
+# ...
+df.join(events, "user_id")   # user_id is skew-prone; AQE skew join disabled
+```
+
+**Why it matters**
+
+AQE's skew join works by monitoring partition sizes after the shuffle map phase. When a
+partition exceeds both `skewedPartitionThresholdInBytes` (default 256 MB) and
+`skewedPartitionFactor × median` (default 5×), AQE splits that partition into multiple
+sub-partitions and runs one task per sub-partition, effectively distributing the skewed data
+across multiple executors. Disabling this feature in a job that has skew-prone join keys means
+every execution will have at least one straggler task processing a disproportionately large
+partition while all other tasks sit idle.
+
+**How to fix**
+
+```python
+# Wrong: skew join disabled with known skew-prone join key
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.skewJoin.enabled", "false") \
+    .getOrCreate()
+df.join(events, "user_id")
+
+# Right: remove the override — skew join is enabled by default with AQE
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .getOrCreate()
+df.join(events, "user_id")  # AQE now auto-splits skewed user_id partitions
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.skewJoin.enabled` | `true` (default with AQE) | Remove the `false` override |
+| `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` | `268435456` (256 MB) | Lower = more aggressive split detection |
+| `spark.sql.adaptive.skewJoin.skewedPartitionFactor` | `5` | Partition is skewed if > factor × median |
+
+**Related rules**
+
+- **SPL-D05-003** — AQE skew join handling disabled; D05 counterpart covering the same config
+- **SPL-D08-001** — AQE disabled; skew join requires AQE to be enabled
+- **SPL-D05-001** — Join on low-cardinality column; the code-side pattern this rule pairs with
+
+---
+
+### SPL-D08-005 — AQE Skew Factor Too Aggressive
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | INFO |
+| **Effort** | Config only |
+| **Impact** | Excessive partition splits for balanced data; unnecessary task count increase |
+
+**Description**
+
+`spark.sql.adaptive.skewJoin.skewedPartitionFactor` is set below 2. A very low factor means
+nearly every partition that is above the median size is treated as skewed and split, even for
+naturally balanced data with moderate variance.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", X)` call where `X` is a
+numeric literal less than 2.
+
+```python
+# Triggers SPL-D08-005 (factor=1 means any partition > median is "skewed")
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "1") \
+    .getOrCreate()
+```
+
+**Why it matters**
+
+AQE's skew detection uses two thresholds jointly. A partition is skewed only when it is **both**
+above `skewedPartitionThresholdInBytes` AND above `skewedPartitionFactor × median size`.
+Setting the factor to 1 means any partition larger than the median is considered skewed —
+including partitions that are only 10% above the median due to natural data variance. AQE then
+splits those partitions unnecessarily, increasing task count and scheduling overhead for data
+that was already well-balanced. The default of 5 (a partition must be 5× the median) is
+calibrated to distinguish genuine outliers from normal variance.
+
+**How to fix**
+
+```python
+# Wrong: factor=1 splits nearly every above-average partition
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "1") \
+    .getOrCreate()
+
+# Right: use the default (5) or at least 2
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")  # default
+    .getOrCreate()
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.skewJoin.skewedPartitionFactor` | `5` (default) | Set to at least 2; use default unless tuning for specific workload |
+
+**Related rules**
+
+- **SPL-D05-004** — AQE skew threshold too high; the complementary threshold (size threshold vs. factor threshold)
+- **SPL-D08-004** — AQE skew join disabled; ensure skew join is enabled before tuning the factor
+
+---
+
+### SPL-D08-006 — AQE Local Shuffle Reader Disabled
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | INFO |
+| **Effort** | Config only |
+| **Impact** | Unnecessary remote shuffle reads; extra network I/O even for locally available data |
+
+**Description**
+
+`spark.sql.adaptive.localShuffleReader.enabled` is set to `false`. This disables the AQE
+optimization that reads shuffle data locally when all required shuffle blocks are on the same
+executor, eliminating unnecessary cross-node network transfers for those tasks.
+
+**What it detects**
+
+A `.config("spark.sql.adaptive.localShuffleReader.enabled", "false")` call.
+
+```python
+# Triggers SPL-D08-006
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.localShuffleReader.enabled", "false") \
+    .getOrCreate()
+```
+
+**Why it matters**
+
+After a shuffle, each reducer task fetches its partition data from multiple shuffle map output
+files, potentially from many different executors (remote reads). The local shuffle reader
+optimization detects cases where all the shuffle blocks needed by a task happen to be on the
+same executor (e.g., after a broadcast join or when shuffle.partitions is small relative to
+executors). In those cases it reads the data locally from disk without going over the network.
+Disabling this optimization forces remote network reads even when the data is sitting on the
+local disk of the same JVM, adding unnecessary network latency and congestion.
+
+**How to fix**
+
+```python
+# Wrong: forces remote shuffle reads even when data is local
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.localShuffleReader.enabled", "false") \
+    .getOrCreate()
+
+# Right: remove the override — local shuffle reader is safe and enabled by default
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .getOrCreate()
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.adaptive.localShuffleReader.enabled` | `true` (default with AQE) | Remove the `false` override |
+
+**Related rules**
+
+- **SPL-D08-001** — AQE disabled; local shuffle reader requires AQE enabled
+- **SPL-D08-002** — AQE coalesce partitions disabled; coalescing increases the likelihood that local reads apply
+
+---
+
+### SPL-D08-007 — Manual Shuffle Partition Count Set High With AQE Enabled
+
+| | |
+|---|---|
+| **Dimension** | D08 AQE |
+| **Severity** | INFO |
+| **Effort** | Config only |
+| **Impact** | Unnecessary map-side overhead proportional to initial partition count |
+
+**Description**
+
+`spark.sql.shuffle.partitions` is set above 400 while AQE is enabled. With AQE on, the initial
+partition count is the maximum from which AQE coalesces downward — setting it very high
+imposes unnecessary map-side overhead with no benefit over using a moderate count plus a
+well-tuned `advisoryPartitionSizeInBytes`.
+
+**What it detects**
+
+A `.config("spark.sql.shuffle.partitions", N)` call where `N > 400` in a file that also sets
+`spark.sql.adaptive.enabled = true` (or where AQE is inferred to be on).
+
+```python
+# Triggers SPL-D08-007
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.sql.shuffle.partitions", "2000") \
+    .getOrCreate()
+```
+
+**Why it matters**
+
+`spark.sql.shuffle.partitions` controls how many shuffle map-side output files are created.
+Each map task writes one buffer per reducer partition; with 2,000 reducers that is 2,000 open
+file handles per map task. Even though AQE will merge most of the 2,000 small post-shuffle
+partitions down to a manageable number of reduce tasks, the map-side cost is already paid:
+2,000 buffers allocated, 2,000 file handles opened, 2,000 files written per map task. Setting
+`shuffle.partitions = 200` and `advisoryPartitionSizeInBytes = 128m` achieves the same
+post-coalesce partition count with 10× fewer map-side files.
+
+**How to fix**
+
+```python
+# Wrong: high initial count wastes map-side resources even with AQE coalescing
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.sql.shuffle.partitions", "2000") \
+    .getOrCreate()
+
+# Right: moderate initial count + advisory size lets AQE tune to actual data
+spark = SparkSession.builder \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.sql.shuffle.partitions", "200")   # initial; AQE adjusts from here
+    .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "134217728")  # 128 MB target
+    .getOrCreate()
+```
+
+**Config options**
+
+| Spark Config | Recommended Value | Notes |
+|---|---|---|
+| `spark.sql.shuffle.partitions` | `200`–`400` when AQE is enabled | AQE coalesces down; a high initial count wastes map-side I/O |
+| `spark.sql.adaptive.advisoryPartitionSizeInBytes` | `67108864`–`134217728` | Target size; drives AQE coalescing decision |
+
+**Related rules**
+
+- **SPL-D08-003** — AQE advisory partition size too small; both rules tune the coalescing outcome
+- **SPL-D01-010** — Default shuffle partitions unchanged; with AQE on, focus on advisory size rather than initial count
+
+---
+
+## D09 · UDF and Code Patterns
+
+Python UDFs and driver-side iteration are the most impactful code-level anti-patterns in PySpark.
+A single `@udf` can slow a pipeline 10× relative to native functions; a `collect()` without
+`limit()` can crash the driver entirely. These rules cover the full spectrum from serialization
+overhead to query-plan explosion.
+
+---
+
+### SPL-D09-001 — Python UDF (Row-at-a-Time) Detected
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | 2–10× slowdown per row; blocks Catalyst code-generation pipeline |
+
+**Description**
+
+A `@udf`-decorated function (or `udf(lambda ...)`) is detected. Row-at-a-time Python UDFs
+serialize every row from the JVM to a Python worker process and back, bypassing Catalyst's
+whole-stage code generation and incurring a per-row IPC round-trip.
+
+**What it detects**
+
+Any function decorated with `@udf` or `@udf(returnType=...)`, or a `udf(lambda ...)` call.
+
+```python
+# Triggers SPL-D09-001
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType
+
+@udf(returnType=StringType())
+def normalise(s):
+    return s.lower().strip() if s else None
+```
+
+**Why it matters**
+
+For every row in every partition, a row-at-a-time UDF forces Spark to: (1) serialize the row's
+relevant columns from JVM internal binary format to Python pickle; (2) send the bytes over a
+local socket to a Python worker subprocess; (3) deserialize and execute the Python function;
+(4) serialize the result back to pickle; (5) send it back over the socket; (6) deserialize it
+into JVM format. This round-trip takes roughly 1–10 µs per row. At 100 million rows per
+partition, that is 100–1,000 seconds just in serialization overhead, before any actual
+computation. It also prevents Catalyst's whole-stage code generation — the JIT-compiled
+bytecode path that runs native Spark operations at near-JVM speed.
+
+**How to fix**
+
+```python
+# Wrong: row-at-a-time UDF — full JVM↔Python round-trip per row
+@udf(returnType=StringType())
+def normalise(s):
+    return s.lower().strip() if s else None
+
+df.withColumn("normalised", normalise(col("name")))
+
+# Right option 1: native Spark function — no serialization at all
+from pyspark.sql.functions import lower, trim
+df.withColumn("normalised", lower(trim(col("name"))))
+
+# Right option 2: pandas_udf — vectorized; processes a batch of rows as pd.Series
+import pandas as pd
+from pyspark.sql.functions import pandas_udf
+
+@pandas_udf("string")
+def normalise_batch(s: pd.Series) -> pd.Series:
+    return s.str.lower().str.strip()
+
+df.withColumn("normalised", normalise_batch(col("name")))
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.python.worker.memory` | See SPL-D01-007; size appropriately for UDF memory footprint |
+| `spark.sql.execution.arrow.pyspark.enabled` | `true` — required for `@pandas_udf` Arrow-based batching |
+
+**Related rules**
+
+- **SPL-D09-002** — UDF replaceable with native function; check if the UDF body has a direct Spark SQL equivalent
+- **SPL-D10-001** — UDF blocks predicate pushdown; UDFs create opaque Catalyst boundaries
+- **SPL-D01-007** — Missing PySpark worker memory; Python workers need adequate memory headroom
+
+---
+
+### SPL-D09-002 — Python UDF Replaceable With Native Spark Function
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Per-row JVM↔Python serialization for a zero-logic transformation |
+
+**Description**
+
+The UDF body consists of a single call to a Python string method (`lower`, `upper`, `strip`,
+`replace`, etc.) that has a direct Spark SQL built-in equivalent. The UDF adds full Python
+serialization overhead for a transformation that Catalyst can execute natively.
+
+**What it detects**
+
+A `@udf` function whose body is a single expression applying a Python string method that maps
+directly to a Spark SQL function (`lower`, `upper`, `strip`/`trim`, `replace`, `len`/`length`).
+
+```python
+# Triggers SPL-D09-002 — entire body is s.lower(), which maps to lower(col)
+@udf(returnType=StringType())
+def my_lower(s):
+    return s.lower()
+
+df.withColumn("name_lower", my_lower(col("name")))
+```
+
+**Why it matters**
+
+This is the most wasteful form of Python UDF: the UDF performs zero logic beyond calling a
+function that already exists as a Spark SQL built-in. The full JVM→Python→JVM serialization
+round-trip per row applies — at 100 million rows that is potentially hundreds of seconds of
+pure overhead — for a transformation that the native function executes in a JIT-compiled
+loop inside the JVM with no serialization at all.
+
+**How to fix**
+
+```python
+from pyspark.sql.functions import lower, upper, trim, length, regexp_replace
+
+# Wrong: UDF wrapping a built-in — full serialization per row
+@udf(returnType=StringType())
+def my_lower(s): return s.lower()
+df.withColumn("n", my_lower(col("name")))
+
+# Right: direct native function — zero serialization
+df.withColumn("n", lower(col("name")))
+
+# Common UDF → native function replacements:
+# s.lower()         → lower(col)
+# s.upper()         → upper(col)
+# s.strip()         → trim(col)
+# s.replace(a, b)   → regexp_replace(col, a, b)
+# len(s)            → length(col)
+# s[:n]             → col.substr(1, n)
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-001** — Row-at-a-time UDF; even complex UDFs should be replaced with `@pandas_udf` if possible
+- **SPL-D10-001** — UDF blocks predicate pushdown; eliminating UDFs restores full Catalyst optimization
+
+---
+
+### SPL-D09-003 — withColumn() Inside Loop
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | CRITICAL |
+| **Effort** | Minor code change |
+| **Impact** | O(N²) plan building time; driver hangs for N > 100 columns |
+
+**Description**
+
+`withColumn()` is called inside a `for` or `while` loop. Each call adds a `Project` node to
+the logical plan, wrapping all previous nodes. For N loop iterations the plan has N nested
+projections — analysis time grows quadratically and can hang the driver for large N.
+
+**What it detects**
+
+A `withColumn()` call that is nested inside a loop body.
+
+```python
+# Triggers SPL-D09-003
+for col_name in column_list:           # 500 columns → O(500²) = 250,000 plan ops
+    df = df.withColumn(col_name, compute(col(col_name)))
+```
+
+**Why it matters**
+
+Spark's `withColumn()` does not mutate the DataFrame — it creates a new `Project` logical plan
+node that wraps the previous plan. After N iterations the plan is a chain of N `Project` nodes,
+each referencing the previous. Catalyst's analysis phase must traverse this chain for every
+column in every rule pass. With 500 columns, each rule pass traverses 500 nodes × each of the
+~50 analysis rules = 25,000 traversal operations, and the plan contains 500 nested `Project`
+nodes. Observed behavior: driver CPU at 100%, job appears to hang at the action that triggers
+analysis, sometimes for tens of minutes, before eventually raising `StackOverflowError` for
+very large N.
+
+**How to fix**
+
+```python
+from pyspark.sql.functions import col
+
+# Wrong: O(N²) plan growth
+for col_name in column_list:
+    df = df.withColumn(col_name, compute(col(col_name)))
+
+# Right: build all expressions first, apply in a single select()
+existing = [col(c) for c in df.columns]
+new_cols = [compute(col(c)).alias(c) for c in column_list]
+df = df.select(*existing, *new_cols)
+
+# Alternatively, for adding computed columns alongside originals:
+df = df.select(
+    "*",                                          # retain all existing columns
+    *[compute(col(c)).alias(f"{c}_computed") for c in column_list]
+)
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D03-008** — Join inside loop; the same loop + Spark operation anti-pattern for joins
+- **SPL-D10-006** — Deep method chain; `withColumn` loops produce the deepest chains
+
+---
+
+### SPL-D09-004 — Row-by-Row Iteration Over DataFrame
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | CRITICAL |
+| **Effort** | Major refactor |
+| **Impact** | Driver OOM; entire cluster idle while driver processes rows sequentially |
+
+**Description**
+
+The code iterates over a Spark DataFrame via `df.collect()`, `df.toLocalIterator()`, or direct
+DataFrame iteration in a Python `for` loop. This pulls all data to the driver and processes
+it one row at a time, eliminating all distributed parallelism.
+
+**What it detects**
+
+A Python `for` loop where the iterable is a `collect()` call, `toLocalIterator()` call, or a
+DataFrame variable directly (which implicitly calls `toLocalIterator()`).
+
+```python
+# Triggers SPL-D09-004
+for row in df.collect():
+    process(row)
+
+for row in df.toLocalIterator():
+    write_to_db(row)
+```
+
+**Why it matters**
+
+`df.collect()` materializes the entire DataFrame as a Python list on the driver, transferring
+every row from every executor over the network. While that transfer is happening, all executors
+are idle — their work is done and they sit waiting for the next action. The driver then
+processes rows one at a time in a serial Python loop. A 100 GB dataset collected to the driver
+requires 100 GB of driver heap (driver OOM for any realistic heap size), and the serial loop
+runs at single-thread Python speed rather than distributed executor speed. Even if the driver
+has enough memory, this pattern typically runs 100–1,000× slower than the distributed alternative.
+
+**How to fix**
+
+```python
+# Wrong: all data to driver; serial processing
+for row in df.collect():
+    process(row)
+
+# Right option 1: push processing to executors with foreach/foreachPartition
+df.foreach(process)
+df.foreachPartition(lambda rows: [process(r) for r in rows])
+
+# Right option 2: use DataFrame transformations to compute the result
+result = df.groupBy("key").agg(compute_agg("value"))
+
+# Right option 3: for writing to an external system
+df.write.format("jdbc").option("url", ...).save()  # parallel write via executor tasks
+```
+
+**Config options**
+
+No Spark configuration mitigates this pattern.
+
+**Related rules**
+
+- **SPL-D09-005** — collect() without prior filter; the same driver-collection risk
+- **SPL-D09-006** — toPandas() on large DataFrame; equivalent driver-memory risk via pandas
+
+---
+
+### SPL-D09-005 — .collect() Without Prior Filter or Limit
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | CRITICAL |
+| **Effort** | Minor code change |
+| **Impact** | Driver OOM for datasets > available driver heap; job failure |
+
+**Description**
+
+`.collect()` is called without a preceding `filter()`, `where()`, or `limit()`. An unbounded
+`collect()` pulls the entire DataFrame — potentially terabytes — into driver heap as a Python
+list.
+
+**What it detects**
+
+A `.collect()` call where no `filter()`, `where()`, or `limit()` appears in the same method
+chain or within 3 preceding lines.
+
+```python
+# Triggers SPL-D09-005
+rows = df.join(other, "id").collect()          # unbounded — may OOM driver
+all_data = spark.read.parquet("s3://...").collect()
+```
+
+**Why it matters**
+
+`collect()` is a driver action: it requests that every executor serialize its partitions and
+send them to the driver, where they are assembled into a single Python list. The driver must
+hold the full result in heap simultaneously — for a 100 GB DataFrame that requires 100 GB of
+driver heap (plus Python list overhead, typically 2–5× the raw data size). The default driver
+heap is 1 GB (or whatever `spark.driver.memory` is set to). A driver OOM crash terminates the
+entire application and wastes all executor work already completed. Legitimate uses of
+`collect()` are confined to small bounded result sets: configuration lookups, distinct values
+of a low-cardinality column, or the output of an aggregation with known small output.
+
+**How to fix**
+
+```python
+# Wrong: unbounded collect — driver OOM for large DataFrames
+rows = df.join(other, "id").collect()
+
+# Right option 1: add limit() for bounded samples
+rows = df.join(other, "id").limit(1000).collect()
+
+# Right option 2: write to storage instead of collecting to driver
+df.join(other, "id").write.mode("overwrite").parquet("output/")
+
+# Right option 3: use first()/take() for single rows or small samples
+first_row = df.first()
+sample = df.take(10)
+
+# Legitimate collect() patterns (small known-bounded results):
+config_values = spark.table("config").collect()       # small reference table
+distinct_dates = df.select("date").distinct().collect()  # O(dates), not O(rows)
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.driver.maxResultSize` | Hard limit on total collect() result size (default 1 GB); raise with caution |
+
+**Related rules**
+
+- **SPL-D09-004** — Row-by-row iteration; often co-occurs with collect()
+- **SPL-D09-006** — toPandas() on large DataFrame; identical driver-OOM risk via pandas path
+- **SPL-D01-003** — Driver memory not configured; undersized driver heap makes this risk acute
+
+---
+
+### SPL-D09-006 — .toPandas() on Potentially Large DataFrame
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | CRITICAL |
+| **Effort** | Minor code change |
+| **Impact** | Driver OOM proportional to total dataset size; entire data in one process |
+
+**Description**
+
+`.toPandas()` is called without a preceding `filter()`, `where()`, or `limit()`. Like
+`collect()`, `toPandas()` transfers the entire DataFrame to the driver — but also incurs
+additional pandas object-creation overhead on top of the collection cost.
+
+**What it detects**
+
+A `.toPandas()` call where no `filter()`, `where()`, or `limit()` appears in the same method
+chain or within 3 preceding lines.
+
+```python
+# Triggers SPL-D09-006
+pdf = df.join(other, "id").toPandas()   # entire join result to driver as pandas DataFrame
+```
+
+**Why it matters**
+
+`toPandas()` is equivalent to `collect()` followed by `pandas.DataFrame(rows)`. Every row
+crosses the network from executors to the driver, where it is assembled into a pandas
+`DataFrame`. The pandas representation has significantly higher memory overhead than raw data:
+each Python string is a separate heap object; numeric columns require boxing when null values
+are present. A 10 GB Spark DataFrame can require 30–50 GB of driver heap after `toPandas()`.
+For visualization or reporting use cases, the correct pattern is to aggregate the data
+distributed first (summarize, sample, or limit) and call `toPandas()` only on the small result.
+
+**How to fix**
+
+```python
+# Wrong: entire DataFrame to driver memory
+pdf = df.join(other, "id").toPandas()
+
+# Right option 1: limit before collecting for visualization/reporting
+pdf = df.join(other, "id").limit(50_000).toPandas()
+
+# Right option 2: aggregate first, then collect the small summary
+pdf = (
+    df.join(other, "id")
+    .groupBy("category")
+    .agg({"revenue": "sum", "orders": "count"})
+    .toPandas()                  # small aggregated result; safe to collect
+)
+
+# Right option 3: for full dataset processing, use pyspark.pandas (Koalas API)
+import pyspark.pandas as ps
+psdf = ps.read_parquet("path/")  # distributed pandas-like API; no driver collection
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.execution.arrow.pyspark.enabled` | `true` — enables Arrow-based `toPandas()`, which is 10× faster and uses less memory |
+
+**Related rules**
+
+- **SPL-D09-005** — collect() without prior limit; same root cause, different method
+- **SPL-D01-003** — Driver memory not configured; undersized driver heap makes toPandas() risk acute
+
+---
+
+### SPL-D09-007 — .count() Used for Emptiness Check
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Full table scan to answer a yes/no question; O(N) instead of O(1) |
+
+**Description**
+
+`df.count()` is compared to `0` to check whether a DataFrame is empty. `count()` scans every
+row in every partition to return a count — an O(N) distributed operation — when a single-row
+short-circuit check is all that is needed.
+
+**What it detects**
+
+A `count()` call whose result is compared to `0` (e.g., `df.count() == 0`,
+`df.count() > 0`, `df.count() != 0`).
+
+```python
+# Triggers SPL-D09-007
+if df.count() == 0:
+    raise ValueError("No data found for the given date range")
+
+if df.count() > 0:
+    df.write.mode("overwrite").parquet("output/")
+```
+
+**Why it matters**
+
+`count()` schedules a full distributed job across all executors: each executor counts its
+partition's rows, then the driver sums all partial counts. For a 1 billion-row DataFrame this
+takes tens of seconds. `df.isEmpty` (Spark 3.3+) or `df.limit(1).count() == 0` reads at most
+one row per partition (with `limit(1)`) and short-circuits as soon as any non-empty partition
+is found — O(1) in the best case. The performance difference is especially significant when the
+emptiness check is in a frequently-executed code path or a streaming micro-batch.
+
+**How to fix**
+
+```python
+# Wrong: full table scan to answer yes/no
+if df.count() == 0:
+    raise ValueError("No data found")
+
+# Right option 1: df.isEmpty (Spark 3.3+) — short-circuits on first row
+if df.isEmpty:
+    raise ValueError("No data found")
+
+# Right option 2: df.limit(1).count() — reads at most 1 row; works in all Spark 3.x
+if df.limit(1).count() == 0:
+    raise ValueError("No data found")
+
+# For existence check with a filter:
+if df.filter("status = 'error'").isEmpty:
+    logger.info("No errors found")
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-005** — collect() without limit; both involve triggering expensive actions for simple checks
+- **SPL-D11-003** — No metrics logging; `count()` for logging row counts is a legitimate use of count()
+
+---
+
+### SPL-D09-008 — .show() in Production Code
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Wasted query execution; output lost in production log redirection |
+
+**Description**
+
+`df.show()` is called in code that is not inside a test or notebook. In production pipelines,
+`show()` triggers a materialisation, collects rows to the driver, and prints them to `stdout` —
+where the output is typically swallowed by log aggregators.
+
+**What it detects**
+
+Any `.show()` call.
+
+```python
+# Triggers SPL-D09-008
+df.groupBy("status").count().show()
+df.show(100, truncate=False)
+```
+
+**Why it matters**
+
+`df.show(n)` is equivalent to `df.limit(n).collect()` plus a formatted print to `stdout`. In
+production, `stdout` is typically redirected to a log file or a log aggregation system (e.g.,
+CloudWatch, Stackdriver) where tables formatted with box-drawing characters are unreadable. The
+compute cost of the underlying `collect()` is real — it triggers a complete upstream query
+execution. `show()` in a loop or in a frequently-called function multiplies this cost. The
+correct pattern for production observability is structured logging with `logger.info()` after a
+bounded `collect()`.
+
+**How to fix**
+
+```python
+# Wrong: stdout output lost in production; wasted query execution
+df.groupBy("status").count().show()
+
+# Right: structured logging after bounded collect
+result = df.groupBy("status").count()
+logger.info("Status distribution: %s", result.collect())
+
+# Or use df.first() for a single-row sanity check:
+logger.debug("Sample row: %s", df.first())
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-009** — explain()/printSchema() in production; the same debugging-in-production anti-pattern
+- **SPL-D11-003** — No metrics logging; `show()` is sometimes a proxy for missing structured logging
+
+---
+
+### SPL-D09-009 — .explain() or .printSchema() in Production Code
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Debugging output in production logs; extra driver analysis overhead |
+
+**Description**
+
+`df.explain()` or `df.printSchema()` is called. These are debugging tools that print query
+plan or schema information to `stdout`. In production their output is lost in log files, and
+`explain()` adds unnecessary plan-analysis work on the driver.
+
+**What it detects**
+
+Any `.explain()` or `.printSchema()` call.
+
+```python
+# Triggers SPL-D09-009
+df.join(other, "id").explain(True)
+df.printSchema()
+```
+
+**Why it matters**
+
+`df.explain()` forces Catalyst to fully analyze and optimize the query plan (triggering analysis
+that would not otherwise happen until an action), then serializes the plan to a string and
+prints it to `stdout`. In production this is: (1) extra driver-side CPU for plan analysis,
+(2) unstructured output in log files where it is invisible or confusing, and (3) a sign that
+debugging code was not cleaned up before deployment. `df.printSchema()` similarly emits schema
+information that is only useful during development. If query plan debugging is needed in
+production (e.g., for automated regression detection), capture the output via the JVM API and
+log it at `DEBUG` level.
+
+**How to fix**
+
+```python
+# Wrong: debug output in production pipeline
+df.join(other, "id").explain(True)
+df.printSchema()
+
+# Right: remove entirely before production deployment
+# Or, if plan validation in production is intentional:
+import logging
+logger = logging.getLogger(__name__)
+plan_str = df._jdf.queryExecution().explainString("formatted")
+logger.debug("Query plan: %s", plan_str)
+
+# For automated plan quality checks in tests (not production):
+def test_uses_broadcast_join(df, other):
+    result = df.join(broadcast(other), "id")
+    plan = result._jdf.queryExecution().explainString("formatted")
+    assert "BroadcastHashJoin" in plan
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-008** — show() in production; same debugging-in-production category
+- **SPL-D11-001** — No explain() for plan validation in test file; `explain()` belongs in tests, not production
+
+---
+
+### SPL-D09-010 — .rdd Conversion Dropping Out of DataFrame API
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Columnar→row deserialization; disables Catalyst and Tungsten optimizations |
+
+**Description**
+
+`.rdd` is accessed on a DataFrame, converting it to an RDD of `Row` objects. This forces full
+deserialization of the columnar binary format into Python `Row` objects, bypassing Catalyst's
+query optimization and Tungsten's whole-stage code generation.
+
+**What it detects**
+
+Any access to `.rdd` on a DataFrame (detected as a `.rdd` attribute access).
+
+```python
+# Triggers SPL-D09-010
+result = df.rdd.map(lambda r: (r["id"], r["val"] * 2)).toDF()
+counts = df.rdd.flatMap(lambda r: r["tags"]).countByValue()
+```
+
+**Why it matters**
+
+Spark DataFrames keep data in Tungsten's off-heap binary columnar format throughout their
+lifecycle, enabling JIT-compiled operators, SIMD-vectorized aggregations, and Catalyst
+expression code generation — all without any Python involvement. Accessing `.rdd` forces a
+full deserialization pass: every partition is converted from Tungsten binary rows to Python
+`Row` objects (or to JVM `InternalRow` objects for the Java/Scala RDD path). This conversion
+costs CPU, memory, and completely bypasses all Catalyst optimizations applied to the downstream
+RDD operations. The resulting RDD runs at JVM-generic-object speed rather than Tungsten-optimized
+speed, typically 3–10× slower for CPU-bound operations.
+
+**How to fix**
+
+```python
+# Wrong: forces Tungsten→Row deserialization; exits optimized execution path
+result = df.rdd.map(lambda r: (r["id"], r["val"] * 2)).toDF()
+
+# Right: native DataFrame expression — stays in Tungsten binary format
+result = df.select(col("id"), (col("val") * 2).alias("val"))
+
+# For complex logic that genuinely requires per-row Python processing:
+# Use mapInPandas (processes whole partitions as DataFrames via Arrow)
+def transform(iterator):
+    for pdf in iterator:
+        pdf["val"] = pdf["val"] * 2
+        yield pdf
+result = df.mapInPandas(transform, schema=df.schema)
+
+# For UDF-like transformations: use @pandas_udf for vectorized processing
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-001** — Row-at-a-time UDF; `.rdd.map(lambda)` is essentially a manual UDF without the `@udf` wrapper
+- **SPL-D10-001** — UDF blocks predicate pushdown; `.rdd` access has the same Catalyst boundary effect
+
+---
+
+### SPL-D09-011 — pandas_udf Without Type Annotations
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | INFO |
+| **Effort** | Minor code change |
+| **Impact** | Potential type inference errors; deprecated legacy API usage |
+
+**Description**
+
+A `@pandas_udf`-decorated function lacks Python type annotations on its parameters and/or
+return type. Spark 3.0+ uses type hints to determine the vectorization mode; without them
+Spark falls back to legacy behavior that may not vectorize correctly.
+
+**What it detects**
+
+A `@pandas_udf` function whose parameters lack `pd.Series` / `pd.DataFrame` type annotations.
+
+```python
+# Triggers SPL-D09-011 — no type annotations
+@pandas_udf(returnType=DoubleType())
+def my_udf(col):
+    return col * 2
+```
+
+**Why it matters**
+
+Spark 3.0 introduced the type-annotation-based `@pandas_udf` API as the recommended style,
+replacing the legacy `pandas_udf(f, returnType, functionType)` three-argument form. Without
+type hints, Spark uses the legacy `functionType` inference logic — which, for ambiguous cases,
+may select the wrong execution mode (`SCALAR` vs `SCALAR_ITER` vs `GROUPED_MAP`), causing
+incorrect output or a runtime error. Type annotations also serve as documentation, making the
+function's expected input/output types explicit for both humans and static type checkers.
+
+**How to fix**
+
+```python
+import pandas as pd
+from pyspark.sql.functions import pandas_udf
+
+# Wrong: no type annotations — legacy API; may infer wrong execution mode
+@pandas_udf(returnType=DoubleType())
+def my_udf(col):
+    return col * 2
+
+# Right: explicit pd.Series type hints — unambiguous vectorization mode
+@pandas_udf("double")
+def my_udf(col: pd.Series) -> pd.Series:
+    return col * 2
+
+# For multi-column pandas UDFs:
+@pandas_udf("double")
+def weighted_avg(values: pd.Series, weights: pd.Series) -> pd.Series:
+    return values * weights / weights.sum()
+```
+
+**Config options**
+
+| Spark Config | Notes |
+|---|---|
+| `spark.sql.execution.arrow.pyspark.enabled` | `true` — required for Arrow-based pandas UDF serialization |
+
+**Related rules**
+
+- **SPL-D09-001** — Row-at-a-time UDF; `@pandas_udf` is the recommended replacement
+- **SPL-D09-012** — Nested UDF calls; type-annotated pandas UDFs also need clean composition
+
+---
+
+### SPL-D09-012 — Nested UDF Calls
+
+| | |
+|---|---|
+| **Dimension** | D09 UDF and Code Patterns |
+| **Severity** | WARNING |
+| **Effort** | Minor code change |
+| **Impact** | Confusing code; inner `@udf` is ignored by Spark planner when called inside outer UDF |
+
+**Description**
+
+A `@udf`-decorated function calls another `@udf`-decorated function directly in its body. The
+inner UDF's `@udf` decorator is bypassed when called from inside a UDF — Spark executes it as
+a plain Python function — creating misleading code that appears to register two Spark UDFs but
+effectively only registers one.
+
+**What it detects**
+
+A `@udf` function body that contains a call to another function that is also decorated with
+`@udf`.
+
+```python
+# Triggers SPL-D09-012
+@udf(returnType=StringType())
+def inner(s):
+    return s.strip()
+
+@udf(returnType=StringType())
+def outer(s):
+    return inner(s).lower()   # inner's @udf is bypassed here
+```
+
+**Why it matters**
+
+When Spark executes a Python UDF, it sends the function object to Python worker processes via
+serialization. Inside the worker, the outer UDF is called as a regular Python function. When
+`outer` calls `inner(s)`, Python sees `inner` as a `UserDefinedFunction` object (the wrapper
+created by `@udf`) rather than the raw Python function. The `UserDefinedFunction.__call__`
+method is designed to be called from the JVM side — it expects Spark `Column` objects, not
+raw Python values — and calling it with a plain string produces confusing type errors or
+silently incorrect results. The correct pattern is for helper functions called inside UDFs to
+be plain Python functions without the `@udf` decorator.
+
+**How to fix**
+
+```python
+# Wrong: inner's @udf is bypassed inside outer's execution; confusing behavior
+@udf(returnType=StringType())
+def inner(s):
+    return s.strip()
+
+@udf(returnType=StringType())
+def outer(s):
+    return inner(s).lower()
+
+# Right: inner is a plain Python helper (no @udf); outer is the only Spark UDF
+def _strip(s: str) -> str:
+    """Plain Python helper — called inside the UDF, not registered as a Spark UDF."""
+    return s.strip()
+
+@udf(returnType=StringType())
+def outer(s):
+    return _strip(s).lower()
+
+# Better: replace both with native functions if possible
+from pyspark.sql.functions import lower, trim
+df.withColumn("result", lower(trim(col("s"))))
+```
+
+**Config options**
+
+No Spark configuration affects this rule.
+
+**Related rules**
+
+- **SPL-D09-001** — Row-at-a-time UDF; nested UDFs compound the serialization overhead
+- **SPL-D09-002** — UDF replaceable with native function; check if the nested logic maps to Spark SQL builtins
