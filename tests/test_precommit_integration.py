@@ -793,7 +793,7 @@ class TestOutputFormat:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         assert (
-            "SPL-D03-001" in result.stdout
+            "SPL-D03-001" in strip_ansi(result.stdout)
         ), f"Rule ID not found in output.\nstdout: {result.stdout[:500]}"
 
     def test_severity_label_present_in_output(self, tmp_path: Path) -> None:
@@ -802,7 +802,7 @@ class TestOutputFormat:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert "CRITICAL" in result.stdout
+        assert "CRITICAL" in strip_ansi(result.stdout)
 
     def test_no_python_traceback_in_clean_run(self, tmp_path: Path) -> None:
         """A normal scan must never print a Python traceback to stdout."""
@@ -811,7 +811,7 @@ class TestOutputFormat:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         assert (
-            "Traceback (most recent call last)" not in result.stdout
+            "Traceback (most recent call last)" not in strip_ansi(result.stdout)
         ), "A Python traceback leaked into the hook output."
 
 
