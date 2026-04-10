@@ -7,6 +7,7 @@
 [![License: Sunil Pradhan Sharma](https://img.shields.io/badge/license-Sunil%20Pradhan%20Sharma-green.svg)](https://www.linkedin.com/in/sunil-p-sharma/)
 [![pre-commit: enabled](https://img.shields.io/badge/pre--commit-enabled-F59E0B?logo=pre-commit&logoColor=white)](https://pre-commit.com)
 [![code style: black](https://img.shields.io/badge/code%20style-black-000000)](https://github.com/psf/black)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://sunilpradhansharma.github.io/spark-perf-lint/)
 
 > **Enterprise-grade Apache Spark performance linter** — catches anti-patterns before they reach production, explains *why* they hurt, and hands you a concrete fix.
 
@@ -29,6 +30,8 @@ Each finding carries a six-layer structure: what was found, why it hurts, a conc
 ---
 
 ## Quick Start
+
+📖 **Full documentation:** [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/)
 
 ### a. Pre-commit hook (catches issues before every commit)
 
@@ -778,6 +781,12 @@ Contributions are welcome — whether that is a new rule, a bug fix, an improvem
 - [*Learning Spark, 2nd Edition* — Damji et al. (O'Reilly, 2020)](https://www.oreilly.com/library/view/learning-spark-2nd/9781492050032/)
 - [Databricks — Best Practices for AQE](https://www.databricks.com/blog/2020/05/29/adaptive-query-execution-speeding-up-spark-sql-at-runtime.html)
 - [High Performance Spark — Karau & Warren (O'Reilly, 2017)](https://www.oreilly.com/library/view/high-performance-spark/9781491943199/)
+
+---
+
+## Documentation
+
+Visit the full documentation site at [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/) for detailed guides on rules, configuration, pre-commit setup, and architecture.
 
 ---
 
