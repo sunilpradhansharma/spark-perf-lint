@@ -1,0 +1,1689 @@
+# =============================================================================
+# spark_configs.yaml — spark-perf-lint Spark configuration reference
+# =============================================================================
+#
+# Structure
+# ---------
+# Top-level key `sections` is a list of configuration groups.  Each group has:
+#
+#   id          Short identifier, e.g. EXECUTOR
+#   name        Human-readable group title
+#   configs     List of configuration entries (see fields below)
+#
+# Fields per config entry
+# -----------------------
+#   key               Full Spark configuration key string
+#   default_value     Spark's built-in default (string; "null" when unset)
+#   recommended_value Single best-practice value for most production workloads
+#                     ("workload_dependent" when no single value is universal)
+#   recommended_range Low–high guidance range; null when a single value applies
+#   description       What this config controls and why it matters
+#   impact_if_wrong   Observed failure mode or performance penalty when misconfigured
+#   dimension         Linter rule dimension most affected (D01–D11)
+#   related_configs   List of config keys that should be tuned together
+#   spark_version     Minimum Spark version that supports this config (string "X.Y")
+#
+# Coverage — 12 sections, 77 configuration parameters
+# -------------------------------------------------------
+#  1. EXECUTOR          (10)  Memory, cores, heap fractions, off-heap
+#  2. DRIVER            ( 5)  Driver memory, result size, cores
+#  3. DYNAMIC_ALLOC     ( 6)  Autoscaling min/max/timeout
+#  4. SERIALIZATION     ( 5)  Kryo vs Java, registration, buffer
+#  5. COMPRESSION       ( 5)  I/O codec, shuffle/broadcast/RDD compress
+#  6. NETWORK           ( 6)  Timeouts, in-flight limits, retries
+#  7. SPECULATION       ( 4)  Straggler detection thresholds
+#  8. SHUFFLE           ( 8)  Partition count, buffers, bypass, service
+#  9. JOIN              ( 5)  Broadcast threshold, timeout, strategy flags
+# 10. AQE               ( 9)  Adaptive query execution sub-settings
+# 11. IO                ( 8)  File splits, Parquet/ORC codecs, S3 tuning
+# 12. SQL_CATALYST      ( 8)  CBO, codegen, Arrow, optimizer iterations
+# =============================================================================
+
+sections:
+
+  # ===========================================================================
+  # 1. EXECUTOR
+  # ===========================================================================
+
+  - id: EXECUTOR
+    name: "Executor Memory and CPU"
+    configs:
+
+      - key: spark.executor.memory
+        default_value: "1g"
+        recommended_value: "workload_dependent"
+        recommended_range: "4g – 64g"
+        description: |
+          JVM heap allocated to each executor process.  Covers Spark managed
+          memory (execution + storage) and user memory.  Does not include
+          spark.executor.memoryOverhead (off-JVM overhead for native libs,
+          Python workers, and thread stacks).
+        impact_if_wrong: |
+          Too low: java.lang.OutOfMemoryError during shuffle, aggregation, or
+          broadcast deserialization; excessive GC pauses; spill to disk.
+          Too high: YARN/Kubernetes container kills if total exceeds node RAM;
+          wasted reserved memory on lightly loaded clusters.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.executor.memoryOverhead
+          - spark.memory.fraction
+          - spark.memory.storageFraction
+        spark_version: "1.0"
+
+      - key: spark.executor.cores
+        default_value: "1"
+        recommended_value: "4"
+        recommended_range: "2 – 5"
+        description: |
+          Number of CPU cores allocated to each executor.  Controls the
+          number of concurrent tasks per executor.  Higher values improve
+          resource utilization but increase memory pressure per executor
+          because all cores compete for the same JVM heap.
+        impact_if_wrong: |
+          Too low (1): excessive JVM overhead — one JVM per core; poor
+          broadcast cache reuse across tasks on the same node.
+          Too high (>5): execution memory per concurrent task shrinks,
+          causing shuffle spills; long GC pauses from large heaps.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.executor.memory
+          - spark.task.cpus
+        spark_version: "1.0"
+
+      - key: spark.executor.memoryOverhead
+        default_value: "max(384m, executor.memory * 0.10)"
+        recommended_value: "workload_dependent"
+        recommended_range: "512m – 8g"
+        description: |
+          Memory allocated outside the JVM heap per executor.  Used by
+          Python worker processes (PySpark UDFs), native library allocations
+          (Arrow, TensorFlow), JVM thread stacks, and OS page cache.
+          Expressed in MiB; YARN adds this on top of spark.executor.memory
+          to compute the total container size.
+        impact_if_wrong: |
+          Too low with PySpark UDFs: container killed by YARN/k8s OOM killer
+          with "Exit code: 137"; the OOM occurs outside the JVM so heap tuning
+          has no effect.  Always increase for Python-heavy workloads.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.executor.memory
+          - spark.memory.offHeap.size
+        spark_version: "1.3"
+
+      - key: spark.executor.instances
+        default_value: "2"
+        recommended_value: "workload_dependent"
+        recommended_range: "2 – 10000"
+        description: |
+          Static number of executors to request from the cluster manager.
+          Only meaningful when spark.dynamicAllocation.enabled = false.
+          Set to executor_count = ceil(total_cores_needed / cores_per_executor).
+        impact_if_wrong: |
+          Too low: under-utilized cluster; data parallelism limited; long
+          stage durations.  Use dynamicAllocation instead for variable workloads.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.enabled
+          - spark.dynamicAllocation.maxExecutors
+        spark_version: "1.0"
+
+      - key: spark.executor.extraJavaOptions
+        default_value: "null"
+        recommended_value: "-XX:+UseG1GC -XX:G1HeapRegionSize=16m -XX:InitiatingHeapOccupancyPercent=35"
+        recommended_range: null
+        description: |
+          JVM flags passed to executor JVM processes.  Used to tune the garbage
+          collector, enable JVM flight recorder, and set GC logging for
+          post-mortem analysis.  G1GC is recommended over the default ParallelGC
+          for executors with heaps > 8 GB.
+        impact_if_wrong: |
+          Default ParallelGC produces long stop-the-world pauses for heaps > 8 GB;
+          stages appear to stall for several seconds.  Missing GC logging makes
+          GC-related OOMs difficult to diagnose post-mortem.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.executor.memory
+          - spark.driver.extraJavaOptions
+        spark_version: "1.0"
+
+      - key: spark.memory.fraction
+        default_value: "0.6"
+        recommended_value: "0.6"
+        recommended_range: "0.5 – 0.75"
+        description: |
+          Fraction of JVM heap reserved for Spark managed memory (execution +
+          storage).  The remaining (1 - fraction) is user memory for internal
+          Spark data structures and user code allocations.  Execution and
+          storage share the managed pool dynamically.
+        impact_if_wrong: |
+          Too high (> 0.8): user memory is starved; Spark internal structures
+          cause OOM in user memory region.
+          Too low (< 0.5): execution memory insufficient for large sorts/joins;
+          excessive spill to disk.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.memory.storageFraction
+          - spark.executor.memory
+        spark_version: "1.6"
+
+      - key: spark.memory.storageFraction
+        default_value: "0.5"
+        recommended_value: "workload_dependent"
+        recommended_range: "0.2 – 0.7"
+        description: |
+          Fraction of spark.memory.fraction reserved as a lower bound for
+          storage (cache) memory.  Execution memory can borrow from storage
+          up to this boundary; storage can reclaim by evicting cached partitions.
+          Increase when the job caches large DataFrames; decrease when shuffle
+          and aggregation dominate.
+        impact_if_wrong: |
+          Too high on shuffle-heavy jobs: execution memory is squeezed causing
+          shuffle spill even though storage memory is underutilized.
+          Too low on cache-heavy jobs: cached partitions are evicted frequently,
+          forcing expensive recomputation.
+        dimension: D06_CACHING
+        related_configs:
+          - spark.memory.fraction
+          - spark.memory.offHeap.enabled
+        spark_version: "1.6"
+
+      - key: spark.memory.offHeap.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables Tungsten off-heap memory management for cached DataFrames and
+          certain execution operators.  Off-heap memory is allocated via
+          sun.misc.Unsafe outside the JVM heap, eliminating GC pressure from
+          cached binary data.  Requires spark.memory.offHeap.size > 0.
+        impact_if_wrong: |
+          Left false on GC-heavy workloads: executor spends > 20 % of time in
+          full GC pauses caused by large heap-resident caches; stages appear
+          slow despite adequate CPU.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.memory.offHeap.size
+          - spark.memory.fraction
+        spark_version: "2.0"
+
+      - key: spark.memory.offHeap.size
+        default_value: "0"
+        recommended_value: "workload_dependent"
+        recommended_range: "4g – 32g"
+        description: |
+          Size of off-heap memory pool per executor in bytes.  Only effective
+          when spark.memory.offHeap.enabled = true.  Set to the expected size
+          of cached data per executor: total_cache_gb / executor_count * 1.25.
+          Off-heap competes with OS page cache — leave at least 10 % of node
+          RAM for the OS.
+        impact_if_wrong: |
+          Set too small: off-heap pool exhausted; Spark falls back to on-heap
+          allocation, defeating the purpose and causing GC pressure.
+          Set too large: native OOM kills the container; no heap dump generated.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.memory.offHeap.enabled
+          - spark.executor.memoryOverhead
+        spark_version: "2.0"
+
+      - key: spark.executor.heartbeatInterval
+        default_value: "10s"
+        recommended_value: "10s"
+        recommended_range: "5s – 30s"
+        description: |
+          How often each executor sends a heartbeat to the driver to signal it
+          is alive and report task metrics (shuffle bytes, GC time, etc.).  Must
+          be significantly less than spark.network.timeout; Spark enforces a
+          warning when heartbeatInterval >= network.timeout / 3.
+        impact_if_wrong: |
+          Too large: driver cannot distinguish a slow executor from a dead one;
+          tasks appear to stall before the network timeout fires.  Too small:
+          driver receives excessive heartbeat RPCs on large clusters (> 1000
+          executors), increasing driver CPU and network overhead.
+        dimension: D11_MONITORING
+        related_configs:
+          - spark.network.timeout
+          - spark.storage.blockManagerSlaveTimeoutMs
+        spark_version: "1.1"
+
+  # ===========================================================================
+  # 2. DRIVER
+  # ===========================================================================
+
+  - id: DRIVER
+    name: "Driver Memory and Result Handling"
+    configs:
+
+      - key: spark.driver.memory
+        default_value: "1g"
+        recommended_value: "workload_dependent"
+        recommended_range: "4g – 32g"
+        description: |
+          JVM heap for the driver process.  The driver holds: broadcast variable
+          serialized copies before distribution, collect() results, query plan
+          trees, accumulators, and the DAG scheduler state.  Increase for jobs
+          that collect large results or broadcast large lookup tables.
+        impact_if_wrong: |
+          Too low: driver OOM when broadcasting large tables (serialization
+          happens in driver heap), or when collect()/toPandas() returns large
+          result sets.  spark.driver.maxResultSize is the secondary guard.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.driver.maxResultSize
+          - spark.sql.autoBroadcastJoinThreshold
+          - spark.driver.memoryOverhead
+        spark_version: "1.0"
+
+      - key: spark.driver.cores
+        default_value: "1"
+        recommended_value: "2"
+        recommended_range: "1 – 8"
+        description: |
+          CPU cores allocated to the driver process.  The driver runs the
+          DAG scheduler, task dispatcher, accumulators, UI, and all user code
+          outside of executor tasks.  Increase when the driver is a bottleneck
+          (observable via Spark UI event timeline showing gaps between stages).
+        impact_if_wrong: |
+          Too low (1 core) on large clusters: task dispatching becomes the
+          bottleneck; executor cores sit idle waiting for the driver to submit
+          new tasks.  Observable as a "scheduling delay" spike in the Spark UI.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.driver.memory
+        spark_version: "1.3"
+
+      - key: spark.driver.memoryOverhead
+        default_value: "max(384m, driver.memory * 0.10)"
+        recommended_value: "workload_dependent"
+        recommended_range: "512m – 4g"
+        description: |
+          Off-heap memory for the driver container (Python process memory for
+          PySpark driver code, JVM native allocations, thread stacks).  In
+          cluster deploy mode, the driver runs in its own container and this
+          overhead is added to spark.driver.memory for container sizing.
+        impact_if_wrong: |
+          Too low when running PySpark in cluster mode: the Python driver process
+          is killed by the container manager OOM killer (exit code 137) because
+          Python memory is outside the JVM heap.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.driver.memory
+          - spark.executor.memoryOverhead
+        spark_version: "1.3"
+
+      - key: spark.driver.maxResultSize
+        default_value: "1g"
+        recommended_value: "2g"
+        recommended_range: "1g – 8g"
+        description: |
+          Maximum total size of serialized results from all partitions in a
+          collect() or similar action that returns data to the driver.  If the
+          total result exceeds this limit, the job fails with
+          "Exception: Total size of serialized results exceeds...".
+          Acts as a guard against OOM from unbounded collect() calls.
+        impact_if_wrong: |
+          Too low: legitimate collect() calls on moderately-sized aggregated
+          results fail with a confusing serialization size error.
+          Set to 0 to disable the guard entirely — risky for production jobs
+          that might accidentally collect large DataFrames.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.driver.memory
+          - spark.sql.autoBroadcastJoinThreshold
+        spark_version: "1.2"
+
+      - key: spark.driver.extraJavaOptions
+        default_value: "null"
+        recommended_value: "-XX:+UseG1GC -XX:G1HeapRegionSize=16m"
+        recommended_range: null
+        description: |
+          JVM flags passed to the driver process.  Use for GC tuning, JFR
+          profiling, enabling GC logging, or setting the timezone.  The driver
+          JVM holds broadcast variables and collect() results — G1GC reduces
+          stop-the-world pauses for large heap sizes.
+        impact_if_wrong: |
+          Default GC on driver heaps > 8 GB produces long pauses during
+          broadcast serialization; these appear as stage gaps in the event
+          timeline rather than executor GC events.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.driver.memory
+          - spark.executor.extraJavaOptions
+        spark_version: "1.0"
+
+  # ===========================================================================
+  # 3. DYNAMIC ALLOCATION
+  # ===========================================================================
+
+  - id: DYNAMIC_ALLOC
+    name: "Dynamic Executor Allocation"
+    configs:
+
+      - key: spark.dynamicAllocation.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables the cluster manager to add and remove executors dynamically
+          based on workload backlog.  Requires either an external shuffle service
+          (spark.shuffle.service.enabled = true) or spark.dynamicAllocation
+          .shuffleTracking.enabled = true (Spark 3.x).  Essential for shared
+          clusters where resources should be returned when a job is idle.
+        impact_if_wrong: |
+          Left false on a shared cluster: jobs hold executors during I/O waits,
+          planning phases, and Python UDF overhead, wasting cluster resources
+          for other users.  Critical for batch + streaming coexistence.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.minExecutors
+          - spark.dynamicAllocation.maxExecutors
+          - spark.shuffle.service.enabled
+        spark_version: "1.2"
+
+      - key: spark.dynamicAllocation.minExecutors
+        default_value: "0"
+        recommended_value: "1"
+        recommended_range: "0 – 10"
+        description: |
+          Minimum number of executors to keep alive even when the job has no
+          pending tasks.  Setting to 0 allows full scale-down; setting to ≥ 1
+          avoids cold-start latency when a new task arrives after an idle period.
+        impact_if_wrong: |
+          Set to 0 on latency-sensitive jobs: after an idle phase the job must
+          wait for executor startup (~30 s on YARN) before the next stage begins.
+          Set too high: holds idle executors unnecessarily on shared clusters.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.enabled
+          - spark.dynamicAllocation.maxExecutors
+        spark_version: "1.2"
+
+      - key: spark.dynamicAllocation.maxExecutors
+        default_value: "infinity"
+        recommended_value: "workload_dependent"
+        recommended_range: "10 – 2000"
+        description: |
+          Upper bound on the number of executors dynamic allocation will request.
+          Without an explicit ceiling the allocator can consume the entire cluster
+          during peak parallelism, starving other jobs.  Set based on the job's
+          maximum useful parallelism: max_partition_count / cores_per_executor.
+        impact_if_wrong: |
+          Left at infinity on a shared cluster: one job can acquire all cluster
+          resources during peak load, causing other jobs to queue indefinitely.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.enabled
+          - spark.dynamicAllocation.minExecutors
+        spark_version: "1.2"
+
+      - key: spark.dynamicAllocation.initialExecutors
+        default_value: "spark.dynamicAllocation.minExecutors"
+        recommended_value: "workload_dependent"
+        recommended_range: "1 – 50"
+        description: |
+          Number of executors to start with when dynamic allocation is enabled.
+          Defaults to minExecutors.  Setting higher than min reduces the warm-up
+          time for the first stage of latency-sensitive jobs.
+        impact_if_wrong: |
+          Left at min=0: first stage executes on a single executor while the
+          allocator requests more; first-stage duration is disproportionately
+          long, skewing job SLA measurements.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.minExecutors
+          - spark.dynamicAllocation.maxExecutors
+        spark_version: "1.3"
+
+      - key: spark.dynamicAllocation.executorIdleTimeout
+        default_value: "60s"
+        recommended_value: "120s"
+        recommended_range: "30s – 300s"
+        description: |
+          How long a non-cached executor must be idle (no tasks running) before
+          dynamic allocation removes it.  Shorter values reclaim resources faster;
+          longer values reduce the penalty for workloads with intermittent bursts.
+        impact_if_wrong: |
+          Too short (< 30 s): executors released between stages are immediately
+          reclaimed; the next stage must wait for re-allocation, adding latency.
+          Too long: idle executors hold cluster resources unnecessarily between
+          pipeline stages.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.cachedExecutorIdleTimeout
+          - spark.dynamicAllocation.schedulerBacklogTimeout
+        spark_version: "1.2"
+
+      - key: spark.dynamicAllocation.schedulerBacklogTimeout
+        default_value: "1s"
+        recommended_value: "5s"
+        recommended_range: "1s – 30s"
+        description: |
+          How long pending tasks must be backlogged before dynamic allocation
+          requests a new executor.  Short values react quickly to new tasks;
+          long values prevent thrashing when tasks are submitted in rapid bursts
+          that are quickly satisfied by existing executors.
+        impact_if_wrong: |
+          Too short (1 s): allocator makes many small executor requests that
+          YARN satisfies slowly; total executor count oscillates and resource
+          manager overhead increases.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.dynamicAllocation.enabled
+          - spark.dynamicAllocation.executorIdleTimeout
+        spark_version: "1.2"
+
+  # ===========================================================================
+  # 4. SERIALIZATION
+  # ===========================================================================
+
+  - id: SERIALIZATION
+    name: "Serialization Library"
+    configs:
+
+      - key: spark.serializer
+        default_value: "org.apache.spark.serializer.JavaSerializer"
+        recommended_value: "org.apache.spark.serializer.KryoSerializer"
+        recommended_range: null
+        description: |
+          Serialization library used for shuffle data, broadcast variables, and
+          RDD persistence (not DataFrame internal Tungsten execution).  Kryo is
+          10x faster than Java serialization and produces 3-5x smaller serialized
+          objects, directly reducing shuffle network traffic and GC pressure.
+        impact_if_wrong: |
+          Left as JavaSerializer: every shuffled row is serialized with full
+          Java object reflection; measurable as elevated shuffle write time and
+          larger-than-expected shuffle read bytes in the Spark UI stage metrics.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.kryo.registrationRequired
+          - spark.kryo.classesToRegister
+          - spark.kryoSerializer.buffer.max
+        spark_version: "1.0"
+
+      - key: spark.kryo.registrationRequired
+        default_value: "false"
+        recommended_value: "false"
+        recommended_range: null
+        description: |
+          When true, Kryo throws SparkException for any unregistered class.
+          Recommended false for production (safe fallback to slower serialization
+          for unregistered types).  Set true in test environments to catch
+          missing registrations before production deployment.
+        impact_if_wrong: |
+          Set true without complete class registration: SparkException at runtime
+          for any class not in spark.kryo.classesToRegister, including transitive
+          dependencies from third-party libraries.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.serializer
+          - spark.kryo.classesToRegister
+        spark_version: "1.1"
+
+      - key: spark.kryo.classesToRegister
+        default_value: "null"
+        recommended_value: "workload_dependent"
+        recommended_range: null
+        description: |
+          Comma-separated list of fully qualified class names to pre-register
+          with Kryo.  Registered classes use a compact integer ID instead of
+          the full class name string in serialized output, reducing serialized
+          size by 20-50 % for domain model classes used in RDD operations.
+        impact_if_wrong: |
+          Not set when custom domain classes appear frequently in shuffle data:
+          Kryo includes the full class name string in each serialized object;
+          typically adds 40-200 bytes per object, visible as inflated shuffle
+          read bytes in the Spark UI.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.serializer
+          - spark.kryo.registrationRequired
+        spark_version: "1.1"
+
+      - key: spark.kryoSerializer.buffer.max
+        default_value: "64m"
+        recommended_value: "128m"
+        recommended_range: "64m – 2g"
+        description: |
+          Maximum size of a single Kryo serialization buffer.  Each thread
+          allocates one buffer up to this maximum.  Increase if Kryo throws
+          "buffer overflow" exceptions when serializing large individual objects
+          (e.g. a large array or a single wide row).
+        impact_if_wrong: |
+          Too small: "com.esotericsoftware.kryo.KryoException: Buffer overflow"
+          at runtime when a single object exceeds the buffer limit.  Objects
+          larger than this value cannot be serialized by Kryo.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.serializer
+          - spark.kryoSerializer.buffer
+        spark_version: "1.4"
+
+      - key: spark.kryoSerializer.buffer
+        default_value: "64k"
+        recommended_value: "512k"
+        recommended_range: "64k – 1m"
+        description: |
+          Initial size of the Kryo serialization buffer per thread.  The buffer
+          grows up to spark.kryoSerializer.buffer.max as needed.  A larger initial
+          size reduces buffer resize operations for workloads with consistently
+          large objects, at the cost of slightly higher per-thread memory.
+        impact_if_wrong: |
+          Too small on workloads with large objects: frequent buffer resize
+          allocations add CPU overhead; observable as high serialization time
+          per task in the Spark UI task metrics breakdown.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.kryoSerializer.buffer.max
+          - spark.serializer
+        spark_version: "1.4"
+
+  # ===========================================================================
+  # 5. COMPRESSION
+  # ===========================================================================
+
+  - id: COMPRESSION
+    name: "Compression Codecs"
+    configs:
+
+      - key: spark.io.compression.codec
+        default_value: "lz4"
+        recommended_value: "lz4"
+        recommended_range: "lz4 | snappy | zstd | none"
+        description: |
+          Default compression codec for RDD persistence, shuffle data transfer,
+          and broadcast variables.  Does NOT affect Parquet/ORC file compression
+          (see spark.sql.parquet.compression.codec).  LZ4 minimises CPU overhead
+          on the write path; Zstd provides better ratios at moderate CPU cost.
+        impact_if_wrong: |
+          Set to gzip/zlib: ~10x slower compression on the shuffle write path;
+          every mapper pays the compression cost; measurable as inflated shuffle
+          write time in stage metrics.
+          Set to none: full uncompressed shuffle data transferred over the network;
+          network saturation on wide transformations of large datasets.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.shuffle.compress
+          - spark.broadcast.compress
+          - spark.sql.parquet.compression.codec
+        spark_version: "1.0"
+
+      - key: spark.shuffle.compress
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Whether to compress shuffle output files using spark.io.compression.codec.
+          Compression reduces network transfer volume at the cost of CPU on both
+          writer (mapper) and reader (reducer).  Almost always beneficial with LZ4
+          since network I/O is typically the shuffle bottleneck.
+        impact_if_wrong: |
+          Disabled: uncompressed shuffle files 2-3x larger than compressed; network
+          saturation on wide transformations; shuffle read time dominates stage wall
+          time on network-constrained clusters.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.io.compression.codec
+          - spark.shuffle.spill.compress
+        spark_version: "1.0"
+
+      - key: spark.shuffle.spill.compress
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Whether to compress data spilled to disk during shuffle operations.
+          Spill occurs when execution memory is exhausted during sort or
+          aggregation; compressed spill files reduce disk I/O on merge reads.
+          Uses spark.io.compression.codec.
+        impact_if_wrong: |
+          Disabled: spill files are uncompressed and occupy 2-3x more local disk
+          space; on executors with limited local SSD, uncompressed spills cause
+          disk-full errors mid-stage.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.shuffle.compress
+          - spark.io.compression.codec
+          - spark.local.dir
+        spark_version: "1.0"
+
+      - key: spark.broadcast.compress
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Whether to compress broadcast variables before sending them from the
+          driver to executors.  Reduces driver-to-executor network transfer for
+          broadcast tables and Kryo-serialized data structures.
+        impact_if_wrong: |
+          Disabled for a 500 MB broadcast table: ~1 GB additional network traffic
+          per broadcast (uncompressed table to every executor).  On a 100-executor
+          cluster, this doubles broadcast transfer volume versus compressed.
+        dimension: D03_JOINS
+        related_configs:
+          - spark.io.compression.codec
+          - spark.sql.autoBroadcastJoinThreshold
+        spark_version: "1.0"
+
+      - key: spark.rdd.compress
+        default_value: "false"
+        recommended_value: "false"
+        recommended_range: null
+        description: |
+          Whether to compress RDD partitions when persisting to memory (MEMORY_ONLY,
+          MEMORY_AND_DISK storage levels).  Reduces memory footprint at the cost of
+          CPU for compression/decompression on each cache read.  Not used for
+          DataFrame/Dataset caching — Tungsten handles that format independently.
+        impact_if_wrong: |
+          Enabled on CPU-bound workloads: every cache read incurs decompression
+          overhead; slows cache-heavy iterative algorithms.
+          Disabled on memory-constrained RDD caches: cached RDD partitions consume
+          2-4x more memory than compressed equivalents.
+        dimension: D06_CACHING
+        related_configs:
+          - spark.io.compression.codec
+          - spark.memory.storageFraction
+        spark_version: "1.0"
+
+  # ===========================================================================
+  # 6. NETWORK
+  # ===========================================================================
+
+  - id: NETWORK
+    name: "Network and Timeout Settings"
+    configs:
+
+      - key: spark.network.timeout
+        default_value: "120s"
+        recommended_value: "300s"
+        recommended_range: "120s – 600s"
+        description: |
+          Global timeout for all network interactions between Spark components
+          (driver↔executor RPCs, shuffle fetches, block transfers).  Acts as the
+          catch-all timeout when more specific settings (rpc.askTimeout,
+          spark.storage.blockManagerSlaveTimeoutMs) are not set.  Increase for
+          large clusters, slow shuffle stages, or clusters with transient network
+          issues.
+        impact_if_wrong: |
+          Too low (< 120 s) on GC-heavy executors: an executor pausing for a long
+          full GC is presumed dead; the job fails with "ExecutorLostFailure" even
+          though the executor recovers.  Particularly problematic with large heap
+          executors during cache eviction.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.rpc.askTimeout
+          - spark.executor.heartbeatInterval
+          - spark.storage.blockManagerSlaveTimeoutMs
+        spark_version: "1.2"
+
+      - key: spark.rpc.askTimeout
+        default_value: "spark.network.timeout"
+        recommended_value: "300s"
+        recommended_range: "60s – 600s"
+        description: |
+          Timeout for RPC calls that expect a reply (ask semantics).  Defaults to
+          spark.network.timeout when not set explicitly.  Set explicitly to a
+          shorter value than network.timeout when you want fast failure for RPC
+          calls specifically while allowing longer block transfer timeouts.
+        impact_if_wrong: |
+          Left at the default (tied to network.timeout): a slow executor that
+          delays RPC responses causes the same broad timeout as a network failure;
+          no granular control between RPC and data transfer timeouts.
+        dimension: D01_CLUSTER_CONFIG
+        related_configs:
+          - spark.network.timeout
+          - spark.rpc.lookupTimeout
+        spark_version: "1.4"
+
+      - key: spark.reducer.maxSizeInFlight
+        default_value: "48m"
+        recommended_value: "96m"
+        recommended_range: "48m – 512m"
+        description: |
+          Maximum size of map output fetches in flight from a single reduce
+          task simultaneously.  Controls how much shuffle data a reducer fetches
+          concurrently.  Increasing this reduces the number of fetch round trips,
+          improving throughput on high-latency networks at the cost of higher
+          reducer heap pressure.
+        impact_if_wrong: |
+          Too low on high-throughput clusters: many small fetch requests increase
+          network round-trips; shuffle read time grows linearly with the number
+          of round trips.  Increase when shuffle read bandwidth is the bottleneck.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.reducer.maxReqsInFlight
+          - spark.reducer.maxBlocksInFlightPerAddress
+          - spark.shuffle.io.maxRetries
+        spark_version: "1.4"
+
+      - key: spark.shuffle.io.maxRetries
+        default_value: "3"
+        recommended_value: "10"
+        recommended_range: "3 – 20"
+        description: |
+          Number of times to retry a failed shuffle block fetch before failing
+          the task.  Transient network issues and executor GC pauses can cause
+          temporary fetch failures.  Higher values improve resilience on
+          large clusters with occasional node instability.
+        impact_if_wrong: |
+          Too low (3) on flaky clusters: a single transient network glitch causes
+          FetchFailed exceptions that propagate to stage failure even though the
+          data is available; job must re-run the entire upstream stage.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.shuffle.io.retryWait
+          - spark.network.timeout
+        spark_version: "1.2"
+
+      - key: spark.shuffle.io.retryWait
+        default_value: "5s"
+        recommended_value: "15s"
+        recommended_range: "5s – 60s"
+        description: |
+          Wait time between shuffle fetch retry attempts.  Combined with
+          spark.shuffle.io.maxRetries, this controls the total retry window:
+          maxRetries × retryWait = total wait before failing.  Increase on
+          clusters where executor GC pauses can last longer than 5 seconds.
+        impact_if_wrong: |
+          Too short on GC-heavy executors: retries occur during the GC pause and
+          all fail; the fetch ultimately fails and the upstream stage is re-run.
+          Effective total wait must exceed the longest observed executor GC pause.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.shuffle.io.maxRetries
+          - spark.executor.heartbeatInterval
+        spark_version: "1.2"
+
+      - key: spark.reducer.maxBlocksInFlightPerAddress
+        default_value: "2147483647"
+        recommended_value: "workload_dependent"
+        recommended_range: "16 – 2147483647"
+        description: |
+          Maximum number of shuffle blocks being fetched in parallel from a single
+          host address.  Default is effectively unlimited.  Setting a lower value
+          (e.g. 16–64) prevents a single slow executor from receiving thousands of
+          concurrent connections during a large shuffle, which can overwhelm the
+          executor's network stack and cause fetch timeouts.
+        impact_if_wrong: |
+          Left at default on large clusters with a few slow/hot shuffle nodes:
+          hundreds of reducers open connections simultaneously; the shuffle server
+          on the hot node becomes a bottleneck causing widespread FetchFailed errors.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.reducer.maxSizeInFlight
+          - spark.shuffle.io.maxRetries
+        spark_version: "2.2"
+
+  # ===========================================================================
+  # 7. SPECULATION
+  # ===========================================================================
+
+  - id: SPECULATION
+    name: "Task Speculation (Straggler Mitigation)"
+    configs:
+
+      - key: spark.speculation
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables speculative task execution — launching a duplicate of a slow
+          task on another executor while the original continues.  The result of
+          whichever finishes first is used; the other is cancelled.  Most
+          effective when a small fraction of tasks (< 5 %) are consistently
+          slower than the stage median (hardware faults, hot nodes, GC).
+        impact_if_wrong: |
+          Disabled on clusters with occasional hot nodes: one slow task per stage
+          determines the stage wall time; a 1000-task stage bottlenecked by one
+          3x-slow task wastes 2/3 of the stage duration waiting for the straggler.
+        dimension: D11_MONITORING
+        related_configs:
+          - spark.speculation.multiplier
+          - spark.speculation.quantile
+          - spark.speculation.interval
+        spark_version: "1.0"
+
+      - key: spark.speculation.multiplier
+        default_value: "1.5"
+        recommended_value: "2.0"
+        recommended_range: "1.2 – 5.0"
+        description: |
+          A task is speculated when its running time exceeds the stage median
+          completed task time multiplied by this value.  Lower values speculate
+          more aggressively (more duplicate tasks); higher values are more
+          conservative.  Values below 1.5 can trigger speculation on healthy
+          tasks with slightly above-median run times, wasting resources.
+        impact_if_wrong: |
+          Set too low (< 1.5): healthy tasks slightly above median are speculated;
+          wasted executor CPU on duplicate tasks that would have finished normally.
+          Set too high (> 5): only extreme stragglers are caught; mild skew
+          from hardware degradation is not detected.
+        dimension: D11_MONITORING
+        related_configs:
+          - spark.speculation
+          - spark.speculation.quantile
+        spark_version: "1.0"
+
+      - key: spark.speculation.quantile
+        default_value: "0.75"
+        recommended_value: "0.90"
+        recommended_range: "0.5 – 0.99"
+        description: |
+          Fraction of tasks in a stage that must complete before speculation
+          is considered.  Prevents speculation from triggering on the first
+          few fast tasks while the rest are still running normally.  A higher
+          quantile (e.g. 0.90) ensures the median estimate is stable before
+          speculative tasks are launched.
+        impact_if_wrong: |
+          Too low (< 0.5): speculation fires based on a small sample; the
+          "median" is unstable and fast warm-up tasks skew it downward, causing
+          spurious speculation of normal tasks.
+        dimension: D11_MONITORING
+        related_configs:
+          - spark.speculation
+          - spark.speculation.multiplier
+        spark_version: "1.0"
+
+      - key: spark.speculation.interval
+        default_value: "100ms"
+        recommended_value: "1000ms"
+        recommended_range: "100ms – 10s"
+        description: |
+          How frequently Spark checks whether any tasks should be speculated.
+          Short intervals allow faster detection of stragglers; long intervals
+          reduce driver scheduling overhead on large clusters with many tasks.
+        impact_if_wrong: |
+          Left at 100 ms on a cluster with 10,000 running tasks: the scheduler
+          thread checks speculation 10 times per second; CPU overhead on the
+          driver increases noticeably.  Increase to 1-5 s for large jobs.
+        dimension: D11_MONITORING
+        related_configs:
+          - spark.speculation
+        spark_version: "1.0"
+
+  # ===========================================================================
+  # 8. SHUFFLE
+  # ===========================================================================
+
+  - id: SHUFFLE
+    name: "Shuffle Configuration"
+    configs:
+
+      - key: spark.sql.shuffle.partitions
+        default_value: "200"
+        recommended_value: "workload_dependent"
+        recommended_range: "50 – 2000"
+        description: |
+          Number of output partitions for wide transformations (shuffle operations)
+          in Spark SQL and DataFrames — groupBy, join, distinct, orderBy.  The
+          default of 200 is too low for large datasets (> 100 GB) and too high
+          for small datasets (< 1 GB).  With AQE enabled this is an upper ceiling
+          that AQE coalesces down based on actual partition sizes.
+        impact_if_wrong: |
+          Too low on large data: partitions are too large, causing shuffle spill
+          and OOM; tasks run long and stragglers are common.
+          Too high on small data: many near-empty tasks; excessive scheduling
+          overhead; output consists of thousands of tiny files.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.sql.adaptive.enabled
+          - spark.sql.adaptive.advisoryPartitionSizeInBytes
+          - spark.sql.adaptive.coalescePartitions.enabled
+        spark_version: "1.1"
+
+      - key: spark.shuffle.file.buffer
+        default_value: "32k"
+        recommended_value: "1m"
+        recommended_range: "64k – 4m"
+        description: |
+          Size of the in-memory buffer for each shuffle output file writer.
+          Increasing this reduces the number of disk I/O system calls made by
+          each mapper when writing shuffle files.  Each mapper opens one file
+          per reducer partition, so the total memory used is this value ×
+          number of reduce partitions × concurrent tasks per executor.
+        impact_if_wrong: |
+          Too small (32k default) with many shuffle partitions: each mapper makes
+          thousands of small writes; on HDDs this causes seek-bound I/O; shuffle
+          write time dominates stage duration even when the computation is fast.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.sql.shuffle.partitions
+          - spark.io.compression.codec
+        spark_version: "1.4"
+
+      - key: spark.shuffle.sort.bypassMergeThreshold
+        default_value: "200"
+        recommended_value: "200"
+        recommended_range: "50 – 500"
+        description: |
+          When a shuffle has fewer reduce partitions than this threshold AND
+          no map-side aggregation is needed, Spark bypasses the sort-based
+          shuffle and writes directly to per-partition output files.  The bypass
+          path avoids sorting overhead but opens a separate output file per
+          partition per mapper, causing O(mappers × reducers) file handles.
+        impact_if_wrong: |
+          Set too high with many partitions: the bypass path opens thousands of
+          file handles per task on the executor; the OS fd limit (ulimit -n) may
+          be exceeded, causing "Too many open files" errors.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.sql.shuffle.partitions
+          - spark.shuffle.file.buffer
+        spark_version: "1.1"
+
+      - key: spark.shuffle.service.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables the external shuffle service — a persistent process on each
+          worker node that serves shuffle files on behalf of executors.  Required
+          for dynamic allocation on YARN/Mesos (without it, removing an executor
+          deletes its shuffle files).  Also improves reliability by keeping shuffle
+          data available even after executor failure.
+        impact_if_wrong: |
+          Left false with dynamic allocation: executors cannot be removed while
+          their shuffle output is needed; dynamic allocation cannot scale down
+          mid-job; resources are held for the entire job duration.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.dynamicAllocation.enabled
+          - spark.shuffle.service.port
+        spark_version: "1.2"
+
+      - key: spark.local.dir
+        default_value: "/tmp"
+        recommended_value: "workload_dependent"
+        recommended_range: null
+        description: |
+          Comma-separated list of local directories used for shuffle data and RDD
+          spill.  Using multiple directories across different physical disks
+          distributes I/O across spindles.  Should point to fast local storage
+          (NVMe SSD) rather than network-mounted filesystems.
+        impact_if_wrong: |
+          Left as /tmp on nodes where /tmp is on the root volume: heavy shuffle
+          workloads fill the root partition and crash the executor JVM with
+          "No space left on device".  Point to a dedicated data volume.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.shuffle.spill.compress
+          - spark.memory.fraction
+        spark_version: "1.0"
+
+      - key: spark.shuffle.spill.initialMemoryThreshold
+        default_value: "5m"
+        recommended_value: "64m"
+        recommended_range: "5m – 256m"
+        description: |
+          Initial memory threshold before a shuffle sort/aggregation buffer
+          starts spilling to disk.  The buffer grows up to the full execution
+          memory allocation, but this setting governs when the first spill
+          check fires.  Increasing it reduces premature spills for workloads
+          with large individual partition buffers.
+        impact_if_wrong: |
+          Too low: spill occurs unnecessarily on the first few records when
+          the executor actually has ample memory; excessive small spill files
+          are created and merged, adding I/O overhead.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.memory.fraction
+          - spark.local.dir
+        spark_version: "1.1"
+
+      - key: spark.shuffle.io.numConnectionsPerPeer
+        default_value: "1"
+        recommended_value: "1"
+        recommended_range: "1 – 4"
+        description: |
+          Number of TCP connections opened per target executor for shuffle
+          fetches.  Increasing this can improve throughput on high-bandwidth
+          networks where a single connection cannot saturate available bandwidth,
+          at the cost of higher connection overhead on target executors.
+        impact_if_wrong: |
+          Increased above 2 on clusters with limited network stack resources:
+          the target executor manages many parallel connections; kernel connection
+          tracking overhead increases; may cause connection refused errors under
+          heavy shuffle load.
+        dimension: D02_SHUFFLE
+        related_configs:
+          - spark.reducer.maxSizeInFlight
+          - spark.reducer.maxBlocksInFlightPerAddress
+        spark_version: "1.4"
+
+  # ===========================================================================
+  # 9. JOIN
+  # ===========================================================================
+
+  - id: JOIN
+    name: "Join Strategy Configuration"
+    configs:
+
+      - key: spark.sql.autoBroadcastJoinThreshold
+        default_value: "10485760"
+        recommended_value: "104857600"
+        recommended_range: "-1 – 2147483647"
+        description: |
+          Maximum size in bytes of a table that Spark will automatically broadcast
+          to all executors for a broadcast hash join.  Spark estimates table size
+          from statistics or the file size.  The default of 10 MB is conservative;
+          most production clusters can comfortably broadcast 100–500 MB tables.
+          Set to -1 to disable automatic broadcasting entirely.
+        impact_if_wrong: |
+          Too low: dimension tables that could be broadcast are joined with
+          sort-merge, incurring a full shuffle; 5-50x slower for star-schema
+          queries with small lookup tables.
+          Too high: large tables are broadcast causing driver OOM (serialization
+          happens on the driver before distribution to executors).
+        dimension: D03_JOINS
+        related_configs:
+          - spark.sql.broadcastTimeout
+          - spark.driver.memory
+          - spark.broadcast.compress
+        spark_version: "1.1"
+
+      - key: spark.sql.broadcastTimeout
+        default_value: "300"
+        recommended_value: "600"
+        recommended_range: "60 – 1800"
+        description: |
+          Timeout in seconds for broadcast joins.  If a broadcast cannot be
+          distributed to all executors within this time, the join fails.  Increase
+          for large broadcast tables on slow networks or when executor startup is
+          slow on autoscaled clusters.
+        impact_if_wrong: |
+          Too low with slow cluster startup (e.g. autoscaling adding executors):
+          broadcast fails with "Could not execute broadcast" even though the
+          table size is within threshold; job fails on the first join stage.
+        dimension: D03_JOINS
+        related_configs:
+          - spark.sql.autoBroadcastJoinThreshold
+          - spark.network.timeout
+        spark_version: "1.3"
+
+      - key: spark.sql.join.preferSortMergeJoin
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          When true, Catalyst prefers sort-merge join over shuffle-hash join
+          for large-large equi-joins.  Sort-merge is more memory-predictable
+          and spill-safe; shuffle-hash join builds a hash table per partition
+          and can OOM when partition sizes are variable.  Set false only when
+          you want Catalyst to aggressively use shuffle-hash join.
+        impact_if_wrong: |
+          Set false without adequate partition size controls: shuffle-hash join
+          chosen for large, uneven partitions; hash table build causes OOM on
+          the larger-than-median partitions.  AQE can override this at runtime
+          for suitable partition sizes.
+        dimension: D03_JOINS
+        related_configs:
+          - spark.sql.adaptive.enabled
+          - spark.sql.autoBroadcastJoinThreshold
+        spark_version: "2.0"
+
+      - key: spark.sql.crossJoin.enabled
+        default_value: "false"
+        recommended_value: "false"
+        recommended_range: null
+        description: |
+          Whether to allow Cartesian products (cross joins) that result from
+          SQL queries without a join condition.  In Spark < 3.x, cross joins
+          in SQL require this flag; explicit CROSS JOIN syntax always works.
+          Set true only when a cross join is intentional; leave false to catch
+          accidental Cartesian products that would produce O(N²) output.
+        impact_if_wrong: |
+          Set true on a shared cluster: an accidental cross join from a missing
+          ON clause produces O(N×M) output rows; the job consumes unbounded
+          memory and runs indefinitely.  The default false catches this at
+          plan time with a clear AnalysisException.
+        dimension: D03_JOINS
+        related_configs:
+          - spark.sql.autoBroadcastJoinThreshold
+        spark_version: "2.0"
+
+      - key: spark.sql.sources.bucketing.enabled
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Whether Spark reads and respects bucketing metadata from the Hive
+          metastore when planning joins and groupBy operations.  When true,
+          Spark can skip the Exchange (shuffle) stage for joins on matching
+          bucketed tables.  Set false only to troubleshoot bucketing-related
+          plan issues.
+        impact_if_wrong: |
+          Disabled: bucketed tables lose all pre-shuffle benefits; joins on
+          bucketed tables incur a full sort-merge shuffle as if bucketing did
+          not exist.  Defeats the entire purpose of writing bucketed tables.
+        dimension: D03_JOINS
+        related_configs:
+          - spark.sql.autoBroadcastJoinThreshold
+          - spark.sql.sources.bucketing.maxBuckets
+        spark_version: "2.0"
+
+  # ===========================================================================
+  # 10. AQE
+  # ===========================================================================
+
+  - id: AQE
+    name: "Adaptive Query Execution (AQE)"
+    configs:
+
+      - key: spark.sql.adaptive.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Master switch for Adaptive Query Execution.  When enabled, Spark
+          re-optimises the query plan at runtime using actual shuffle statistics
+          collected after each stage.  Enables: post-shuffle partition coalescing,
+          dynamic join strategy switching, and skew join handling.  Defaults to
+          true in Spark 3.2+; must be explicitly set in Spark 3.0–3.1.
+        impact_if_wrong: |
+          Disabled in Spark 3.x: all three AQE optimisations are unavailable;
+          shuffle partition count is fixed at spark.sql.shuffle.partitions
+          regardless of actual data size; skewed join partitions are not split.
+        dimension: D08_AQE
+        related_configs:
+          - spark.sql.adaptive.coalescePartitions.enabled
+          - spark.sql.adaptive.skewJoin.enabled
+          - spark.sql.adaptive.localShuffleReader.enabled
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.coalescePartitions.enabled
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          When AQE is enabled, automatically coalesce small adjacent post-shuffle
+          partitions to reach the advisory partition size target.  This makes
+          spark.sql.shuffle.partitions a safe upper bound rather than a fixed
+          count — set it high and let AQE coalesce down.
+        impact_if_wrong: |
+          Disabled with a high shuffle.partitions value: small queries produce
+          hundreds of near-empty reduce tasks; excessive task scheduling overhead;
+          output consists of many tiny files.
+        dimension: D08_AQE
+        related_configs:
+          - spark.sql.adaptive.enabled
+          - spark.sql.adaptive.advisoryPartitionSizeInBytes
+          - spark.sql.shuffle.partitions
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.advisoryPartitionSizeInBytes
+        default_value: "67108864"
+        recommended_value: "134217728"
+        recommended_range: "33554432 – 536870912"
+        description: |
+          Target size (in bytes) for post-shuffle partitions when AQE coalescing
+          is active.  AQE merges adjacent shuffle partitions until the merged
+          size reaches this target.  The default is 64 MB; increasing to 128 MB
+          reduces task count and scheduling overhead for large datasets; decreasing
+          improves parallelism for small-to-medium datasets.
+        impact_if_wrong: |
+          Too small (< 32 MB): many small tasks; high scheduling overhead; output
+          files are tiny, increasing S3/HDFS metadata pressure.
+          Too large (> 256 MB): tasks hold too much data; long task duration;
+          straggler sensitivity increases; GC pressure from large partition buffers.
+        dimension: D08_AQE
+        related_configs:
+          - spark.sql.adaptive.coalescePartitions.enabled
+          - spark.sql.shuffle.partitions
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.coalescePartitions.minPartitionSize
+        default_value: "1048576"
+        recommended_value: "1048576"
+        recommended_range: "1048576 – 33554432"
+        description: |
+          Minimum size of a coalesced partition.  AQE will not merge partitions
+          if the result would be smaller than this value, preventing degenerate
+          cases where all data is merged into one partition when total data is
+          very small.
+        impact_if_wrong: |
+          Set too large: prevents AQE from coalescing small-data queries into
+          a manageable number of partitions; many 1-row tasks are created instead
+          of being merged.
+        dimension: D08_AQE
+        related_configs:
+          - spark.sql.adaptive.coalescePartitions.enabled
+          - spark.sql.adaptive.advisoryPartitionSizeInBytes
+        spark_version: "3.2"
+
+      - key: spark.sql.adaptive.skewJoin.enabled
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          When AQE is enabled, automatically detect and split oversized shuffle
+          partitions on the join's probe side into sub-partitions, reading the
+          corresponding range of the build side multiple times.  Eliminates join
+          stragglers from skewed keys without code changes.
+        impact_if_wrong: |
+          Disabled while AQE is enabled: skewed join partitions are not split;
+          one task per dominant key processes all rows for that key; stage wall
+          time is dictated by the slowest partition.
+        dimension: D05_DATA_SKEW
+        related_configs:
+          - spark.sql.adaptive.enabled
+          - spark.sql.adaptive.skewJoin.skewedPartitionFactor
+          - spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.skewJoin.skewedPartitionFactor
+        default_value: "5"
+        recommended_value: "5"
+        recommended_range: "2 – 20"
+        description: |
+          A shuffle partition is considered skewed if its size is greater than
+          this factor × the median partition size AND exceeds
+          skewedPartitionThresholdInBytes.  Default of 5 catches partitions that
+          are 5x larger than the median — genuine skew.  Values below 2 trigger
+          unnecessary splitting of near-median partitions.
+        impact_if_wrong: |
+          Set below 2: nearly every above-median partition is split unnecessarily;
+          total task count increases; scheduling overhead rises; balanced datasets
+          experience regression in performance.
+        dimension: D05_DATA_SKEW
+        related_configs:
+          - spark.sql.adaptive.skewJoin.enabled
+          - spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes
+        default_value: "268435456"
+        recommended_value: "268435456"
+        recommended_range: "67108864 – 1073741824"
+        description: |
+          Absolute size threshold (bytes) a partition must exceed — in addition
+          to being skewedPartitionFactor × median — to be considered skewed.
+          The default of 256 MB prevents AQE from splitting small but relatively
+          large partitions (e.g. median 1 MB, one partition 6 MB would be
+          5x but is not problematic).
+        impact_if_wrong: |
+          Set too low (< 64 MB): partitions are split based on relative skew
+          even when they are small enough to process without issue; unnecessary
+          splits add overhead.
+          Set too high (> 1 GB): genuinely large skewed partitions are not split;
+          straggler tasks remain.
+        dimension: D05_DATA_SKEW
+        related_configs:
+          - spark.sql.adaptive.skewJoin.enabled
+          - spark.sql.adaptive.skewJoin.skewedPartitionFactor
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.localShuffleReader.enabled
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          When AQE converts a sort-merge join to a broadcast join, enables
+          executors to read shuffle data from local disk rather than fetching
+          over the network.  Reduces network traffic for broadcast-converted joins
+          when shuffle blocks are already on the local node.
+        impact_if_wrong: |
+          Disabled: executor fetches shuffle blocks over the network even when
+          they are stored locally; adds unnecessary network latency for every
+          broadcast-converted join.
+        dimension: D08_AQE
+        related_configs:
+          - spark.sql.adaptive.enabled
+          - spark.sql.autoBroadcastJoinThreshold
+        spark_version: "3.0"
+
+      - key: spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold
+        default_value: "0"
+        recommended_value: "workload_dependent"
+        recommended_range: "0 – 67108864"
+        description: |
+          Maximum size (bytes) of the map-side shuffle data per partition for
+          AQE to convert a sort-merge join to a shuffle-hash join.  Default 0
+          disables this conversion.  Increasing this allows AQE to avoid the sort
+          phase of SMJ when partitions are small enough to fit in a hash table.
+        impact_if_wrong: |
+          Left at 0 when many SMJ partitions are small: AQE cannot convert to
+          SHJ; sort phase overhead remains even when sorting is unnecessary.
+          Set too high: hash table build on large partitions causes OOM.
+        dimension: D08_AQE
+        related_configs:
+          - spark.sql.adaptive.enabled
+          - spark.sql.join.preferSortMergeJoin
+        spark_version: "3.3"
+
+  # ===========================================================================
+  # 11. IO
+  # ===========================================================================
+
+  - id: IO
+    name: "I/O, File Format, and Storage"
+    configs:
+
+      - key: spark.sql.files.maxPartitionBytes
+        default_value: "134217728"
+        recommended_value: "134217728"
+        recommended_range: "67108864 – 536870912"
+        description: |
+          Maximum number of bytes (uncompressed) in a single Spark partition
+          when reading from file sources.  Spark splits input files into chunks
+          of at most this size.  The default 128 MB is a good balance for most
+          clusters; increase to 256–512 MB to reduce task count on very large
+          inputs with fast executors.
+        impact_if_wrong: |
+          Too small (< 32 MB): excessive number of input partitions; task
+          scheduling overhead dominates; many small tasks finish in milliseconds
+          while the scheduler queues the next batch.
+          Too large (> 512 MB): tasks hold too much data; long task duration;
+          straggler risk increases; memory pressure for wide transformations.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.files.openCostInBytes
+          - spark.sql.adaptive.advisoryPartitionSizeInBytes
+        spark_version: "2.0"
+
+      - key: spark.sql.files.openCostInBytes
+        default_value: "4194304"
+        recommended_value: "4194304"
+        recommended_range: "1048576 – 33554432"
+        description: |
+          Estimated cost to open a file, expressed as the number of bytes that
+          could have been scanned in the same time.  Used to bin-pack small files
+          into the same partition up to maxPartitionBytes.  A higher value
+          aggressively merges small files; a lower value keeps more files separate.
+        impact_if_wrong: |
+          Too low with many small files: each small file becomes its own partition;
+          thousands of trivial tasks are created for a dataset that could be
+          processed in tens of partitions.  Increase for small-file datasets on
+          S3/GCS where the open-connection latency is significant.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.files.maxPartitionBytes
+        spark_version: "2.0"
+
+      - key: spark.sql.parquet.compression.codec
+        default_value: "snappy"
+        recommended_value: "snappy"
+        recommended_range: "none | uncompressed | snappy | gzip | lzo | brotli | lz4 | zstd"
+        description: |
+          Compression codec for Parquet files written by Spark.  Snappy is the
+          production default: fast compression/decompression, ~2x size reduction,
+          universally supported.  Zstd achieves 20-30 % better compression at
+          comparable decompression speed (Spark 2.3+).  Gzip achieves the best
+          compression ratio at significantly higher CPU cost.
+        impact_if_wrong: |
+          Set to gzip on write-heavy workloads: ~8x slower Parquet writes than
+          Snappy; measurable as inflated write task duration.
+          Set to none on storage-cost-sensitive workloads: files are 2-3x larger
+          than Snappy; higher object storage costs and slower reads (more bytes
+          scanned per column chunk).
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.parquet.filterPushdown
+          - spark.io.compression.codec
+        spark_version: "1.4"
+
+      - key: spark.sql.parquet.filterPushdown
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables Parquet predicate pushdown — Spark pushes filter conditions
+          into the Parquet reader so row groups and pages with statistics that
+          exclude the predicate are skipped without reading.  This is one of
+          the most impactful Parquet read optimisations; disabling it forces
+          full file scans even for highly selective filters.
+        impact_if_wrong: |
+          Disabled: all Parquet row groups are read regardless of filter values;
+          selective queries on large datasets scan 10-100x more data than
+          necessary.  Observable as high "bytes read" in stage metrics despite
+          a selective filter.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.parquet.compression.codec
+          - spark.sql.orc.filterPushdown
+        spark_version: "1.4"
+
+      - key: spark.sql.parquet.mergeSchema
+        default_value: "false"
+        recommended_value: "false"
+        recommended_range: null
+        description: |
+          Whether to merge schemas from all Parquet files in the dataset when
+          reading.  Required for datasets where schema evolution occurred (columns
+          added/removed across partitions).  When true, Spark reads the footer
+          of every Parquet file to merge schemas — an O(N) metadata scan that
+          can take minutes for datasets with millions of files.
+        impact_if_wrong: |
+          Enabled on a static-schema dataset: unnecessary footer scan of every
+          file; for a 1M-file dataset on S3 this adds minutes of metadata read
+          time before the first data byte is read.  Only enable when schema
+          evolution is confirmed to exist.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.parquet.filterPushdown
+          - spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version
+        spark_version: "1.5"
+
+      - key: spark.sql.orc.filterPushdown
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables ORC predicate pushdown — Spark pushes filter conditions to
+          the ORC reader to skip stripes and row groups that do not satisfy the
+          predicate based on min/max/bloom-filter statistics stored in ORC
+          file metadata.
+        impact_if_wrong: |
+          Disabled: all ORC stripes are read regardless of filter selectivity;
+          same penalty as disabling Parquet pushdown — full scan for every query.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.orc.compression.codec
+          - spark.sql.parquet.filterPushdown
+        spark_version: "1.4"
+
+      - key: spark.sql.orc.compression.codec
+        default_value: "snappy"
+        recommended_value: "snappy"
+        recommended_range: "none | snappy | zlib | lzo | zstd | lz4"
+        description: |
+          Compression codec for ORC files written by Spark.  Snappy for balanced
+          read/write performance; Zlib (deflate) for maximum compression ratio
+          (Hive default); Zstd for modern clusters needing better-than-Snappy
+          compression at similar decompression speed.
+        impact_if_wrong: |
+          Set to zlib on CPU-constrained clusters: zlib compression is ~10x slower
+          than snappy; ORC write stages become CPU-bound; long write task durations.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.sql.orc.filterPushdown
+          - spark.io.compression.codec
+        spark_version: "2.0"
+
+      - key: spark.hadoop.fs.s3a.connection.maximum
+        default_value: "96"
+        recommended_value: "500"
+        recommended_range: "96 – 2000"
+        description: |
+          Maximum number of simultaneous HTTP connections from a single executor
+          JVM to Amazon S3 (via the S3A connector).  Each parallel task reading
+          from S3 consumes one connection for the duration of the read.  With
+          many concurrent tasks per executor and high spark.sql.shuffle.partitions,
+          the default of 96 can be exhausted, causing connection throttling.
+        impact_if_wrong: |
+          Too low with many concurrent S3 reads: connections are queued; tasks
+          stall waiting for an available S3 connection; observable as low S3 read
+          throughput despite available executor CPU and network bandwidth.
+        dimension: D07_IO_FORMAT
+        related_configs:
+          - spark.hadoop.fs.s3a.threads.max
+          - spark.executor.cores
+        spark_version: "2.0"
+
+  # ===========================================================================
+  # 12. SQL_CATALYST
+  # ===========================================================================
+
+  - id: SQL_CATALYST
+    name: "SQL Engine and Catalyst Optimizer"
+    configs:
+
+      - key: spark.sql.cbo.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables Cost-Based Optimization in Catalyst.  When true, Spark uses
+          table and column statistics (row counts, distinct counts, histograms)
+          collected via ANALYZE TABLE to estimate intermediate result sizes and
+          select optimal join strategies.  Required for join reordering and
+          accurate broadcast threshold decisions.
+        impact_if_wrong: |
+          Left false on multi-join queries: Catalyst uses heuristic size estimates;
+          wrong join order produces large intermediate results; sort-merge joins
+          where broadcast would be correct.  Observable as sub-optimal physical
+          plans in explain() output.
+        dimension: D10_CATALYST
+        related_configs:
+          - spark.sql.cbo.joinReorder.enabled
+          - spark.sql.statistics.histogram.enabled
+        spark_version: "2.2"
+
+      - key: spark.sql.cbo.joinReorder.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables CBO-based join reordering using dynamic programming over all
+          possible N-way join orderings (up to spark.sql.cbo.joinReorder.dp.star
+          .filter.enabled constraints).  Requires spark.sql.cbo.enabled = true and
+          ANALYZE TABLE statistics.  For queries with 3+ joins, the optimal order
+          can reduce intermediate DataFrames by orders of magnitude.
+        impact_if_wrong: |
+          Disabled on 3+ table join queries: joins execute in source order; a large
+          fact table joined first produces an intermediate result that must be
+          carried through subsequent joins; likely 2-10x slower than optimal order.
+        dimension: D10_CATALYST
+        related_configs:
+          - spark.sql.cbo.enabled
+          - spark.sql.cbo.joinReorder.maxTableCount
+        spark_version: "2.2"
+
+      - key: spark.sql.optimizer.maxIterations
+        default_value: "100"
+        recommended_value: "100"
+        recommended_range: "50 – 500"
+        description: |
+          Maximum number of Catalyst rule application iterations during logical
+          plan optimization.  Most queries converge in fewer than 20 iterations.
+          This is a safety valve to prevent infinite loop bugs in rule
+          implementations.  Increase only if Catalyst logs a warning about
+          reaching the maximum iteration count.
+        impact_if_wrong: |
+          Too low (< 50) for deeply nested subqueries or complex CTEs: Catalyst
+          may not fully optimize the plan before the iteration limit is hit;
+          suboptimal physical plan is generated; observable as CATALYST_WARNING
+          in driver logs and unexpectedly slow queries.
+        dimension: D10_CATALYST
+        related_configs:
+          - spark.sql.cbo.enabled
+        spark_version: "2.0"
+
+      - key: spark.sql.codegen.wholeStage
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables Tungsten whole-stage code generation — Catalyst compiles chains
+          of operators (filter, project, hash aggregate) into a single JVM bytecode
+          function, eliminating virtual dispatch overhead and enabling JIT
+          optimisation across operator boundaries.  Provides 2-5x speedup for
+          CPU-bound transformations over the interpreted Volcano model.
+        impact_if_wrong: |
+          Disabled: every operator is a separate virtual function call; no
+          cross-operator JIT optimisation; CPU-bound transformations run 2-5x
+          slower.  Only disable to work around specific code generation bugs
+          (SPARK-XXXXX) or when the generated code exceeds JVM bytecode limits.
+        dimension: D10_CATALYST
+        related_configs:
+          - spark.sql.codegen.fallback
+          - spark.sql.codegen.maxFields
+        spark_version: "2.0"
+
+      - key: spark.sql.codegen.fallback
+        default_value: "true"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          When whole-stage code generation fails (e.g. code exceeds 64 KB JVM
+          method size limit for very wide tables), fall back to the interpreted
+          execution path instead of failing the query.  Disable only in
+          development to surface code generation failures as hard errors.
+        impact_if_wrong: |
+          Disabled in production: queries that exceed code generation limits
+          (wide tables with > 100 columns, deeply nested expressions) fail with
+          a compilation error instead of falling back to interpreted mode.
+        dimension: D10_CATALYST
+        related_configs:
+          - spark.sql.codegen.wholeStage
+          - spark.sql.codegen.maxFields
+        spark_version: "2.0"
+
+      - key: spark.sql.execution.arrow.pyspark.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          Enables Apache Arrow as the data transport format for toPandas() and
+          createDataFrame(pandas_df) operations.  Arrow uses columnar binary
+          format and avoids Python pickle serialization for bulk DataFrame ↔
+          pandas transfers.  Provides 10-100x speedup for toPandas() on large
+          results compared to the default row-by-row serialization.
+        impact_if_wrong: |
+          Disabled: toPandas() and createDataFrame() serialize row-by-row via
+          Python pickle; 10-100x slower than Arrow for DataFrames with > 10,000
+          rows; CPU-bound on the executor side for Python serialization overhead.
+        dimension: D09_UDF_CODE
+        related_configs:
+          - spark.sql.execution.arrow.maxRecordsPerBatch
+          - spark.sql.execution.arrow.pyspark.fallback.enabled
+        spark_version: "2.3"
+
+      - key: spark.sql.execution.arrow.maxRecordsPerBatch
+        default_value: "10000"
+        recommended_value: "50000"
+        recommended_range: "1000 – 100000"
+        description: |
+          When Arrow-based toPandas() is enabled, maximum number of records
+          per Arrow batch transferred from executor to driver.  Larger batches
+          reduce the number of serialization round trips; smaller batches limit
+          memory usage per batch.  Increase for wide DataFrames with numeric
+          columns; decrease for very wide DataFrames with many string columns.
+        impact_if_wrong: |
+          Too small (1000) on large DataFrames: thousands of small Arrow batches
+          are transferred; serialization overhead dominates; the speedup vs. row
+          serialization is reduced.
+          Too large (> 100000) on wide DataFrames: each batch may consume several
+          GB of Python memory; driver OOM during batch assembly.
+        dimension: D09_UDF_CODE
+        related_configs:
+          - spark.sql.execution.arrow.pyspark.enabled
+          - spark.driver.memory
+        spark_version: "2.3"
+
+      - key: spark.sql.statistics.histogram.enabled
+        default_value: "false"
+        recommended_value: "true"
+        recommended_range: null
+        description: |
+          When collecting column statistics via ANALYZE TABLE, also collect
+          equi-height histograms for numeric columns.  Histograms allow CBO to
+          make more accurate cardinality estimates for range predicates
+          (e.g. amount > 1000) compared to min/max statistics alone.
+        impact_if_wrong: |
+          Disabled with CBO enabled: CBO uses min/max statistics for range
+          predicate selectivity; uniform distribution is assumed; CBO overestimates
+          rows passing a selective filter, leading to wrong join strategy selection.
+        dimension: D10_CATALYST
+        related_configs:
+          - spark.sql.cbo.enabled
+          - spark.sql.statistics.size.autoUpdate.enabled
+        spark_version: "2.3"
