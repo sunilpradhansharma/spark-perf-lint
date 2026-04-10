@@ -1857,3 +1857,616 @@ rules:
     estimated_speedup: "Eliminates mandatory disk write; cache() reads from memory instead"
     effort: MINOR_CODE_CHANGE
     common_in: "Non-iterative ETL pipelines, data enrichment jobs, defensive checkpointing patterns"
+
+  # ---------------------------------------------------------------------------
+  # D07 — I/O and File Format (SPL-D07-001 through SPL-D07-010)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D07-001
+    short_recommendation: >-
+      Convert CSV/JSON datasets to Parquet or ORC; row-oriented formats have no
+      column pruning, no predicate pushdown, and 5-20x slower analytical scans.
+    detailed_recommendation: |
+      CSV and JSON are row-oriented text formats designed for data exchange, not
+      analytical query performance. They have three major disadvantages compared
+      to columnar formats: no column pruning (Spark decodes every column even when
+      only a few are needed), no predicate pushdown (every row must be decoded
+      before filtering), and no column-level min/max statistics used by Parquet/ORC
+      for partition elimination. For large analytical datasets, switching from CSV
+      to Parquet typically reduces scan time by 5-20x and storage size by 3-10x.
+      Convert once: `df.write.mode('overwrite').parquet('path')`, then read with
+      `spark.read.parquet('path')`. For streaming ingestion where schema evolution
+      and ACID writes are needed, use Delta Lake which provides columnar storage
+      plus transactional guarantees. Keep CSV/JSON only for ingestion boundaries
+      where external systems produce those formats.
+    before_code: |
+      # Row-oriented: every column decoded, no predicate pushdown
+      df = spark.read.csv('s3://bucket/events/', header=True, inferSchema=True)
+      result = df.filter('status = "active"').select('user_id', 'amount').groupBy('user_id').sum('amount')
+    after_code: |
+      # Convert once to Parquet
+      spark.read.csv('s3://bucket/events/', header=True, inferSchema=True) \
+           .write.mode('overwrite').option('compression', 'snappy').parquet('s3://bucket/events_parquet/')
+
+      # All subsequent reads use columnar format with pruning + pushdown
+      df = spark.read.parquet('s3://bucket/events_parquet/')
+      result = df.filter('status = "active"').select('user_id', 'amount').groupBy('user_id').sum('amount')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html"
+    estimated_speedup: "5-20x scan speedup; 3-10x storage reduction vs CSV"
+    effort: MAJOR_REFACTOR
+    common_in: "Data ingestion pipelines, legacy ETL, ad-hoc analytics on exported CSV dumps"
+
+  - rule_id: SPL-D07-002
+    short_recommendation: >-
+      Replace inferSchema=True with an explicit StructType or DDL schema string;
+      schema inference doubles I/O and produces fragile type detection.
+    detailed_recommendation: |
+      When `inferSchema=true`, Spark performs a full pass over the entire input
+      dataset to detect column types before running the actual query — doubling
+      I/O for every job execution. Beyond performance, inferred schemas are fragile:
+      a single malformed row or an empty CSV file in the dataset can change the
+      detected type for a column, causing downstream type errors that are
+      non-deterministic and hard to reproduce in CI. Define the schema explicitly
+      using a DDL string (`'id LONG, name STRING, ts TIMESTAMP'`) or a
+      `StructType` / `StructField` definition, and pass it to the reader with
+      `.schema(schema)`. This eliminates the inference scan, makes type
+      expectations explicit in code, and catches schema drift at read time rather
+      than silently propagating wrong types through the pipeline.
+    before_code: |
+      # Two full passes: one for inference, one for the actual query
+      df = spark.read.option('inferSchema', 'true').csv('s3://bucket/events/')
+    after_code: |
+      # DDL string — no extra scan, explicit contract
+      schema = 'user_id LONG, event_type STRING, amount DOUBLE, ts TIMESTAMP'
+      df = spark.read.schema(schema).csv('s3://bucket/events/')
+
+      # Or using StructType:
+      # from pyspark.sql.types import StructType, StructField, LongType, StringType
+      # schema = StructType([StructField('user_id', LongType()), ...])
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-csv.html"
+    estimated_speedup: "2x I/O reduction per job; eliminates intermittent type-inference failures"
+    effort: MINOR_CODE_CHANGE
+    common_in: "CSV/JSON ingestion pipelines, ad-hoc data exploration, automated ETL scripts"
+
+  - rule_id: SPL-D07-003
+    short_recommendation: >-
+      Replace select('*') with an explicit column list; wildcard select defeats
+      columnar pruning and forces all columns to be decoded from storage.
+    detailed_recommendation: |
+      `select('*')` is a no-op transformation that reads and retains every column
+      in the DataFrame. For columnar formats (Parquet, ORC) this defeats column
+      pruning: the storage layer must deserialize every column even if only two
+      or three are used downstream. Column pruning is one of Spark's most effective
+      I/O optimizations: a 100-column Parquet table that only needs 5 columns can
+      read 20x less data with explicit column selection. Replace `select('*')` with
+      the explicit list of columns actually needed downstream. If all columns are
+      genuinely required, remove the `select('*')` call entirely — it is a no-op
+      and adds unnecessary plan complexity. When building pipelines, prefer to
+      apply `select()` with only the required columns immediately after the read
+      so that all downstream transformations, shuffles, and writes operate on the
+      reduced schema.
+    before_code: |
+      # All 80 columns decoded from every Parquet row group
+      result = df.select('*').groupBy('status').count()
+    after_code: |
+      # Only 'status' decoded from storage — 80x less column I/O
+      result = df.select('status').groupBy('status').count()
+
+      # If truly all columns are needed, omit select() entirely:
+      # result = df.groupBy('status').count()
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "Up to N× where N = total columns / columns actually used"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Wide-table analytics, schema-exploratory notebooks, copy-paste ETL patterns"
+
+  - rule_id: SPL-D07-004
+    short_recommendation: >-
+      Push filter()/where() to before join() so the shuffle carries only rows
+      that pass the predicate; post-join filters waste shuffle I/O.
+    detailed_recommendation: |
+      Applying a filter after a join is correct but suboptimal: the join shuffles
+      and processes all rows from both sides before the filter discards some of
+      them. If the filter predicates on a column from one of the join inputs (not
+      a computed column), applying it before the join reduces shuffle data volume
+      proportionally. A filter that removes 90% of rows applied before the join
+      sends 90% less data through the shuffle. Catalyst's predicate pushdown
+      optimizer handles this automatically for simple cases, but UDF-based filters,
+      filters on columns computed within the join expression, and some complex
+      expressions are opaque to Catalyst and will not be pushed down automatically.
+      Make predicate pushdown explicit in code: apply `filter()` and `select()`
+      on each join input before the `join()` call.
+    before_code: |
+      # Full shuffle on both sides, then 95% of rows discarded
+      result = (
+          orders.join(customers, 'customer_id')
+          .filter('order_date >= "2024-01-01"')
+          .groupBy('region').sum('amount')
+      )
+    after_code: |
+      # Filter before join — only 2024+ orders enter the shuffle
+      result = (
+          orders.filter('order_date >= "2024-01-01"')
+          .join(customers, 'customer_id')
+          .groupBy('region').sum('amount')
+      )
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "Shuffle volume reduced proportionally to filter selectivity"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Date-filtered join pipelines, event analytics, incremental ETL joins"
+
+  - rule_id: SPL-D07-005
+    short_recommendation: >-
+      Add coalesce(N) or repartition(N) before write.partitionBy() to bound
+      the output file count; without it each partition × spark task = a file.
+    detailed_recommendation: |
+      `write.partitionBy('date').parquet(path)` writes one file per Spark partition
+      per unique date value. With Spark's default of 200 shuffle partitions, a
+      dataset spanning 365 days can produce up to 200 × 365 = 73,000 output files.
+      These tiny files degrade Spark read performance (each file requires a
+      separate HDFS RPC or S3 GET request), overwhelm the Hive Metastore with
+      partition listing operations, and can cause driver OOM during query planning.
+      The fix: coalesce or repartition before writing to bound the number of files
+      per partition directory. `coalesce(N)` is cheaper (no shuffle) but produces
+      unbalanced files; `repartition(N, 'date')` produces balanced files per
+      partition value at the cost of an extra shuffle. Target output files of
+      128-256 MB each to keep file counts manageable while avoiding very small
+      reads.
+    before_code: |
+      # 200 partitions × 365 dates = up to 73,000 tiny files
+      df.write.partitionBy('date').mode('overwrite').parquet('s3://datalake/events/')
+    after_code: |
+      # Option A: coalesce before write (no extra shuffle, but unbalanced files)
+      df.coalesce(10).write.partitionBy('date').mode('overwrite').parquet('s3://datalake/events/')
+
+      # Option B: repartition by the partition key for balanced files per date
+      df.repartition(10, 'date').write.partitionBy('date').mode('overwrite').parquet('s3://datalake/events/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "File count reduced from O(partitions × values) to O(N × values)"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Partitioned data lake writes, daily/hourly event ingestion, Delta Lake tables"
+
+  - rule_id: SPL-D07-006
+    short_recommendation: >-
+      Add partitionColumn, lowerBound, upperBound, and numPartitions to JDBC
+      reads; without them the entire table flows through a single driver thread.
+    detailed_recommendation: |
+      By default a Spark JDBC read creates a single partition and reads the entire
+      database table through one JDBC connection on the driver — effectively
+      sequential I/O that does not scale. A 1-billion-row table will block the
+      driver for hours with no executor parallelism. Parallelism requires four
+      parameters: `partitionColumn` (an integer, long, or date column to split
+      on), `lowerBound` and `upperBound` (the range of that column — can be
+      approximate, Spark does not filter rows outside the range), and
+      `numPartitions` (the number of parallel JDBC reader tasks). With these set,
+      Spark creates `numPartitions` JDBC tasks each reading a range slice in
+      parallel. Choose `partitionColumn` as a uniformly distributed numeric column
+      (e.g., a sequential ID or timestamp epoch) to avoid task skew. For tables
+      without a suitable numeric column, use the `predicates` parameter with a
+      list of SQL WHERE clauses to define custom partitions.
+    before_code: |
+      # Single driver thread reads the entire table sequentially
+      df = spark.read.jdbc(url='jdbc:postgresql://host/db', table='orders')
+    after_code: |
+      # 20 parallel reader tasks — 20x faster for large tables
+      df = spark.read.jdbc(
+          url='jdbc:postgresql://host/db',
+          table='orders',
+          column='order_id',
+          lowerBound=0,
+          upperBound=10_000_000,
+          numPartitions=20,
+          properties={'user': 'user', 'password': 'pass'},
+      )
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html"
+    estimated_speedup: "numPartitions× read speedup; turns sequential scan into parallel reads"
+    effort: MINOR_CODE_CHANGE
+    common_in: "RDBMS-to-datalake ETL, JDBC-backed batch ingestion, database migration jobs"
+
+  - rule_id: SPL-D07-007
+    short_recommendation: >-
+      Set option('compression', 'snappy') or 'zstd' on Parquet writes; relying
+      on the cluster default may silently produce uncompressed output.
+    detailed_recommendation: |
+      Parquet's default compression codec depends on the Spark version and cluster
+      configuration (`spark.sql.parquet.compression.codec`). In older Spark
+      versions the default was `uncompressed`; in Spark 2.0+ it is `snappy`.
+      Relying on the default makes job behavior cluster-dependent — the same code
+      may produce compressed output in one environment and uncompressed output in
+      another. Set compression explicitly on every Parquet write so the codec is
+      visible in code review and consistent across environments. Choose based on
+      workload: `snappy` for hot data accessed frequently (fast
+      compression/decompression, moderate ratio); `zstd` for cold or archival data
+      where storage cost matters (better ratio than snappy with comparable speed);
+      `gzip` or `brotli` for archival-only data (best ratio but slower). Avoid
+      `uncompressed` unless debugging or benchmarking.
+    before_code: |
+      # Codec depends on spark.sql.parquet.compression.codec — may be uncompressed
+      df.write.mode('overwrite').parquet('s3://bucket/data/')
+    after_code: |
+      # Explicit codec — consistent across all environments
+      df.write.mode('overwrite').option('compression', 'snappy').parquet('s3://bucket/data/')
+
+      # For archival / cost-sensitive storage:
+      # df.write.mode('overwrite').option('compression', 'zstd').parquet('s3://bucket/archive/')
+    config_changes:
+      spark.sql.parquet.compression.codec: "snappy"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#configuration"
+    estimated_speedup: "3-5x storage reduction vs uncompressed; consistent across environments"
+    effort: MINOR_CODE_CHANGE
+    common_in: "All Parquet write jobs, data lake ingestion, Delta Lake checkpoint writes"
+
+  - rule_id: SPL-D07-008
+    short_recommendation: >-
+      Add .mode('overwrite') or .mode('append') before every write; the default
+      'error' mode fails on re-run if the output path already exists.
+    detailed_recommendation: |
+      Spark's default write mode is `'error'` (alias `'errorifexists'`), which
+      raises an `AnalysisException` if the output path already exists. This is
+      correct during development to catch accidental overwrites, but almost always
+      wrong in production pipelines where output is intended to be refreshed on
+      each run. Without an explicit mode, a pipeline that ran successfully once
+      will fail on every subsequent run until the output is manually deleted.
+      Always set `.mode()` explicitly so write behavior is self-documenting:
+      `'overwrite'` for idempotent batch jobs that replace all output each run;
+      `'append'` for incremental loads that accumulate new records; `'ignore'` for
+      pipelines that should skip the write if output already exists (idempotent
+      re-runs). The choice of write mode is a significant correctness decision and
+      should never be left to a default.
+    before_code: |
+      # Fails with AnalysisException on the second run
+      df.write.parquet('s3://bucket/output/')
+    after_code: |
+      # Explicit intent — replaces output on every run
+      df.write.mode('overwrite').parquet('s3://bucket/output/')
+
+      # For incremental append:
+      # df.write.mode('append').parquet('s3://bucket/output/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.mode.html"
+    estimated_speedup: "Correctness fix; prevents job failure on re-run"
+    effort: MINOR_CODE_CHANGE
+    common_in: "All batch write jobs, scheduled ETL pipelines, idempotent transformations"
+
+  - rule_id: SPL-D07-009
+    short_recommendation: >-
+      Replace read.load()/write.save() with format-specific methods or explicit
+      .format(); bare load/save relies on spark.sql.sources.default.
+    detailed_recommendation: |
+      `spark.read.load('path')` without `.format(...)` uses the format configured
+      in `spark.sql.sources.default` (Spark's default: `'parquet'`). This makes
+      code behavior depend on cluster configuration, which may differ between
+      local development, staging, and production environments. Platform teams often
+      override `spark.sql.sources.default` globally, silently changing the format
+      your code reads or writes. Use format-specific methods (`spark.read.parquet()`,
+      `spark.read.csv()`) or the explicit `.format()` + `.load()` / `.save()` API
+      to make the format visible in code review, enable IDE validation, and prevent
+      silent format mismatches when the cluster default changes. The extra
+      specificity has zero runtime cost and significantly improves code clarity.
+    before_code: |
+      # Format depends on spark.sql.sources.default — may not be parquet
+      df = spark.read.load('s3://bucket/data/')
+      df.write.save('s3://bucket/output/')
+    after_code: |
+      # Explicit format — behavior is identical across all cluster configurations
+      df = spark.read.parquet('s3://bucket/data/')
+      df.write.mode('overwrite').parquet('s3://bucket/output/')
+
+      # Or using the .format() API:
+      # df = spark.read.format('parquet').load('s3://bucket/data/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-load-save-functions.html"
+    estimated_speedup: "Correctness fix; prevents silent format mismatches across environments"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Template-generated ETL code, generic pipeline frameworks, legacy Spark 1.x ports"
+
+  - rule_id: SPL-D07-010
+    short_recommendation: >-
+      Remove mergeSchema=true and provide an explicit schema; schema merging
+      reads every file's footer on every query — O(files) metadata overhead.
+    detailed_recommendation: |
+      `mergeSchema=true` (or `spark.sql.parquet.mergeSchema=true`) instructs Spark
+      to read the schema footer from every Parquet file in the dataset and merge
+      them into a unified schema. For datasets with thousands of files this is an
+      O(files) metadata scan that occurs on every read — regardless of how few
+      rows are actually processed. A 100,000-file table with 1 ms per footer read
+      adds 100 seconds of driver-side planning overhead before a single row is
+      processed. Schema merging is intended only for schema-evolution scenarios
+      where different files in the same table have different column sets. It is
+      unnecessary when all files share the same schema (provide it explicitly via
+      `.schema()`), or when the table is managed by Delta Lake (which tracks schema
+      evolution in its transaction log without per-file footer reads). Disable
+      `mergeSchema` and provide an explicit schema to eliminate the metadata scan.
+    before_code: |
+      # O(files) footer scan on every query — 100s overhead for large tables
+      df = spark.read.option('mergeSchema', 'true').parquet('s3://datalake/events/')
+    after_code: |
+      # Explicit schema — zero metadata scan overhead
+      schema = 'user_id LONG, event_type STRING, amount DOUBLE, event_date DATE'
+      df = spark.read.schema(schema).parquet('s3://datalake/events/')
+
+      # If schema evolution is required, use Delta Lake:
+      # df = spark.read.format('delta').load('s3://datalake/events_delta/')
+    config_changes:
+      spark.sql.parquet.mergeSchema: "false"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#schema-merging"
+    estimated_speedup: "Eliminates O(files) footer scan; seconds to minutes saved on large tables"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Schema-evolving Parquet tables, Hive-managed datasets, long-running datalake jobs"
+
+  # ---------------------------------------------------------------------------
+  # D08 — Adaptive Query Execution (SPL-D08-001 through SPL-D08-007)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D08-001
+    short_recommendation: >-
+      Remove spark.sql.adaptive.enabled = false; AQE is stable since Spark 3.1
+      and provides partition coalescing, skew handling, and join adaptation for free.
+    detailed_recommendation: |
+      Adaptive Query Execution (AQE, Spark 3.0+) re-optimizes a query plan at
+      runtime using actual shuffle statistics collected after each stage. It
+      provides three major automatic optimizations at zero developer cost:
+      (1) Partition coalescing merges small post-shuffle partitions to eliminate
+      scheduling overhead of thousands of tiny tasks. (2) Skew join handling
+      detects and splits oversized shuffle partitions so one task does not process
+      disproportionate data. (3) Dynamic join strategy downgrade converts a
+      planned sort-merge join to a broadcast hash join when one side proves small
+      enough after shuffle statistics are known. Setting `spark.sql.adaptive.enabled
+      = false` disables all three features. AQE has been stable since Spark 3.1
+      and is enabled by default from Spark 3.2 onwards. Remove the `false`
+      override entirely — in Spark 3.2+ the config entry is unnecessary.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "false")  # disables all AQE
+          .getOrCreate()
+      )
+    after_code: |
+      # Remove the line — AQE is enabled by default in Spark 3.2+
+      spark = SparkSession.builder.getOrCreate()
+
+      # Or set explicitly for clarity on Spark 3.0/3.1:
+      # spark = SparkSession.builder.config("spark.sql.adaptive.enabled", "true").getOrCreate()
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#adaptive-query-execution"
+    estimated_speedup: "Restores automatic partition coalescing, skew splitting, and join adaptation"
+    effort: CONFIG_ONLY
+    common_in: "Spark 3.0 era codebases, migrated Spark 2.x jobs, conservative cluster configs"
+
+  - rule_id: SPL-D08-002
+    short_recommendation: >-
+      Remove spark.sql.adaptive.coalescePartitions.enabled = false; without it
+      AQE cannot merge the small post-shuffle partitions that cause task overhead.
+    detailed_recommendation: |
+      After a shuffle, Spark creates `spark.sql.shuffle.partitions` output
+      partitions (default 200). For a small dataset this produces hundreds of tiny
+      tasks — each adding scheduler overhead, executor RPC round-trips, and
+      task-manager bookkeeping even before any data is processed. AQE's partition
+      coalescing merges adjacent small post-shuffle partitions into ones close to
+      `advisoryPartitionSizeInBytes` (default 64 MB), automatically reducing the
+      downstream task count to a reasonable level. Disabling coalescing forces all
+      downstream stages to run with the full 200+ partition count regardless of
+      how small each partition is. For any dataset smaller than
+      `200 × 64 MB = 12.8 GB` this is pure overhead. Remove the `false` override
+      to restore automatic coalescing — it is enabled by default with AQE and has
+      no downside for typical workloads.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.coalescePartitions.enabled", "false")
+          .getOrCreate()
+      )
+    after_code: |
+      # Remove the line — coalescing is enabled by default with AQE
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+      spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#coalescing-post-shuffle-partitions"
+    estimated_speedup: "Reduces hundreds of tiny tasks to tens; proportional scheduler overhead saving"
+    effort: CONFIG_ONLY
+    common_in: "Spark 3.0/3.1 migrations, jobs with manual partition tuning, legacy cluster configs"
+
+  - rule_id: SPL-D08-003
+    short_recommendation: >-
+      Raise advisoryPartitionSizeInBytes to at least 64 MB; values below 16 MB
+      cause AQE to produce many small partitions defeating the purpose of coalescing.
+    detailed_recommendation: |
+      `spark.sql.adaptive.advisoryPartitionSizeInBytes` (default 64 MB) is the
+      target size for partitions after AQE coalescing. AQE merges adjacent shuffle
+      output partitions until each merged partition is close to this target. Setting
+      this value very small — below 16 MB — causes AQE to produce many small
+      partitions: increased task scheduling overhead (one JVM task per partition),
+      more shuffle fetch requests, and more output files than downstream readers
+      can efficiently handle. The optimal value depends on cluster executor memory
+      and data volume, but 64 MB is a robust default for most workloads, and
+      128 MB is appropriate for large clusters where task-launch overhead is
+      proportionally higher. Values below 16 MB are rarely beneficial — remove
+      the override and use the default unless you have a specific, measured reason
+      to reduce it.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "4m")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          # Use 64 MB default, or 128 MB for large clusters:
+          .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "67108864")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.adaptive.advisoryPartitionSizeInBytes: "67108864"  # 64 MB
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#coalescing-post-shuffle-partitions"
+    estimated_speedup: "Fewer, larger post-coalesce partitions; reduced task scheduling overhead"
+    effort: CONFIG_ONLY
+    common_in: "Fine-tuned AQE configurations, jobs migrated from manual partition tuning"
+
+  - rule_id: SPL-D08-004
+    short_recommendation: >-
+      Re-enable spark.sql.adaptive.skewJoin.enabled; it is disabled here while
+      the file contains joins on skew-prone columns that need auto-splitting.
+    detailed_recommendation: |
+      AQE's skew join optimization automatically detects shuffle partitions that
+      are disproportionately large compared to the median and splits them across
+      multiple tasks — the lowest-effort fix for join-induced data skew. This
+      finding fires specifically when `spark.sql.adaptive.skewJoin.enabled = false`
+      is set in the same file that contains joins on columns that commonly carry
+      power-law or low-cardinality distributions (user_id, product_id, status,
+      is_active). These joins are the primary beneficiaries of AQE skew handling
+      — disabling the feature in a file that needs it most is particularly
+      impactful. Remove the `false` override. The feature has been stable since
+      Spark 3.1 and requires no code changes: AQE monitors shuffle statistics after
+      each stage and splits oversized partitions automatically before the next
+      stage begins.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.skewJoin.enabled", "false")
+          .getOrCreate()
+      )
+      # ...
+      events.join(user_profiles, 'user_id')  # user_id is skew-prone
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          # skewJoin.enabled defaults to true — no explicit config needed
+          .getOrCreate()
+      )
+      events.join(user_profiles, 'user_id')  # AQE now auto-splits skewed partitions
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+      spark.sql.adaptive.skewJoin.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#skew-join-optimization"
+    estimated_speedup: "Restores automatic skew partition splitting on skew-prone joins"
+    effort: CONFIG_ONLY
+    common_in: "User/product analytics, social graph joins, any join on power-law distributed IDs"
+
+  - rule_id: SPL-D08-005
+    short_recommendation: >-
+      Raise skewedPartitionFactor to at least 2 (default 5); below 2 AQE splits
+      nearly every above-median partition as if it were skewed.
+    detailed_recommendation: |
+      AQE's skew detection marks a partition as skewed only when it is both above
+      `skewedPartitionThresholdInBytes` AND above
+      `skewedPartitionFactor × median partition size`. Setting the factor below 2
+      (e.g., 1.1) causes AQE to treat nearly any partition above the median as
+      skewed and split it — even when the data is perfectly balanced. This leads
+      to unnecessary partition splits increasing total task count, higher driver
+      overhead for tracking additional tasks, and potential regression for balanced
+      datasets where no splitting is needed. The default factor of 5 is well-
+      calibrated: it fires only when one partition is 5× larger than the median,
+      which genuinely represents problematic skew. Increase to at least 2 and
+      remove the override unless you have confirmed through Spark UI stage metrics
+      that the aggressive splitting improves performance for your specific data
+      distribution.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          # Factor of 1 — nearly every partition above median is split
+          .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "1")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          # Default factor of 5 — only genuinely skewed partitions are split
+          .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.adaptive.skewJoin.skewedPartitionFactor: "5"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#skew-join-optimization"
+    estimated_speedup: "Prevents unnecessary splits on balanced data; correct skew detection"
+    effort: CONFIG_ONLY
+    common_in: "Over-tuned AQE configurations, experimental skew mitigation attempts"
+
+  - rule_id: SPL-D08-006
+    short_recommendation: >-
+      Remove spark.sql.adaptive.localShuffleReader.enabled = false; it forces
+      remote network reads for shuffle data that is already available locally.
+    detailed_recommendation: |
+      AQE's local shuffle reader optimization avoids remote shuffle data fetches
+      when all the shuffle blocks needed by a task are already on the same executor
+      node. Instead of going over the network, the task reads shuffle data locally
+      — reducing shuffle read latency and network congestion. This is particularly
+      beneficial on clusters where broadcast joins leave data on local executors,
+      where executors are co-located with HDFS data nodes, or where network
+      bandwidth is a bottleneck. Disabling it forces every shuffle read through
+      the network layer even when a local read would suffice — adding unnecessary
+      network round-trips and bandwidth consumption for no benefit. The default
+      (`true`) is correct for all typical workloads. Remove the `false` override.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.localShuffleReader.enabled", "false")
+          .getOrCreate()
+      )
+    after_code: |
+      # Remove the line — local shuffle reader is enabled by default with AQE
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.adaptive.localShuffleReader.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#converting-sort-merge-join-to-local-sort-merge-join"
+    estimated_speedup: "Reduces shuffle read latency when data is locally available"
+    effort: CONFIG_ONLY
+    common_in: "Network-sensitive workloads, HDFS-co-located clusters, bandwidth-constrained environments"
+
+  - rule_id: SPL-D08-007
+    short_recommendation: >-
+      Lower spark.sql.shuffle.partitions and set advisoryPartitionSizeInBytes
+      instead; with AQE enabled a high fixed count creates wasted map-side overhead.
+    detailed_recommendation: |
+      `spark.sql.shuffle.partitions` controls the initial number of shuffle output
+      partitions (default 200). With AQE enabled, this becomes the maximum count
+      from which AQE coalesces downward based on actual data size. Setting it very
+      high (e.g., 2000) causes Spark to create 2000 initial map-side output files,
+      schedule 2000 reduce tasks, and then spend executor time coalescing most of
+      them away — overhead proportional to the initial count. With AQE, the
+      correct lever is `spark.sql.adaptive.advisoryPartitionSizeInBytes` (target
+      output partition size, default 64 MB), not a raw partition count. Set the
+      advisory size to your desired target and use a moderate `shuffle.partitions`
+      as the upper ceiling (e.g., 200-400). AQE will compute the appropriate
+      coalesced count from actual shuffle statistics. Exception: a high value is
+      reasonable if AQE coalescing is explicitly disabled or for fine-grained map
+      parallelism on very large inputs.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          .config("spark.sql.shuffle.partitions", "2000")  # 2000 initial tasks, most coalesced away
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          .config("spark.sql.shuffle.partitions", "200")   # reasonable ceiling
+          .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "134217728")  # 128 MB target
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.shuffle.partitions: "200"
+      spark.sql.adaptive.advisoryPartitionSizeInBytes: "134217728"  # 128 MB
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#coalescing-post-shuffle-partitions"
+    estimated_speedup: "Eliminates map-side overhead from creating and tracking excess partitions"
+    effort: CONFIG_ONLY
+    common_in: "AQE-enabled jobs with legacy manual partition tuning, migrated Spark 2.x configs"
