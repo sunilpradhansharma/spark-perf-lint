@@ -95,7 +95,7 @@ def _plan_summary(df: DataFrame) -> str:
         ``"BroadcastHashJoin"`` or ``"SortMergeJoin"``.
     """
     # explain() prints to stdout; capture via explain(True) string form
-    plan_text = df._jdf.queryExecution().simpleString()  # type: ignore[attr-defined]
+    plan_text = df._jdf.queryExecution().simpleString()
 
     keywords = (
         "BroadcastHashJoin",
@@ -163,7 +163,7 @@ def benchmark_join_strategies(
 
     variants: list[tuple[str, DataFrame, DataFrame]] = [
         ("auto", df_large, df_small),
-        ("broadcast", df_large, F.broadcast(df_small)),  # type: ignore[arg-type]
+        ("broadcast", df_large, F.broadcast(df_small)),
         ("sort_merge", df_large.hint("MERGE"), df_small),
         ("shuffle_hash", df_large.hint("SHUFFLE_HASH"), df_small),
     ]
@@ -172,7 +172,7 @@ def benchmark_join_strategies(
         joined = left.join(right, on=key_col, how="inner")
         plan = _plan_summary(joined)
 
-        elapsed, _ = _elapsed(lambda df=joined: df.count())
+        elapsed, _ = _elapsed(lambda df=joined: df.count())  # type: ignore[misc]
         shuffle = _shuffle_bytes(spark)
 
         results.append(
@@ -245,7 +245,7 @@ def benchmark_partition_counts(
         repartitioned = df.repartition(n)
         result_df = operation(repartitioned)
 
-        elapsed, count = _elapsed(lambda rdf=result_df: rdf.count())
+        elapsed, count = _elapsed(lambda rdf=result_df: rdf.count())  # type: ignore[misc]
 
         # Actual output partition count
         actual_partitions = result_df.rdd.getNumPartitions()
@@ -365,7 +365,7 @@ def benchmark_cache_strategies(
 
             elif strategy == "checkpoint":
                 sc = spark.sparkContext
-                cp_dir = sc._jvm.org.apache.spark.SparkContext.getOrCreate().getCheckpointDir()  # type: ignore[attr-defined]
+                cp_dir = sc._jvm.org.apache.spark.SparkContext.getOrCreate().getCheckpointDir()
                 if not cp_dir.isDefined():
                     import warnings
 
@@ -409,9 +409,9 @@ def benchmark_cache_strategies(
 
             assert cached_df is not None  # mypy: always assigned above
 
-            t1, _ = _elapsed(lambda d=cached_df: d.count())
-            t2, _ = _elapsed(lambda d=cached_df: d.agg(F.count("*")).collect())
-            t3, _ = _elapsed(lambda d=cached_df: d.count())
+            t1, _ = _elapsed(lambda d=cached_df: d.count())  # type: ignore[misc]
+            t2, _ = _elapsed(lambda d=cached_df: d.agg(F.count("*")).collect())  # type: ignore[misc]
+            t3, _ = _elapsed(lambda d=cached_df: d.count())  # type: ignore[misc]
 
             results.append(
                 {

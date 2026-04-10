@@ -14,7 +14,7 @@ from __future__ import annotations
 import ast
 
 from spark_perf_lint.config import LintConfig
-from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
+from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, MethodCallInfo
 from spark_perf_lint.rules.base import CodeRule
 from spark_perf_lint.rules.registry import register_rule
 from spark_perf_lint.types import Dimension, EffortLevel, Finding, Severity
@@ -67,7 +67,7 @@ def _receiver_use_count(analyzer: ASTAnalyzer, var_name: str, after_line: int) -
     return count
 
 
-def _storage_level_arg(call) -> str | None:
+def _storage_level_arg(call: MethodCallInfo) -> str | None:
     """Extract the StorageLevel argument from a persist() call.
 
     Handles:

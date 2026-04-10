@@ -15,7 +15,7 @@ import ast
 import re
 
 from spark_perf_lint.config import LintConfig
-from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
+from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, MethodCallInfo
 from spark_perf_lint.rules.base import ConfigRule
 from spark_perf_lint.rules.registry import register_rule
 from spark_perf_lint.types import Dimension, EffortLevel, Finding, Severity
@@ -107,7 +107,7 @@ def _is_skew_prone_col(col: str) -> bool:
     return any(c.startswith(p) for p in _SKEW_PRONE_PREFIXES)
 
 
-def _get_join_string_keys(call) -> list[str]:
+def _get_join_string_keys(call: MethodCallInfo) -> list[str]:
     """Extract string join keys from a ``join()`` call's ``on`` argument."""
     keys: list[str] = []
     on: ast.expr | None = None

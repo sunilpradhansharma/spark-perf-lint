@@ -39,6 +39,7 @@ from spark_perf_lint.config import LintConfig
 from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, ParseError
 from spark_perf_lint.engine.file_scanner import FileScanner, ScanTarget
 from spark_perf_lint.observability.tracer import BaseTracer, TracerFactory
+from spark_perf_lint.rules.base import BaseRule
 from spark_perf_lint.rules.registry import RuleRegistry
 from spark_perf_lint.types import AuditReport, Finding, Severity
 
@@ -60,7 +61,7 @@ _MAX_WORKERS: int = 4  # threads; enough for a typical 20-file commit
 
 
 # Regex for inline suppression comments.
-# Matches:  # noqa: SPL-D03-001  or  # noqa: SPL-D03-001,SPL-D08-002
+# Matches:  noqa: SPL-D03-001  or  noqa: SPL-D03-001,SPL-D08-002
 _NOQA_RE = re.compile(r"#\s*noqa:\s*(SPL-[A-Z0-9,\s\-]+)", re.IGNORECASE)
 
 
@@ -141,7 +142,7 @@ class ScanOrchestrator:
             ``AuditReport`` containing all findings, timing, and summary
             counts.
         """
-        str_paths = [str(p) for p in paths]
+        str_paths: list[str | Path] = [str(p) for p in paths]
         start = time.monotonic()
 
         run_id = TracerFactory.new_run_id()
@@ -267,7 +268,7 @@ class ScanOrchestrator:
     def _run_rules_on_target(
         self,
         target: ScanTarget,
-        enabled_rules: list | None = None,
+        enabled_rules: list[BaseRule] | None = None,
     ) -> list[Finding]:
         """Parse and run all enabled rules against a single ``ScanTarget``.
 

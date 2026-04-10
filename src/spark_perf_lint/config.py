@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from spark_perf_lint.types import EffortLevel, Severity  # noqa: F401 (re-exported)
 

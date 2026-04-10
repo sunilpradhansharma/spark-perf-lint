@@ -13,7 +13,7 @@ from __future__ import annotations
 import ast
 
 from spark_perf_lint.config import LintConfig
-from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
+from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, MethodCallInfo
 from spark_perf_lint.rules.base import CodeRule, ConfigRule
 from spark_perf_lint.rules.registry import register_rule
 from spark_perf_lint.types import Dimension, EffortLevel, Finding, Severity
@@ -43,7 +43,7 @@ _BREAK_METHODS = frozenset(
 # =============================================================================
 
 
-def _get_join_how(call) -> str | None:
+def _get_join_how(call: MethodCallInfo) -> str | None:
     """Return the normalised ``how`` argument of a ``join()`` call.
 
     Handles both keyword (``how="left"``) and third positional argument forms.
@@ -544,8 +544,8 @@ class MultipleJoinsWithoutRepartitionRule(CodeRule):
         break_lines |= bcast_lines
 
         # Build runs of consecutive joins (within 15 lines of each other) with no break
-        runs: list[list] = []
-        current: list = [join_calls[0]]
+        runs: list[list[MethodCallInfo]] = []
+        current: list[MethodCallInfo] = [join_calls[0]]
 
         for prev, cur in zip(join_calls, join_calls[1:], strict=False):
             gap_too_large = (cur.line - prev.line) > 15

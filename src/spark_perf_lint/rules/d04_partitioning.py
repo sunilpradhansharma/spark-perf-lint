@@ -14,7 +14,7 @@ from __future__ import annotations
 import ast
 
 from spark_perf_lint.config import LintConfig
-from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
+from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, MethodCallInfo
 from spark_perf_lint.rules.base import CodeRule
 from spark_perf_lint.rules.registry import register_rule
 from spark_perf_lint.types import Dimension, EffortLevel, Finding, Severity
@@ -72,7 +72,7 @@ _SAFE_PARTITION_NAMES = frozenset(
 # =============================================================================
 
 
-def _int_arg(call) -> int | None:
+def _int_arg(call: MethodCallInfo) -> int | None:
     """Return the integer value of the first positional argument, or ``None``."""
     if not call.args:
         return None
@@ -97,7 +97,7 @@ def _is_high_cardinality_col(col: str) -> bool:
     return any(c.endswith(s) for s in _HIGH_CARDINALITY_SUFFIXES)
 
 
-def _repartition_columns(call) -> set[str]:
+def _repartition_columns(call: MethodCallInfo) -> set[str]:
     """Extract string column names from a ``repartition()`` call's arguments.
 
     Skips integer arguments (partition-count positional arg).
@@ -109,7 +109,7 @@ def _repartition_columns(call) -> set[str]:
     return cols
 
 
-def _join_keys(call) -> set[str]:
+def _join_keys(call: MethodCallInfo) -> set[str]:
     """Extract string join key(s) from a ``join()`` call's ``on`` argument."""
     keys: set[str] = set()
     if len(call.args) < 2:
@@ -651,7 +651,11 @@ class MissingBucketByRule(CodeRule):
                 continue  # already bucketed
             # Extract table name for the message if available
             table_name = ""
-            if call.args and isinstance(call.args[0], ast.Constant):
+            if (
+                call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
                 table_name = f" '{call.args[0].value}'"
             findings.append(
                 self.create_finding(

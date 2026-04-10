@@ -185,7 +185,7 @@ def scan(
       spark-perf-lint scan . --dimension D03,D08 --quiet
     """
     # Build CLI override dict from options that were explicitly provided
-    cli_overrides: dict = {}
+    cli_overrides: dict[str, Any] = {}
 
     if severity_threshold:
         cli_overrides.setdefault("general", {})["severity_threshold"] = severity_threshold
@@ -200,7 +200,7 @@ def scan(
     # Resolve config
     try:
         if config_path is not None:
-            import yaml  # lazy import — only needed here
+            import yaml  # type: ignore[import-untyped]  # lazy import — only needed here
 
             raw_yaml = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
             from spark_perf_lint.config import _DEFAULTS, _deep_merge
@@ -224,7 +224,7 @@ def scan(
     # --- Run the scan ---
     from spark_perf_lint.engine.orchestrator import ScanOrchestrator
 
-    scan_paths = [str(p) for p in paths] if paths else [str(Path.cwd())]
+    scan_paths: list[str | Path] = [str(p) for p in paths] if paths else [str(Path.cwd())]
     orchestrator = ScanOrchestrator(config)
 
     try:
@@ -425,6 +425,7 @@ _DIMENSION_META: dict[str, tuple[str, str]] = {
     "D11": ("d11_monitoring", "Monitoring & Observability"),
 }
 
+
 def _rule_catalogue() -> dict[str, tuple[str, str]]:
     """Return a live rule_id → (severity, description) dict from the registry.
 
@@ -450,6 +451,7 @@ def _get_catalogue() -> dict[str, tuple[str, str]]:
     if not _RULE_CATALOGUE:
         _RULE_CATALOGUE = _rule_catalogue()
     return _RULE_CATALOGUE
+
 
 _SEVERITY_COLORS: dict[str, str] = {
     "CRITICAL": "red",

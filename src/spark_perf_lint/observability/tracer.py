@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import abc
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from spark_perf_lint.config import LintConfig
@@ -105,7 +105,7 @@ class BaseTracer(abc.ABC):  # noqa: B024
 
     def __init__(self, config: LintConfig) -> None:
         self._config = config
-        self._obs_cfg: dict = config.raw.get("observability", {})
+        self._obs_cfg: dict[str, Any] = config.raw.get("observability", {})
         self._trace_level: str = self._obs_cfg.get("trace_level", TraceLevel.STANDARD)
         self._run_id: str = ""
 

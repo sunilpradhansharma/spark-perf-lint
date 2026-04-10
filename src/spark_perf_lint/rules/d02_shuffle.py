@@ -12,7 +12,7 @@ Rule IDs: SPL-D02-001 through SPL-D02-008
 from __future__ import annotations
 
 from spark_perf_lint.config import LintConfig
-from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
+from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, MethodCallInfo
 from spark_perf_lint.engine.pattern_matcher import PatternMatcher
 from spark_perf_lint.rules.base import CodeRule, ConfigRule
 from spark_perf_lint.rules.registry import register_rule
@@ -560,8 +560,8 @@ class MultipleShufflesInSequenceRule(CodeRule):
         break_lines = {c.line for c in all_calls if c.method_name in _BREAK_METHODS}
 
         # Build runs of consecutive shuffles with no materialisation between them.
-        runs: list[list] = []
-        current: list = [shuffle_calls[0]]
+        runs: list[list[MethodCallInfo]] = []
+        current: list[MethodCallInfo] = [shuffle_calls[0]]
 
         for prev, cur in zip(shuffle_calls, shuffle_calls[1:], strict=False):
             # Use prev.line <= bl (inclusive) so cache() on the same line as the

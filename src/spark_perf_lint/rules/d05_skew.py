@@ -16,7 +16,7 @@ import ast
 import re
 
 from spark_perf_lint.config import LintConfig
-from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer
+from spark_perf_lint.engine.ast_analyzer import ASTAnalyzer, MethodCallInfo
 from spark_perf_lint.rules.base import CodeRule, ConfigRule
 from spark_perf_lint.rules.registry import register_rule
 from spark_perf_lint.types import Dimension, EffortLevel, Finding, Severity
@@ -84,7 +84,7 @@ def _is_skew_prone_col(col: str) -> bool:
     return any(c.startswith(p) for p in _SKEW_PRONE_PREFIXES)
 
 
-def _get_string_args(call) -> list[str]:
+def _get_string_args(call: MethodCallInfo) -> list[str]:
     """Extract all string-literal positional arguments from a method call.
 
     Also unpacks ``ast.List`` arguments so that ``groupBy(['a', 'b'])`` is
@@ -101,7 +101,7 @@ def _get_string_args(call) -> list[str]:
     return result
 
 
-def _get_join_string_keys(call) -> list[str]:
+def _get_join_string_keys(call: MethodCallInfo) -> list[str]:
     """Extract string join keys from a ``join()`` call's ``on`` argument.
 
     Handles ``join(other, 'key')``, ``join(other, ['k1', 'k2'])``, and
