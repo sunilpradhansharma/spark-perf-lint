@@ -750,7 +750,7 @@ spark-perf-lint/
 
 ## Roadmap
 
-### v0.1.0 — Current Release
+### v0.1.0 : Current Release
 
 - [x] 93 rules across 11 dimensions (D01–D11)
 - [x] Pure-Python AST scanner (zero Spark dependency)
