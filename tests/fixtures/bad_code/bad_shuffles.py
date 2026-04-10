@@ -7,13 +7,8 @@ cluster with more than one executor.
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark import SparkContext
 
-spark = (
-    SparkSession.builder
-    .appName("sales_kpi_aggregation")
-    .getOrCreate()
-)
+spark = SparkSession.builder.appName("sales_kpi_aggregation").getOrCreate()
 sc = spark.sparkContext
 
 # ---------------------------------------------------------------------------
@@ -21,38 +16,28 @@ sc = spark.sparkContext
 # ---------------------------------------------------------------------------
 
 transactions = spark.read.parquet("/data/transactions")
-products     = spark.read.parquet("/data/products")
+products = spark.read.parquet("/data/products")
 
 # ---------------------------------------------------------------------------
 # RDD word-count style aggregation — groupByKey anti-pattern
 # ---------------------------------------------------------------------------
 
-raw_rdd = (
-    transactions
-    .select("store_id", "amount")
-    .rdd
-    .map(lambda row: (row["store_id"], row["amount"]))
+raw_rdd = transactions.select("store_id", "amount").rdd.map(
+    lambda row: (row["store_id"], row["amount"])
 )
 
 # SPL-D02-001: groupByKey() shuffles ALL values to each reducer before
 # summing.  Replace with reduceByKey(lambda a, b: a + b) to combine
 # partial sums on the map side — dramatically less shuffle data.     [CRITICAL]
-store_totals = (
-    raw_rdd
-    .groupByKey()
-    .mapValues(sum)
-    .collect()
-)
+store_totals = raw_rdd.groupByKey().mapValues(sum).collect()
 
 # ---------------------------------------------------------------------------
 # DataFrame pipeline — multiple shuffles without a checkpoint break
 # ---------------------------------------------------------------------------
 
 # Shuffle 1: groupBy + agg
-daily_sales = (
-    transactions
-    .groupBy("sale_date", "store_id")
-    .agg(F.sum("amount").alias("daily_total"))
+daily_sales = transactions.groupBy("sale_date", "store_id").agg(
+    F.sum("amount").alias("daily_total")
 )
 
 # Shuffle 2: join (sort-merge)
@@ -62,10 +47,8 @@ daily_enriched = daily_sales.join(products, on="store_id", how="left")
 # SPL-D02-007: three consecutive shuffle operations with no cache(),
 # persist(), or checkpoint() in between.  The plan re-reads and
 # re-shuffles the upstream stages on every action.                   [WARNING]
-weekly_rollup = (
-    daily_enriched
-    .groupBy("week_number", "category")
-    .agg(F.sum("daily_total").alias("weekly_total"))
+weekly_rollup = daily_enriched.groupBy("week_number", "category").agg(
+    F.sum("daily_total").alias("weekly_total")
 )
 
 # ---------------------------------------------------------------------------

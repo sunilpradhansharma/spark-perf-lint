@@ -23,8 +23,8 @@ import pytest
 
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.engine.file_scanner import (
-    FileScanner,
     _QUICK_SCAN_BYTES,
+    FileScanner,
     _build_target,
     _read_head,
 )
@@ -93,9 +93,8 @@ def process_{n}(items: list) -> list:
 
 # A large non-PySpark file: tests that even 50 KB of plain Python is
 # skipped quickly (head read only, no full I/O).
-_LARGE_PLAIN_TEMPLATE = (
-    "# auto-generated config constants\n"
-    + "".join(f'CONFIG_{i} = "value_{i}"\n' for i in range(3000))
+_LARGE_PLAIN_TEMPLATE = "# auto-generated config constants\n" + "".join(
+    f'CONFIG_{i} = "value_{i}"\n' for i in range(3000)
 )
 
 
@@ -119,8 +118,7 @@ def _make_spark_files(directory: Path, count: int) -> list[Path]:
 
 def _make_plain_files(directory: Path, count: int) -> list[Path]:
     return [
-        _write(directory / f"util_{i}.py", _PLAIN_PYTHON_TEMPLATE.format(n=i))
-        for i in range(count)
+        _write(directory / f"util_{i}.py", _PLAIN_PYTHON_TEMPLATE.format(n=i)) for i in range(count)
     ]
 
 
@@ -173,9 +171,9 @@ class TestFastPath:
         """A 50 KB+ non-Spark file is detected via 8 KB head — file is not fully read."""
         f = _write(tmp_path / "generated_constants.py", _LARGE_PLAIN_TEMPLATE)
 
-        assert f.stat().st_size > _QUICK_SCAN_BYTES, (
-            "Precondition: file must exceed head-scan limit to exercise the optimisation"
-        )
+        assert (
+            f.stat().st_size > _QUICK_SCAN_BYTES
+        ), "Precondition: file must exceed head-scan limit to exercise the optimisation"
 
         config = LintConfig.from_dict({})
         target = _build_target(f, tmp_path, config)
@@ -301,7 +299,6 @@ class TestParallelExecution:
 
         # Serial path (threshold above batch size)
         serial_orch = ScanOrchestrator(config)
-        from spark_perf_lint.engine.orchestrator import _PARALLEL_THRESHOLD as PT
         from unittest.mock import patch
 
         with patch("spark_perf_lint.engine.orchestrator._PARALLEL_THRESHOLD", 999):
@@ -392,18 +389,14 @@ class TestBenchmark:
         report = orchestrator.scan([str(p) for p in files])
         elapsed = time.perf_counter() - t0
 
-        assert report.files_scanned == 20, (
-            f"Expected 20 files scanned, got {report.files_scanned}"
-        )
+        assert report.files_scanned == 20, f"Expected 20 files scanned, got {report.files_scanned}"
         assert len(report.findings) > 0, "Expected findings from anti-pattern files"
         assert elapsed < 5.0, (
             f"Scan of 20 PySpark files took {elapsed:.3f}s — exceeds 5-second budget.\n"
             f"files_scanned={report.files_scanned}, findings={len(report.findings)}"
         )
 
-    def test_scan_20_files_mixed_spark_plain_under_5_seconds(
-        self, tmp_path: Path
-    ) -> None:
+    def test_scan_20_files_mixed_spark_plain_under_5_seconds(self, tmp_path: Path) -> None:
         """20 Spark + 20 plain files must complete in < 5 seconds.
 
         Simulates a realistic pre-commit batch where half the staged files are
@@ -421,9 +414,7 @@ class TestBenchmark:
         elapsed = time.perf_counter() - t0
 
         assert report.files_scanned == 20  # only Spark files analysed
-        assert elapsed < 5.0, (
-            f"Mixed 40-file scan took {elapsed:.3f}s — exceeds 5-second budget."
-        )
+        assert elapsed < 5.0, f"Mixed 40-file scan took {elapsed:.3f}s — exceeds 5-second budget."
 
     def test_scan_duration_reported_in_audit_report(self, tmp_path: Path) -> None:
         """AuditReport.scan_duration_seconds must reflect actual wall time."""
@@ -458,9 +449,9 @@ class TestBenchmark:
             n_writes=3,
         )
         actual_lines = len(code.splitlines())
-        assert actual_lines >= 1000, (
-            f"Precondition: generated file must have >= 1000 lines, got {actual_lines}"
-        )
+        assert (
+            actual_lines >= 1000
+        ), f"Precondition: generated file must have >= 1000 lines, got {actual_lines}"
 
         config = LintConfig.from_dict({"general": {"severity_threshold": "INFO"}})
         orch = ScanOrchestrator(config)
@@ -478,9 +469,7 @@ class TestBenchmark:
             f"  duration_reported={report.scan_duration_seconds:.3f}s"
         )
 
-    def test_50_mixed_files_full_scan_under_10_seconds(
-        self, tmp_path: Path
-    ) -> None:
+    def test_50_mixed_files_full_scan_under_10_seconds(self, tmp_path: Path) -> None:
         """50 generated files (25 PySpark + 25 plain Python) must complete in < 10 s.
 
         Uses ``generate_multi_file_project`` so the project mirrors a realistic
@@ -515,9 +504,7 @@ class TestBenchmark:
             f"  files_scanned={report.files_scanned}, findings={len(report.findings)}"
         )
 
-    def test_non_spark_file_skip_under_50ms_per_file(
-        self, tmp_path: Path
-    ) -> None:
+    def test_non_spark_file_skip_under_50ms_per_file(self, tmp_path: Path) -> None:
         """Non-Spark file classification must cost < 50 ms per file on average.
 
         Generates 50 plain Python utility files via ``generate_multi_file_project``
@@ -541,9 +528,9 @@ class TestBenchmark:
             f"All plain Python files should be fast-pathed and skipped, "
             f"but {len(scannable)} were marked scannable."
         )
-        assert summary.non_pyspark == 50, (
-            f"Expected 50 non-PySpark files, got {summary.non_pyspark}"
-        )
+        assert (
+            summary.non_pyspark == 50
+        ), f"Expected 50 non-PySpark files, got {summary.non_pyspark}"
 
         per_file_ms = (elapsed / 50) * 1000
         assert per_file_ms < 50.0, (

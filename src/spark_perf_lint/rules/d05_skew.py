@@ -408,8 +408,7 @@ class AqeSkewThresholdTooHighRule(ConfigRule):
     dimension = _DIM
     default_severity = Severity.INFO
     description = (
-        "AQE skew detection threshold exceeds 1 GB"
-        " — large skewed partitions may not be split."
+        "AQE skew detection threshold exceeds 1 GB" " — large skewed partitions may not be split."
     )
     explanation = (
         "AQE's skew join optimisation uses two thresholds to detect skewed partitions:\n\n"
@@ -472,7 +471,8 @@ class AqeSkewThresholdTooHighRule(ConfigRule):
                 factor = float(raw_factor.strip())
                 if factor > _SKEW_FACTOR_MAX:
                     cfgs = [
-                        c for c in analyzer.find_spark_session_configs()
+                        c
+                        for c in analyzer.find_spark_session_configs()
                         if c.key == self._FACTOR_KEY
                     ]
                     line = cfgs[-1].end_line if cfgs else 1
@@ -686,9 +686,7 @@ class NullHeavyJoinKeyRule(CodeRule):
         "If null keys must be preserved, use a left join and handle nulls in the result."
     )
     before_example = "df.join(other, 'parent_id')  # parent_id is null for root records"
-    after_example = (
-        "df.filter(col('parent_id').isNotNull()).join(other, 'parent_id')"
-    )
+    after_example = "df.filter(col('parent_id').isNotNull()).join(other, 'parent_id')"
     references = [
         "https://spark.apache.org/docs/latest/sql-ref-null-semantics.html",
     ]
@@ -723,9 +721,7 @@ class NullHeavyJoinKeyRule(CodeRule):
                 continue
 
             # Suppress if null handling appears within 5 lines before the join
-            has_handling = any(
-                call.line - 5 <= nl < call.line for nl in null_handled_lines
-            )
+            has_handling = any(call.line - 5 <= nl < call.line for nl in null_handled_lines)
             if has_handling:
                 continue
 

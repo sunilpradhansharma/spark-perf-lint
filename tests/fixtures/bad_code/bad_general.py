@@ -10,9 +10,9 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType
 
 spark = (
-    SparkSession.builder
-    .appName("fraud_detection_scoring")
-    .config("spark.sql.shuffle.partitions", "400")
+    SparkSession.builder.appName("fraud_detection_scoring").config(
+        "spark.sql.shuffle.partitions", "400"
+    )
     # CBO and join-reorder are both off — Catalyst uses heuristic join
     # ordering only, which is suboptimal for a 4-table star schema.
     .getOrCreate()
@@ -21,6 +21,7 @@ spark = (
 # ---------------------------------------------------------------------------
 # UDFs that block predicate pushdown
 # ---------------------------------------------------------------------------
+
 
 # SPL-D10-001 / SPL-D09-001: Python UDFs are black boxes to Catalyst.
 # Any filter on a UDF-derived column cannot be pushed down to the data
@@ -50,9 +51,9 @@ def risk_band(score: float) -> int:
 # reads zero rows.  Externalise paths to environment variables or a
 # config file.                                                         [INFO]
 transactions = spark.read.parquet("/data/transactions/current")
-accounts     = spark.read.parquet("/data/accounts/v2")
-rules        = spark.read.parquet("/data/fraud_rules/latest")
-watchlist    = spark.read.parquet("/data/watchlist")
+accounts = spark.read.parquet("/data/accounts/v2")
+rules = spark.read.parquet("/data/fraud_rules/latest")
+watchlist = spark.read.parquet("/data/watchlist")
 
 # ---------------------------------------------------------------------------
 # Multi-join scoring pipeline — CBO absent
@@ -65,12 +66,12 @@ watchlist    = spark.read.parquet("/data/watchlist")
 # SPL-D10-003: spark.sql.cbo.joinReorder.enabled is also absent, so
 # the three-way join will execute in the order written.              [INFO]
 scored = (
-    transactions
-    .join(accounts,  on="account_id", how="left")
-    .join(rules,     on="rule_set_id", how="inner")
-    .join(watchlist, on="entity_id",  how="left")
-    .withColumn("fraud_score",
-                F.col("base_score") * F.col("rule_weight") * F.col("account_risk_factor"))
+    transactions.join(accounts, on="account_id", how="left")
+    .join(rules, on="rule_set_id", how="inner")
+    .join(watchlist, on="entity_id", how="left")
+    .withColumn(
+        "fraud_score", F.col("base_score") * F.col("rule_weight") * F.col("account_risk_factor")
+    )
     .withColumn("risk_band_label", risk_band(F.col("fraud_score")))
 )
 

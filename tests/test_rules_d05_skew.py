@@ -315,10 +315,7 @@ class TestMissingSaltingPatternRule:
         assert findings(self.rule, "x = 1\n") == []
 
     def test_multiple_skew_id_joins_all_flagged(self):
-        code = SPARK_HDR + (
-            "df.join(a, 'user_id')\n"
-            "df.join(b, 'product_id')\n"
-        )
+        code = SPARK_HDR + ("df.join(a, 'user_id')\n" "df.join(b, 'product_id')\n")
         fs = findings(self.rule, code)
         assert len(fs) == 2
 
@@ -407,16 +404,12 @@ class TestNullHeavyJoinKeyRule:
 
     def test_no_finding_when_dropna_within_5_lines_before(self):
         code = SPARK_HDR + (
-            "df2 = df.dropna(subset=['parent_id'])\n"
-            "df2.join(other, 'parent_id')\n"
+            "df2 = df.dropna(subset=['parent_id'])\n" "df2.join(other, 'parent_id')\n"
         )
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_fillna_within_5_lines_before(self):
-        code = SPARK_HDR + (
-            "df2 = df.fillna({'parent_id': 0})\n"
-            "df2.join(other, 'parent_id')\n"
-        )
+        code = SPARK_HDR + ("df2 = df.fillna({'parent_id': 0})\n" "df2.join(other, 'parent_id')\n")
         assert findings(self.rule, code) == []
 
     def test_fires_when_dropna_more_than_5_lines_before(self):

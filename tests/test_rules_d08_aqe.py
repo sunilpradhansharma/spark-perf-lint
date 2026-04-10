@@ -172,8 +172,7 @@ class TestAqeSkewJoinDisabledWithJoinsRule:
 
     def test_fires_when_skew_disabled_and_low_cardinality_join(self):
         code = (
-            _ss_cfg(("spark.sql.adaptive.skewJoin.enabled", "false"))
-            + "df.join(other, 'status')\n"
+            _ss_cfg(("spark.sql.adaptive.skewJoin.enabled", "false")) + "df.join(other, 'status')\n"
         )
         fs = findings(self.rule, code)
         assert len(fs) == 1

@@ -11,8 +11,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 spark = (
-    SparkSession.builder
-    .appName("user_engagement_metrics")
+    SparkSession.builder.appName("user_engagement_metrics")
     # SPL-D05-003: explicitly disabling AQE skew-join handling forces
     # Spark to use the standard sort-merge join even for partitions
     # that are 100× larger than average.                              [WARNING]
@@ -25,10 +24,10 @@ spark = (
 # Load raw tables
 # ---------------------------------------------------------------------------
 
-events    = spark.read.parquet("/data/clickstream_events")
-users     = spark.read.parquet("/data/users")
-sellers   = spark.read.parquet("/data/sellers")
-orders    = spark.read.parquet("/data/orders")
+events = spark.read.parquet("/data/clickstream_events")
+users = spark.read.parquet("/data/users")
+sellers = spark.read.parquet("/data/sellers")
+orders = spark.read.parquet("/data/orders")
 
 # ---------------------------------------------------------------------------
 # Join on a low-cardinality column — guaranteed skew
@@ -51,14 +50,10 @@ weighted_events = events.join(status_lookup, on="account_status", how="left")
 # SPL-D05-002: groupBy("account_status") with only one low-cardinality
 # key.  All rows with status="active" land on the same reducer, creating
 # a partition that may be 1000× larger than the others.              [WARNING]
-status_counts = (
-    events
-    .groupBy("account_status")
-    .agg(
-        F.count("*").alias("event_count"),
-        F.countDistinct("user_id").alias("unique_users"),
-        F.sum("revenue").alias("total_revenue"),
-    )
+status_counts = events.groupBy("account_status").agg(
+    F.count("*").alias("event_count"),
+    F.countDistinct("user_id").alias("unique_users"),
+    F.sum("revenue").alias("total_revenue"),
 )
 
 # ---------------------------------------------------------------------------

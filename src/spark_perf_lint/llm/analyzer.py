@@ -180,9 +180,7 @@ class LLMAnalyzer:
             source_map=source_map,
             max_calls=calls_for_findings,
         )
-        result.calls_made = sum(
-            1 for f in result.enriched_findings if f.llm_insight is not None
-        )
+        result.calls_made = sum(1 for f in result.enriched_findings if f.llm_insight is not None)
 
         remaining = max_calls - result.calls_made
 
@@ -190,9 +188,7 @@ class LLMAnalyzer:
         files_with_findings = {f.file_path for f in result.enriched_findings}
         if remaining >= 1 and len(files_with_findings) >= 2:
             try:
-                result.cross_file_insights = self._cross_file_analysis(
-                    result.enriched_findings
-                )
+                result.cross_file_insights = self._cross_file_analysis(result.enriched_findings)
                 result.calls_made += 1
                 remaining -= 1
             except Exception as exc:  # noqa: BLE001
@@ -252,11 +248,7 @@ class LLMAnalyzer:
         except KeyError:
             min_severity = Severity.WARNING
 
-        budget = (
-            max_calls
-            if max_calls is not None
-            else int(llm_cfg.get("max_llm_calls", 20))
-        )
+        budget = max_calls if max_calls is not None else int(llm_cfg.get("max_llm_calls", 20))
 
         calls_used = 0
         # Track per-file usage to respect batch_size
@@ -279,9 +271,7 @@ class LLMAnalyzer:
                 from spark_perf_lint.llm.prompts import PromptTemplates
 
                 messages = PromptTemplates.finding_analysis(finding, snippet)
-                response = self._get_provider().complete(
-                    messages, system=PromptTemplates.SYSTEM
-                )
+                response = self._get_provider().complete(messages, system=PromptTemplates.SYSTEM)
                 finding.llm_insight = response.strip()
                 file_call_counts[file_key] = file_call_counts.get(file_key, 0) + 1
                 calls_used += 1
@@ -293,9 +283,7 @@ class LLMAnalyzer:
                     budget,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to enrich finding %s: %s", finding.rule_id, exc
-                )
+                logger.warning("Failed to enrich finding %s: %s", finding.rule_id, exc)
 
         return findings
 
@@ -319,9 +307,7 @@ class LLMAnalyzer:
             by_file.setdefault(f.file_path, []).append(f)
 
         messages = PromptTemplates.cross_file_analysis(by_file)
-        return self._get_provider().complete(
-            messages, system=PromptTemplates.SYSTEM
-        ).strip()
+        return self._get_provider().complete(messages, system=PromptTemplates.SYSTEM).strip()
 
     def _executive_summary(self, report: AuditReport) -> str:
         """Call the LLM for a management-level executive summary.
@@ -335,9 +321,7 @@ class LLMAnalyzer:
         from spark_perf_lint.llm.prompts import PromptTemplates
 
         messages = PromptTemplates.executive_summary(report)
-        return self._get_provider().complete(
-            messages, system=PromptTemplates.SYSTEM
-        ).strip()
+        return self._get_provider().complete(messages, system=PromptTemplates.SYSTEM).strip()
 
     def _get_provider(self) -> LLMProvider:
         """Return the provider, building it lazily from config if needed.
@@ -395,8 +379,7 @@ class LLMAnalyzer:
         end = min(len(lines), idx + _SNIPPET_CONTEXT + 1)
 
         numbered = [
-            f"{lineno:4d} | {line}"
-            for lineno, line in enumerate(lines[start:end], start=start + 1)
+            f"{lineno:4d} | {line}" for lineno, line in enumerate(lines[start:end], start=start + 1)
         ]
         return "\n".join(numbered)
 

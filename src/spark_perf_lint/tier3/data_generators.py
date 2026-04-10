@@ -39,7 +39,6 @@ Generator summary
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 # PySpark is required at import time for this module.
 # Importing this module without PySpark installed raises ImportError immediately,
@@ -52,8 +51,6 @@ from pyspark.sql.types import (
     IntegerType,
     LongType,
     StringType,
-    StructField,
-    StructType,
 )
 
 # =============================================================================
@@ -117,17 +114,12 @@ def _build_nested_struct(depth: int, seed: int = 0) -> Column:
             (F.abs(F.hash(F.col("id"), F.lit(seed))) % 1_000_000)
             .cast(DoubleType())
             .alias("leaf_float"),
-            (F.abs(F.hash(F.col("id"), F.lit(seed + 1))) % 10_000)
-            .alias("leaf_int"),
-            F.concat(F.lit("val_"), F.col("id").cast(StringType()))
-            .alias("leaf_str"),
+            (F.abs(F.hash(F.col("id"), F.lit(seed + 1))) % 10_000).alias("leaf_int"),
+            F.concat(F.lit("val_"), F.col("id").cast(StringType())).alias("leaf_str"),
         )
     return F.struct(
-        (F.abs(F.hash(F.col("id"), F.lit(seed))) % 1_000_000)
-        .cast(DoubleType())
-        .alias("value"),
-        F.concat(F.lit(f"L{depth}_"), F.col("id").cast(StringType()))
-        .alias("tag"),
+        (F.abs(F.hash(F.col("id"), F.lit(seed))) % 1_000_000).cast(DoubleType()).alias("value"),
+        F.concat(F.lit(f"L{depth}_"), F.col("id").cast(StringType())).alias("tag"),
         _build_nested_struct(depth - 1, seed + 100).alias("nested"),
     )
 
@@ -194,9 +186,7 @@ def generate_skewed_data(
         spark.range(n_rows, numPartitions=n_partitions)
         .withColumn(
             "join_key",
-            F.floor(F.pow(F.rand(seed), alpha) * n_keys)
-            .cast(LongType())
-            .cast(StringType()),
+            F.floor(F.pow(F.rand(seed), alpha) * n_keys).cast(LongType()).cast(StringType()),
         )
         .withColumnRenamed("id", "value")
         .withColumn("amount", (F.rand(seed + 1) * 1_000).cast(DoubleType()))
@@ -281,9 +271,7 @@ def generate_join_test_data(
             F.when(
                 F.rand(seed) < null_key_pct,
                 F.lit(None).cast(StringType()),
-            ).otherwise(
-                (F.col("fact_id") % key_cardinality).cast(StringType())
-            ),
+            ).otherwise((F.col("fact_id") % key_cardinality).cast(StringType())),
         )
         .withColumn("amount", (F.rand(seed + 1) * 10_000).cast(DoubleType()))
         .withColumn("ts", (F.col("fact_id") % 86_400 + 1_700_000_000).cast(LongType()))
@@ -380,13 +368,12 @@ def generate_partition_test_data(
             (F.abs(F.hash(F.col("id"), F.lit(2))) % n_cold + n_hot).cast(IntegerType()),
         )
     else:
-        partition_key_col = (
-            (F.abs(F.hash(F.col("id"), F.lit(3))) % n_partitions).cast(IntegerType())
+        partition_key_col = (F.abs(F.hash(F.col("id"), F.lit(3))) % n_partitions).cast(
+            IntegerType()
         )
 
     return (
-        base
-        .withColumn("partition_key", partition_key_col)
+        base.withColumn("partition_key", partition_key_col)
         .withColumn("value", (F.rand(seed + 1) * 1_000).cast(DoubleType()))
         .repartition(n_partitions, "partition_key")
     )
@@ -433,8 +420,7 @@ def generate_high_cardinality_data(
     """
     n_partitions = max(10, min(200, n_rows // 50_000))
     payload_expr = F.lpad(
-        (F.abs(F.hash(F.col("id"), F.lit(seed + 99))) % (10 ** payload_length))
-        .cast(StringType()),
+        (F.abs(F.hash(F.col("id"), F.lit(seed + 99))) % (10**payload_length)).cast(StringType()),
         payload_length,
         "0",
     )
@@ -442,11 +428,7 @@ def generate_high_cardinality_data(
         spark.range(n_rows, numPartitions=n_partitions)
         .withColumn(
             "high_card_key",
-            F.upper(
-                F.hex(
-                    (F.col("id") % n_unique_keys).cast(LongType())
-                )
-            ),
+            F.upper(F.hex((F.col("id") % n_unique_keys).cast(LongType()))),
         )
         .withColumn("value", F.col("id") % n_unique_keys)
         .withColumn("payload", payload_expr)
@@ -500,9 +482,8 @@ def generate_wide_table(
     n_partitions = max(10, min(100, n_rows // 50_000))
     n_metric_cols = n_columns - 2  # subtract id and key
 
-    base = (
-        spark.range(n_rows, numPartitions=n_partitions)
-        .withColumn("key", (F.col("id") % 1_000).cast(StringType()))
+    base = spark.range(n_rows, numPartitions=n_partitions).withColumn(
+        "key", (F.col("id") % 1_000).cast(StringType())
     )
 
     # Build all metric column expressions in one select to avoid

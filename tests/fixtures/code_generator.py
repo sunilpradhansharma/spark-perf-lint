@@ -31,21 +31,21 @@ __all__ = [
 #: The complete set of injectable anti-pattern names.
 ALL_ANTI_PATTERNS: frozenset[str] = frozenset(
     [
-        "aqe_disabled",         # spark.sql.adaptive.enabled = false  [D08]
-        "broadcast_disabled",   # autoBroadcastJoinThreshold = -1     [D03]
-        "cache_no_unpersist",   # .cache() without .unpersist()       [D06]
-        "collect_no_filter",    # .collect() on unfiltered DF         [D09]
-        "cross_join",           # .crossJoin(...)                     [D03]
-        "csv_read",             # spark.read.csv(...)                 [D07]
-        "groupByKey",           # rdd.groupByKey()                    [D02]
-        "infer_schema",         # .option("inferSchema", "true")      [D07]
-        "jdbc_no_partitions",   # jdbc read without partitionColumn   [D07]
-        "python_udf",           # @F.udf(...)                        [D09]
-        "repartition_one",      # .repartition(1)                    [D04]
-        "select_star",          # .select("*")                       [D10]
-        "show_in_prod",         # .show()                            [D11]
-        "toPandas_no_limit",    # .toPandas() without .limit()       [D09]
-        "withColumn_loop",      # for col in cols: df.withColumn(...) [D09]
+        "aqe_disabled",  # spark.sql.adaptive.enabled = false  [D08]
+        "broadcast_disabled",  # autoBroadcastJoinThreshold = -1     [D03]
+        "cache_no_unpersist",  # .cache() without .unpersist()       [D06]
+        "collect_no_filter",  # .collect() on unfiltered DF         [D09]
+        "cross_join",  # .crossJoin(...)                     [D03]
+        "csv_read",  # spark.read.csv(...)                 [D07]
+        "groupByKey",  # rdd.groupByKey()                    [D02]
+        "infer_schema",  # .option("inferSchema", "true")      [D07]
+        "jdbc_no_partitions",  # jdbc read without partitionColumn   [D07]
+        "python_udf",  # @F.udf(...)                        [D09]
+        "repartition_one",  # .repartition(1)                    [D04]
+        "select_star",  # .select("*")                       [D10]
+        "show_in_prod",  # .show()                            [D11]
+        "toPandas_no_limit",  # .toPandas() without .limit()       [D09]
+        "withColumn_loop",  # for col in cols: df.withColumn(...) [D09]
     ]
 )
 
@@ -133,7 +133,7 @@ class _SparkFileBuilder:
         self._sep()
         self._add()
         self._add("spark = (")
-        self._add('    SparkSession.builder')
+        self._add("    SparkSession.builder")
         self._add('    .appName("generated_etl_job")')
 
         # Config-level anti-patterns go into the builder chain.
@@ -227,12 +227,12 @@ class _SparkFileBuilder:
         for i in range(n):
             name = f"udf_transform_{i}"
             self._udf_names.append(name)
-            self._add(f"@F.udf(StringType())")
+            self._add("@F.udf(StringType())")
             self._add(f"def {name}(value: str) -> str:")
             self._add(f'    """Synthetic UDF {i} — opaque to Catalyst."""')
-            self._add(f"    if value is None:")
-            self._add(f'        return "unknown"')
-            self._add(f'    return f"transformed_{{value}}"')
+            self._add("    if value is None:")
+            self._add('        return "unknown"')
+            self._add('    return f"transformed_{value}"')
             self._add()
 
     # ------------------------------------------------------------------
@@ -294,12 +294,12 @@ class _SparkFileBuilder:
         # Caches — track which ones need unpersist
         for i in range(self._n_caches):
             cache_var = f"cached_{i}"
-            self._add(f'# Cache subset {i} for reuse')
+            self._add(f"# Cache subset {i} for reuse")
             self._add(f'{cache_var} = result.filter(F.col("partition_id") == {i})')
             self._add(f"{cache_var}.cache()")
             # Only skip unpersist for the FIRST cache when testing the anti-pattern.
             if "cache_no_unpersist" in self._anti and i == 0:
-                self._add(f"# (no unpersist — anti-pattern: cache_no_unpersist)")
+                self._add("# (no unpersist — anti-pattern: cache_no_unpersist)")
             else:
                 self._cached_vars.append(cache_var)
             self._add()
@@ -320,10 +320,10 @@ class _SparkFileBuilder:
         if "groupByKey" in self._anti:
             self._add("# Anti-pattern: RDD.groupByKey shuffles all values before aggregating")
             self._add(
-                '_rdd_counts = result.rdd'
+                "_rdd_counts = result.rdd"
                 '.map(lambda r: (r["category"], r["revenue"]))'
-                '.groupByKey()'
-                '.mapValues(list)'
+                ".groupByKey()"
+                ".mapValues(list)"
             )
             self._add()
 
@@ -390,7 +390,7 @@ class _SparkFileBuilder:
         while len(self._lines) < self._n_lines - 1:
             self._add(f"# Padding stage {pad_idx}")
             self._add(
-                f'_pad_{pad_idx} = result'
+                f"_pad_{pad_idx} = result"
                 f'.withColumn("norm_{pad_idx}", F.col("value").cast("double"))'
             )
             pad_idx += 1

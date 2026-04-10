@@ -20,9 +20,8 @@ from __future__ import annotations
 
 import difflib
 import sys
-from typing import IO, Sequence
+from typing import IO
 
-from rich.columns import Columns
 from rich.console import Console, Group
 from rich.padding import Padding
 from rich.panel import Panel
@@ -35,7 +34,6 @@ from rich.theme import Theme
 from spark_perf_lint import __version__
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.types import AuditReport, EffortLevel, Finding, Severity
-
 
 # ---------------------------------------------------------------------------
 # Theme and style constants
@@ -144,9 +142,7 @@ class TerminalReporter:
         )
 
         threshold = self.config.severity_threshold
-        visible: list[Finding] = [
-            f for f in self.report.findings if f.severity >= threshold
-        ]
+        visible: list[Finding] = [f for f in self.report.findings if f.severity >= threshold]
 
         if not self.quiet:
             self._render_header(console, visible)
@@ -252,6 +248,7 @@ class TerminalReporter:
         # Make file path relative if possible
         try:
             from pathlib import Path  # noqa: PLC0415
+
             rel = Path(finding.file_path)
             display_path = str(rel)
         except Exception:  # noqa: BLE001
@@ -486,12 +483,11 @@ class TerminalReporter:
         if not self.report.findings:
             status = Text()
             status.append(
-                f"  ✓  PASSED",
+                "  ✓  PASSED",
                 style="spl.pass",
             )
             status.append(
-                f" — {self.report.files_scanned} file(s) scanned, "
-                "no findings above threshold.",
+                f" — {self.report.files_scanned} file(s) scanned, " "no findings above threshold.",
                 style="default",
             )
         elif should_fail:

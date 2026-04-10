@@ -192,26 +192,21 @@ class TestJoinWithoutFilterRule:
     rule = JoinWithoutFilterRule()
 
     def test_fires_on_read_directly_into_join(self):
-        code = (
-            SPARK_HDR
-            + "result = spark.read.parquet('s3://bucket/events').join(users, 'id')\n"
-        )
+        code = SPARK_HDR + "result = spark.read.parquet('s3://bucket/events').join(users, 'id')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert "filter" in fs[0].message.lower() or "unfiltered" in fs[0].message.lower()
 
     def test_no_finding_when_filter_precedes_join(self):
         code = (
-            SPARK_HDR
-            + "result = (spark.read.parquet('s3://bucket/events')"
+            SPARK_HDR + "result = (spark.read.parquet('s3://bucket/events')"
             ".filter('date > \"2024\"').join(users, 'id'))\n"
         )
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_select_precedes_join(self):
         code = (
-            SPARK_HDR
-            + "result = (spark.read.parquet('s3://bucket/events')"
+            SPARK_HDR + "result = (spark.read.parquet('s3://bucket/events')"
             ".select('id', 'type').join(users, 'id'))\n"
         )
         assert findings(self.rule, code) == []
@@ -225,10 +220,7 @@ class TestJoinWithoutFilterRule:
         assert findings(self.rule, "x = 1\n") == []
 
     def test_fires_on_csv_read_into_join(self):
-        code = (
-            SPARK_HDR
-            + "result = spark.read.csv('data.csv').join(lookup, 'key')\n"
-        )
+        code = SPARK_HDR + "result = spark.read.csv('data.csv').join(lookup, 'key')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
 
@@ -279,8 +271,7 @@ class TestMultipleJoinsWithoutRepartitionRule:
 
     def test_fires_on_three_consecutive_joins(self):
         code = (
-            SPARK_HDR
-            + "df2 = df.join(a, 'k')\n"
+            SPARK_HDR + "df2 = df.join(a, 'k')\n"
             "df3 = df2.join(b, 'k')\n"
             "df4 = df3.join(c, 'k')\n"
         )
@@ -294,8 +285,7 @@ class TestMultipleJoinsWithoutRepartitionRule:
 
     def test_no_finding_when_cache_between_joins(self):
         code = (
-            SPARK_HDR
-            + "df2 = df.join(a, 'k').cache()\n"
+            SPARK_HDR + "df2 = df.join(a, 'k').cache()\n"
             "df3 = df2.join(b, 'k')\n"
             "df4 = df3.join(c, 'k')\n"
         )
@@ -311,8 +301,7 @@ class TestMultipleJoinsWithoutRepartitionRule:
 
     def test_finding_points_to_third_join(self):
         code = (
-            SPARK_HDR
-            + "df2 = df.join(a, 'k')    # line 3\n"
+            SPARK_HDR + "df2 = df.join(a, 'k')    # line 3\n"
             "df3 = df2.join(b, 'k')   # line 4\n"
             "df4 = df3.join(c, 'k')   # line 5\n"
         )
@@ -364,8 +353,7 @@ class TestJoinInsideLoopRule:
 
     def test_fires_on_join_in_for_loop(self):
         code = (
-            SPARK_HDR
-            + "for date in dates:\n"
+            SPARK_HDR + "for date in dates:\n"
             "    result = result.join(df.filter(f'date = \"{date}\"'), 'id')\n"
         )
         fs = findings(self.rule, code)
@@ -375,10 +363,7 @@ class TestJoinInsideLoopRule:
 
     def test_fires_on_join_in_while_loop(self):
         code = (
-            SPARK_HDR
-            + "while i < 10:\n"
-            "    df2 = df2.join(partitions[i], 'id')\n"
-            "    i += 1\n"
+            SPARK_HDR + "while i < 10:\n" "    df2 = df2.join(partitions[i], 'id')\n" "    i += 1\n"
         )
         fs = findings(self.rule, code)
         assert len(fs) == 1
@@ -394,19 +379,11 @@ class TestJoinInsideLoopRule:
     def test_severity_is_critical(self):
         from spark_perf_lint.types import Severity
 
-        code = (
-            SPARK_HDR
-            + "for x in items:\n"
-            "    df = df.join(lookup, 'id')\n"
-        )
+        code = SPARK_HDR + "for x in items:\n" "    df = df.join(lookup, 'id')\n"
         assert findings(self.rule, code)[0].severity == Severity.CRITICAL
 
     def test_finding_points_to_loop_line(self):
-        code = (
-            SPARK_HDR
-            + "for date in dates:\n"
-            "    result = result.join(daily, 'id')\n"
-        )
+        code = SPARK_HDR + "for date in dates:\n" "    result = result.join(daily, 'id')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].line_number == 3  # "for" line is line 3 after SPARK_HDR (2 lines)
@@ -443,8 +420,7 @@ class TestLeftJoinWithoutNullHandlingRule:
 
     def test_no_finding_when_dropna_nearby(self):
         code = (
-            SPARK_HDR
-            + "result = df.join(other, 'id', 'left')\n"
+            SPARK_HDR + "result = df.join(other, 'id', 'left')\n"
             "clean = result.dropna(subset=['required_col'])\n"
         )
         assert findings(self.rule, code) == []
@@ -467,8 +443,7 @@ class TestCboNotEnabledRule:
 
     def test_fires_when_three_joins_and_no_cbo(self):
         code = (
-            SPARK_HDR
-            + "spark = SparkSession.builder.getOrCreate()\n"
+            SPARK_HDR + "spark = SparkSession.builder.getOrCreate()\n"
             "df2 = df.join(a, 'k')\n"
             "df3 = df2.join(b, 'k')\n"
             "df4 = df3.join(c, 'k')\n"
@@ -490,8 +465,7 @@ class TestCboNotEnabledRule:
 
     def test_no_finding_for_only_two_joins(self):
         code = (
-            SPARK_HDR
-            + "spark = SparkSession.builder.getOrCreate()\n"
+            SPARK_HDR + "spark = SparkSession.builder.getOrCreate()\n"
             "df2 = df.join(a, 'k')\n"
             "df3 = df2.join(b, 'k')\n"
         )
@@ -500,8 +474,7 @@ class TestCboNotEnabledRule:
     def test_no_finding_when_no_session_creation(self):
         # File uses joins but doesn't create a session — config set elsewhere
         code = (
-            SPARK_HDR
-            + "df2 = df.join(a, 'k')\n"
+            SPARK_HDR + "df2 = df.join(a, 'k')\n"
             "df3 = df2.join(b, 'k')\n"
             "df4 = df3.join(c, 'k')\n"
         )
@@ -512,8 +485,7 @@ class TestCboNotEnabledRule:
 
     def test_finding_includes_join_count(self):
         code = (
-            SPARK_HDR
-            + "spark = SparkSession.builder.getOrCreate()\n"
+            SPARK_HDR + "spark = SparkSession.builder.getOrCreate()\n"
             "df2 = df.join(a, 'k')\n"
             "df3 = df2.join(b, 'k')\n"
             "df4 = df3.join(c, 'k')\n"

@@ -360,8 +360,7 @@ def _run_llm_analysis(
         if not quiet:
             click.echo(
                 click.style(
-                    f"  LLM analysis done — {result.calls_made} call(s), "
-                    f"model: {result.model}",
+                    f"  LLM analysis done — {result.calls_made} call(s), " f"model: {result.model}",
                     fg="bright_black",
                 )
             )
@@ -392,18 +391,14 @@ def _render_llm_extras(llm_result: Any) -> None:
     """Print cross-file insights and executive summary to stdout."""
     if llm_result.cross_file_insights:
         click.echo("")
-        click.echo(
-            click.style("  ── Cross-File Insights (Tier 2) ──", bold=True, fg="bright_cyan")
-        )
+        click.echo(click.style("  ── Cross-File Insights (Tier 2) ──", bold=True, fg="bright_cyan"))
         click.echo("")
         for line in llm_result.cross_file_insights.splitlines():
             click.echo(f"  {line}")
         click.echo("")
 
     if llm_result.executive_summary:
-        click.echo(
-            click.style("  ── Executive Summary (Tier 2) ──", bold=True, fg="bright_cyan")
-        )
+        click.echo(click.style("  ── Executive Summary (Tier 2) ──", bold=True, fg="bright_cyan"))
         click.echo("")
         for line in llm_result.executive_summary.splitlines():
             click.echo(f"  {line}")
@@ -941,7 +936,7 @@ def traces(
         )
     else:
         click.echo(
-            click.style(f"Report generated: ", fg="bright_black")
+            click.style("Report generated: ", fg="bright_black")
             + click.style(str(output_path), fg="bright_cyan", bold=True)
             + click.style(f"  ({n} trace{'s' if n != 1 else ''} loaded)", fg="bright_black")
         )

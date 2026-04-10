@@ -138,9 +138,7 @@ class PythonUdfDetectedRule(CodeRule):
         "batch processing instead of row-at-a-time execution."
     )
     before_example = (
-        "@udf(returnType=StringType())\n"
-        "def normalise(s):\n"
-        "    return s.lower().strip()"
+        "@udf(returnType=StringType())\n" "def normalise(s):\n" "    return s.lower().strip()"
     )
     after_example = (
         "# Native SQL function — no serialisation overhead\n"
@@ -287,8 +285,7 @@ class WithColumnInLoopRule(CodeRule):
         "df = df.select(*df.columns, *exprs)``"
     )
     before_example = (
-        "for col_name in column_list:\n"
-        "    df = df.withColumn(col_name, compute(col(col_name)))"
+        "for col_name in column_list:\n" "    df = df.withColumn(col_name, compute(col(col_name)))"
     )
     after_example = (
         "exprs = [compute(col(c)).alias(c) for c in column_list]\n"
@@ -356,14 +353,8 @@ class RowByRowIterationRule(CodeRule):
         "Replace the loop with a distributed operation: "
         "aggregation, join, or df.foreach()/df.foreachPartition()."
     )
-    before_example = (
-        "for row in df.collect():\n"
-        "    process(row)"
-    )
-    after_example = (
-        "# Distribute processing — no data movement to driver\n"
-        "df.foreach(process)"
-    )
+    before_example = "for row in df.collect():\n" "    process(row)"
+    after_example = "# Distribute processing — no data movement to driver\n" "df.foreach(process)"
     references = [
         "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql"
         "/api/pyspark.sql.DataFrame.foreach.html",
@@ -559,10 +550,7 @@ class CountForEmptinessRule(CodeRule):
         "Replace ``df.count() == 0`` with ``df.isEmpty`` (Spark 3.3+) "
         "or ``df.limit(1).count() == 0``."
     )
-    before_example = (
-        "if df.count() == 0:\n"
-        "    raise ValueError('No data found')"
-    )
+    before_example = "if df.count() == 0:\n" "    raise ValueError('No data found')"
     after_example = (
         "if df.isEmpty:  # Spark 3.3+ — short-circuits on first row\n"
         "    raise ValueError('No data found')"
@@ -626,8 +614,7 @@ class ShowInProductionRule(CodeRule):
         "• A proper data quality assertion."
     )
     recommendation_template = (
-        "Remove show() calls before production deployment, "
-        "or replace with structured logging."
+        "Remove show() calls before production deployment, " "or replace with structured logging."
     )
     before_example = "df.groupBy('status').count().show()"
     after_example = (
@@ -712,8 +699,7 @@ class ExplainInProductionRule(CodeRule):
                     self.create_finding(
                         analyzer.filename,
                         call.line,
-                        f"{method}() is a debugging tool — remove from"
-                        " production pipelines",
+                        f"{method}() is a debugging tool — remove from" " production pipelines",
                         config=config,
                     )
                 )
@@ -814,13 +800,10 @@ class PandasUdfWithoutTypeHintsRule(CodeRule):
         "execution mode (SCALAR, GROUPED_AGG, etc.) from the annotation automatically."
     )
     recommendation_template = (
-        "Add pd.Series type hints: "
-        "``def my_udf(s: pd.Series) -> pd.Series:``."
+        "Add pd.Series type hints: " "``def my_udf(s: pd.Series) -> pd.Series:``."
     )
     before_example = (
-        "@pandas_udf(returnType=DoubleType())\n"
-        "def my_udf(col):\n"
-        "    return col * 2"
+        "@pandas_udf(returnType=DoubleType())\n" "def my_udf(col):\n" "    return col * 2"
     )
     after_example = (
         "import pandas as pd\n\n"
@@ -919,9 +902,7 @@ class NestedUdfCallRule(CodeRule):
         if not analyzer.has_spark_imports():
             return []
 
-        udf_names: set[str] = {
-            f.name for f in analyzer.find_function_definitions() if f.is_udf
-        }
+        udf_names: set[str] = {f.name for f in analyzer.find_function_definitions() if f.is_udf}
         if len(udf_names) < 2:
             return []
 

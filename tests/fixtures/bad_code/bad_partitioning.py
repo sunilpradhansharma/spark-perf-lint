@@ -8,22 +8,23 @@ pruning at read time.
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType, TimestampType
 
 spark = (
-    SparkSession.builder
-    .appName("iot_sensor_ingestion")
+    SparkSession.builder.appName("iot_sensor_ingestion")
     .config("spark.sql.adaptive.enabled", "true")
     .getOrCreate()
 )
 
-schema = StructType([
-    StructField("device_id",   StringType(),    False),
-    StructField("sensor_type", StringType(),    False),
-    StructField("value",       DoubleType(),    True),
-    StructField("event_time",  TimestampType(), False),
-    StructField("region",      StringType(),    False),
-])
+schema = StructType(
+    [
+        StructField("device_id", StringType(), False),
+        StructField("sensor_type", StringType(), False),
+        StructField("value", DoubleType(), True),
+        StructField("event_time", TimestampType(), False),
+        StructField("region", StringType(), False),
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Ingest raw data
@@ -32,8 +33,7 @@ schema = StructType([
 raw = spark.read.schema(schema).json("/landing/iot_events/")
 
 cleaned = (
-    raw
-    .filter(F.col("value").isNotNull())
+    raw.filter(F.col("value").isNotNull())
     .withColumn("event_date", F.to_date("event_time"))
     .withColumn("event_hour", F.hour("event_time"))
 )
@@ -42,15 +42,11 @@ cleaned = (
 # Aggregate to hourly rollups per device
 # ---------------------------------------------------------------------------
 
-hourly = (
-    cleaned
-    .groupBy("device_id", "sensor_type", "event_date", "event_hour", "region")
-    .agg(
-        F.avg("value").alias("avg_value"),
-        F.min("value").alias("min_value"),
-        F.max("value").alias("max_value"),
-        F.count("*").alias("reading_count"),
-    )
+hourly = cleaned.groupBy("device_id", "sensor_type", "event_date", "event_hour", "region").agg(
+    F.avg("value").alias("avg_value"),
+    F.min("value").alias("min_value"),
+    F.max("value").alias("max_value"),
+    F.count("*").alias("reading_count"),
 )
 
 # ---------------------------------------------------------------------------
@@ -66,13 +62,9 @@ hourly.repartition(1).write.mode("overwrite").parquet("/output/iot_hourly")
 # Daily summary — coalesce bottleneck
 # ---------------------------------------------------------------------------
 
-daily = (
-    hourly
-    .groupBy("device_id", "sensor_type", "event_date", "region")
-    .agg(
-        F.avg("avg_value").alias("daily_avg"),
-        F.sum("reading_count").alias("total_readings"),
-    )
+daily = hourly.groupBy("device_id", "sensor_type", "event_date", "region").agg(
+    F.avg("avg_value").alias("daily_avg"),
+    F.sum("reading_count").alias("total_readings"),
 )
 
 # SPL-D04-002: coalesce(1) has the same single-task write bottleneck as

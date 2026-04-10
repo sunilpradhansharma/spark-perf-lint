@@ -68,9 +68,7 @@ class TestCacheWithoutUnpersistRule:
 
     def test_no_finding_when_unpersist_present(self):
         code = SPARK_HDR + (
-            "df_cached = df.cache()\n"
-            "df_cached.count()\n"
-            "df_cached.unpersist()\n"
+            "df_cached = df.cache()\n" "df_cached.count()\n" "df_cached.unpersist()\n"
         )
         assert findings(self.rule, code) == []
 
@@ -92,8 +90,7 @@ class TestCacheUsedOnceRule:
 
     def test_fires_when_cached_used_once(self):
         code = SPARK_HDR + (
-            "df_cached = df.join(other, 'id').cache()\n"
-            "result = df_cached.count()\n"
+            "df_cached = df.join(other, 'id').cache()\n" "result = df_cached.count()\n"
         )
         fs = findings(self.rule, code)
         assert len(fs) == 1
@@ -139,29 +136,20 @@ class TestCacheInLoopRule:
     rule = CacheInLoopRule()
 
     def test_fires_on_cache_in_for_loop(self):
-        code = SPARK_HDR + (
-            "for i in range(10):\n"
-            "    df = df.filter(f'val > {i}').cache()\n"
-        )
+        code = SPARK_HDR + ("for i in range(10):\n" "    df = df.filter(f'val > {i}').cache()\n")
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D06-003"
         assert "for" in fs[0].message
 
     def test_fires_on_persist_in_for_loop(self):
-        code = SPARK_HDR + (
-            "for epoch in range(100):\n"
-            "    df = model_transform(df).persist()\n"
-        )
+        code = SPARK_HDR + ("for epoch in range(100):\n" "    df = model_transform(df).persist()\n")
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert "persist" in fs[0].message
 
     def test_fires_on_cache_in_while_loop(self):
-        code = SPARK_HDR + (
-            "while not converged:\n"
-            "    df = df.join(updates, 'id').cache()\n"
-        )
+        code = SPARK_HDR + ("while not converged:\n" "    df = df.join(updates, 'id').cache()\n")
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert "while" in fs[0].message
@@ -230,8 +218,7 @@ class TestMemoryOnlyStorageLevelRule:
 
     def test_fires_on_memory_only_attribute(self):
         code = SPARK_HDR + (
-            "from pyspark import StorageLevel\n"
-            "df.persist(StorageLevel.MEMORY_ONLY)\n"
+            "from pyspark import StorageLevel\n" "df.persist(StorageLevel.MEMORY_ONLY)\n"
         )
         fs = findings(self.rule, code)
         assert len(fs) == 1
@@ -245,8 +232,7 @@ class TestMemoryOnlyStorageLevelRule:
 
     def test_no_finding_for_memory_and_disk(self):
         code = SPARK_HDR + (
-            "from pyspark import StorageLevel\n"
-            "df.persist(StorageLevel.MEMORY_AND_DISK)\n"
+            "from pyspark import StorageLevel\n" "df.persist(StorageLevel.MEMORY_AND_DISK)\n"
         )
         assert findings(self.rule, code) == []
 
@@ -302,10 +288,7 @@ class TestReusedDataFrameWithoutCacheRule:
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_used_only_once(self):
-        code = SPARK_HDR + (
-            "df_joined = df.join(other, 'id')\n"
-            "result = df_joined.count()\n"
-        )
+        code = SPARK_HDR + ("df_joined = df.join(other, 'id')\n" "result = df_joined.count()\n")
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_cheap_operation(self):

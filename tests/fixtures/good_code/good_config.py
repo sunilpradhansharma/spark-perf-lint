@@ -57,7 +57,7 @@ spark = (
 features = spark.read.parquet(f"{DATA_ROOT}/ml_features/current")
 model_meta = spark.read.parquet(f"{DATA_ROOT}/model_metadata")
 
-candidates = features.filter(  # noqa: SPL-D06-006  # noqa: SPL-D03-002, SPL-D10-004
+candidates = features.filter(  # noqa: SPL-D03-002, SPL-D06-006, SPL-D10-004
     F.col("is_eligible")
 ).join(
     F.broadcast(model_meta),
@@ -75,7 +75,7 @@ scored = candidates.withColumn(
     .otherwise("low"),
 )
 
-score_distribution = scored.groupBy(  # noqa: SPL-D06-006  # noqa: SPL-D02-007
+score_distribution = scored.groupBy(  # noqa: SPL-D02-007, SPL-D06-006
     "model_id", "score_bucket"
 ).agg(
     F.count("*").alias("count"),  # noqa: SPL-D11-004

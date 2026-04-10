@@ -230,10 +230,7 @@ class SelectStarRule(CodeRule):
 
         findings: list[Finding] = []
         for call in analyzer.find_method_calls("select"):
-            has_star = any(
-                isinstance(arg, ast.Constant) and arg.value == "*"
-                for arg in call.args
-            )
+            has_star = any(isinstance(arg, ast.Constant) and arg.value == "*" for arg in call.args)
             if has_star:
                 findings.append(
                     self.create_finding(
@@ -366,9 +363,9 @@ class SmallFileWriteRule(CodeRule):
             write_calls = [
                 c
                 for c in analyzer.find_all_method_calls()
-                if c.line == io.line and c.method_name in {
-                    "parquet", "orc", "csv", "json", "avro", "save", "saveAsTable", "delta"
-                }
+                if c.line == io.line
+                and c.method_name
+                in {"parquet", "orc", "csv", "json", "avro", "save", "saveAsTable", "delta"}
             ]
             if not write_calls:
                 continue
@@ -522,10 +519,11 @@ class ParquetCompressionNotSetRule(CodeRule):
         "or ``df.write.option('compression', 'zstd').parquet('path')``."
     )
     before_example = "df.write.mode('overwrite').parquet('s3://bucket/data')"
-    after_example = "df.write.mode('overwrite').option('compression', 'snappy').parquet('s3://bucket/data')"
+    after_example = (
+        "df.write.mode('overwrite').option('compression', 'snappy').parquet('s3://bucket/data')"
+    )
     references = [
-        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html"
-        "#configuration",
+        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html" "#configuration",
     ]
     estimated_impact = "Cluster-dependent codec; may write uncompressed on some environments"
     effort_level = EffortLevel.MINOR_CODE_CHANGE
@@ -722,8 +720,7 @@ class MergeSchemaRule(CodeRule):
     before_example = "df = spark.read.option('mergeSchema', 'true').parquet('path')"
     after_example = "df = spark.read.schema(explicit_schema).parquet('path')"
     references = [
-        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html"
-        "#schema-merging",
+        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html" "#schema-merging",
     ]
     estimated_impact = "O(files) metadata scan on every read; O(10 s) for tables with many files"
     effort_level = EffortLevel.MINOR_CODE_CHANGE
@@ -751,9 +748,7 @@ class MergeSchemaRule(CodeRule):
         merge_val = analyzer.get_config_value(_MERGE_SCHEMA_CONFIG)
         if merge_val is not None and merge_val.strip().lower() == "true":
             cfgs = [
-                c
-                for c in analyzer.find_spark_session_configs()
-                if c.key == _MERGE_SCHEMA_CONFIG
+                c for c in analyzer.find_spark_session_configs() if c.key == _MERGE_SCHEMA_CONFIG
             ]
             line = cfgs[-1].end_line if cfgs else 1
             findings.append(

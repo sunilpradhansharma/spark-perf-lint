@@ -324,8 +324,7 @@ class LowPartitionCountRule(CodeRule):
     dimension = _DIM
     default_severity = Severity.WARNING
     description = (
-        f"repartition(n) where n < {_LOW_PARTITION_THRESHOLD}"
-        " under-uses cluster parallelism."
+        f"repartition(n) where n < {_LOW_PARTITION_THRESHOLD}" " under-uses cluster parallelism."
     )
     explanation = (
         "Repartitioning to a very low number of partitions (2–9) caps parallelism "
@@ -494,8 +493,7 @@ class MissingPartitionByOnWriteRule(CodeRule):
     before_example = "df.write.mode('overwrite').parquet('s3://bucket/events')"
     after_example = "df.write.partitionBy('date', 'region').mode('overwrite').parquet('s3://bucket/events')"  # noqa: E501
     references = [
-        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html"
-        "#partition-discovery",
+        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html" "#partition-discovery",
     ]
     estimated_impact = "Full table scans on every query; no partition pruning possible"
     effort_level = EffortLevel.MINOR_CODE_CHANGE
@@ -564,8 +562,7 @@ class HighCardinalityPartitionRule(CodeRule):
     before_example = "df.write.partitionBy('user_id').parquet('s3://bucket/events')"
     after_example = "df.write.partitionBy('date', 'region').parquet('s3://bucket/events')"
     references = [
-        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html"
-        "#partition-discovery",
+        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html" "#partition-discovery",
     ]
     estimated_impact = "Millions of tiny files; driver OOM on partition listing; high storage cost"
     effort_level = EffortLevel.MINOR_CODE_CHANGE
@@ -705,16 +702,13 @@ class MissingPartitionFilterRule(CodeRule):
         "Confirm partition pruning is active by checking the Spark UI 'Input' bytes "
         "in the stage details."
     )
-    before_example = (
-        "spark.read.parquet('s3://datalake/events').groupBy('user_id').count()"
-    )
+    before_example = "spark.read.parquet('s3://datalake/events').groupBy('user_id').count()"
     after_example = (
         "spark.read.parquet('s3://datalake/events')"
         ".filter('date = \"2024-01-01\"').groupBy('user_id').count()"
     )
     references = [
-        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html"
-        "#partition-discovery",
+        "https://spark.apache.org/docs/latest/sql-data-sources-parquet.html" "#partition-discovery",
     ]
     estimated_impact = "Full table scan instead of partition-pruned scan; 10–1000× more data read"
     effort_level = EffortLevel.MINOR_CODE_CHANGE

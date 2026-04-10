@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.engine.file_scanner import (
     FileScanner,
@@ -15,7 +13,6 @@ from spark_perf_lint.engine.file_scanner import (
     scan_paths,
     scan_staged,
 )
-
 
 # =============================================================================
 # Helpers
@@ -226,9 +223,7 @@ class TestIgnorePatterns:
         venv = tmp_path / ".venv" / "lib"
         venv.mkdir(parents=True)
         write_py(venv, "spark_module.py", SPARK_CODE)
-        cfg = LintConfig.from_dict(
-            {"ignore": {"files": [], "directories": [".venv"], "rules": []}}
-        )
+        cfg = LintConfig.from_dict({"ignore": {"files": [], "directories": [".venv"], "rules": []}})
         targets, summary = FileScanner.from_paths([tmp_path], cfg, root=tmp_path)
         assert summary.ignored == 1
         assert all(t.skip_reason is not None for t in targets)
@@ -287,17 +282,13 @@ class TestIgnorePatterns:
 class TestFromStagedFiles:
     def test_pyspark_staged_file_included(self, tmp_path):
         write_py(tmp_path, "etl.py", SPARK_CODE)
-        targets, summary = FileScanner.from_staged_files(
-            ["etl.py"], default_cfg(), root=tmp_path
-        )
+        targets, summary = FileScanner.from_staged_files(["etl.py"], default_cfg(), root=tmp_path)
         assert summary.total_found == 1
         assert summary.to_scan == 1
 
     def test_non_py_staged_file_skipped(self, tmp_path):
         (tmp_path / "data.csv").write_text("a,b\n")
-        targets, summary = FileScanner.from_staged_files(
-            ["data.csv"], default_cfg(), root=tmp_path
-        )
+        targets, summary = FileScanner.from_staged_files(["data.csv"], default_cfg(), root=tmp_path)
         assert summary.total_found == 0
 
     def test_deleted_staged_file_skipped(self, tmp_path):
@@ -310,9 +301,7 @@ class TestFromStagedFiles:
         sub = tmp_path / "jobs"
         sub.mkdir()
         write_py(sub, "etl.py", SPARK_CODE)
-        targets, _ = FileScanner.from_staged_files(
-            ["jobs/etl.py"], default_cfg(), root=tmp_path
-        )
+        targets, _ = FileScanner.from_staged_files(["jobs/etl.py"], default_cfg(), root=tmp_path)
         assert len(targets) == 1
 
     def test_absolute_paths_accepted(self, tmp_path):
@@ -325,16 +314,12 @@ class TestFromStagedFiles:
         cfg = LintConfig.from_dict(
             {"ignore": {"files": ["*_test.py"], "directories": [], "rules": []}}
         )
-        targets, summary = FileScanner.from_staged_files(
-            ["etl_test.py"], cfg, root=tmp_path
-        )
+        targets, summary = FileScanner.from_staged_files(["etl_test.py"], cfg, root=tmp_path)
         assert summary.ignored == 1
 
     def test_plain_python_staged_file(self, tmp_path):
         write_py(tmp_path, "util.py", PLAIN_CODE)
-        targets, summary = FileScanner.from_staged_files(
-            ["util.py"], default_cfg(), root=tmp_path
-        )
+        targets, summary = FileScanner.from_staged_files(["util.py"], default_cfg(), root=tmp_path)
         assert summary.non_pyspark == 1
 
     def test_scan_staged_shorthand(self, tmp_path):
@@ -353,18 +338,14 @@ class TestFromGlobPatterns:
     def test_simple_glob(self, tmp_path):
         write_py(tmp_path, "etl.py", SPARK_CODE)
         write_py(tmp_path, "util.py", PLAIN_CODE)
-        targets, summary = FileScanner.from_glob_patterns(
-            ["*.py"], default_cfg(), root=tmp_path
-        )
+        targets, summary = FileScanner.from_glob_patterns(["*.py"], default_cfg(), root=tmp_path)
         assert summary.total_found == 2
 
     def test_recursive_glob(self, tmp_path):
         sub = tmp_path / "jobs"
         sub.mkdir()
         write_py(sub, "batch.py", SPARK_CODE)
-        targets, summary = FileScanner.from_glob_patterns(
-            ["**/*.py"], default_cfg(), root=tmp_path
-        )
+        targets, summary = FileScanner.from_glob_patterns(["**/*.py"], default_cfg(), root=tmp_path)
         assert summary.total_found >= 1
 
     def test_no_match_returns_empty(self, tmp_path):

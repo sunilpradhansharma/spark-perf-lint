@@ -609,9 +609,7 @@ class ManualShufflePartitionsWithAqeRule(ConfigRule):
         "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
         "#coalescing-post-shuffle-partitions",
     ]
-    estimated_impact = (
-        "Unnecessary map-side overhead proportional to initial partition count"
-    )
+    estimated_impact = "Unnecessary map-side overhead proportional to initial partition count"
     effort_level = EffortLevel.CONFIG_ONLY
 
     def check(self, analyzer: ASTAnalyzer, config: LintConfig) -> list[Finding]:  # noqa: D102

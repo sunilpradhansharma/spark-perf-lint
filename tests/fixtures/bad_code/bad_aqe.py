@@ -9,8 +9,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 spark = (
-    SparkSession.builder
-    .appName("ad_performance_analytics")
+    SparkSession.builder.appName("ad_performance_analytics")
     # SPL-D08-001: AQE disabled entirely.  Without AQE, Spark cannot
     # coalesce small shuffle partitions, handle join skew, or switch
     # broadcast/sort-merge strategy at runtime.                       [CRITICAL]
@@ -22,8 +21,7 @@ spark = (
     # SPL-D08-007: manual shuffle.partitions = 2000 with AQE disabled
     # means every shuffle in this job produces exactly 2000 output
     # files regardless of actual data volume.                         [INFO]
-    .config("spark.sql.shuffle.partitions", "2000")
-    .getOrCreate()
+    .config("spark.sql.shuffle.partitions", "2000").getOrCreate()
 )
 
 # ---------------------------------------------------------------------------
@@ -32,8 +30,8 @@ spark = (
 
 impressions = spark.read.parquet("/data/ad_impressions")
 conversions = spark.read.parquet("/data/ad_conversions")
-campaigns   = spark.read.parquet("/data/campaigns")
-creatives   = spark.read.parquet("/data/creatives")
+campaigns = spark.read.parquet("/data/campaigns")
+creatives = spark.read.parquet("/data/creatives")
 
 # ---------------------------------------------------------------------------
 # Multi-stage aggregation pipeline
@@ -45,8 +43,7 @@ creatives   = spark.read.parquet("/data/creatives")
 # scheduling overhead and thousands of tiny output files.
 
 hourly_impressions = (
-    impressions
-    .filter(F.col("ad_type").isin("banner", "video", "native"))
+    impressions.filter(F.col("ad_type").isin("banner", "video", "native"))
     .groupBy("campaign_id", "creative_id", "placement", "hour_bucket")
     .agg(
         F.count("*").alias("impressions"),
@@ -54,13 +51,9 @@ hourly_impressions = (
     )
 )
 
-hourly_conversions = (
-    conversions
-    .groupBy("campaign_id", "creative_id", "hour_bucket")
-    .agg(
-        F.count("*").alias("conversions"),
-        F.sum("revenue").alias("total_revenue"),
-    )
+hourly_conversions = conversions.groupBy("campaign_id", "creative_id", "hour_bucket").agg(
+    F.count("*").alias("conversions"),
+    F.sum("revenue").alias("total_revenue"),
 )
 
 # ---------------------------------------------------------------------------
@@ -74,17 +67,18 @@ hourly_conversions = (
 # partitions; without it, one executor processes the entire "top campaign"
 # partition alone.                                                    [WARNING]
 performance = (
-    hourly_impressions
-    .join(hourly_conversions, on=["campaign_id", "creative_id", "hour_bucket"], how="left")
-    .join(campaigns,  on="campaign_id", how="left")
-    .join(creatives,  on="creative_id", how="left")
+    hourly_impressions.join(
+        hourly_conversions, on=["campaign_id", "creative_id", "hour_bucket"], how="left"
+    )
+    .join(campaigns, on="campaign_id", how="left")
+    .join(creatives, on="creative_id", how="left")
 )
 
 ctr_metrics = performance.withColumn(
     "ctr",
-    F.when(F.col("impressions") > 0,
-           F.col("conversions").cast("double") / F.col("impressions"))
-     .otherwise(0.0)
+    F.when(
+        F.col("impressions") > 0, F.col("conversions").cast("double") / F.col("impressions")
+    ).otherwise(0.0),
 )
 
 ctr_metrics.write.mode("overwrite").parquet("/output/ad_performance_metrics")

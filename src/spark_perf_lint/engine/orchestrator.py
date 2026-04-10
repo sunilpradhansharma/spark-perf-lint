@@ -30,6 +30,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -54,8 +55,37 @@ _SEVERITY_ORDER: dict[Severity, int] = {
 # Below _PARALLEL_THRESHOLD files the thread-pool overhead costs more than
 # it saves; above it each file is dispatched to its own worker thread so that
 # I/O wait and GIL-releasing C extensions (ast.parse) run concurrently.
-_PARALLEL_THRESHOLD: int = 3   # files; serial below this count
-_MAX_WORKERS: int = 4           # threads; enough for a typical 20-file commit
+_PARALLEL_THRESHOLD: int = 3  # files; serial below this count
+_MAX_WORKERS: int = 4  # threads; enough for a typical 20-file commit
+
+
+# Regex for inline suppression comments.
+# Matches:  # noqa: SPL-D03-001  or  # noqa: SPL-D03-001,SPL-D08-002
+_NOQA_RE = re.compile(r"#\s*noqa:\s*(SPL-[A-Z0-9,\s\-]+)", re.IGNORECASE)
+
+
+def _build_noqa_map(content: str) -> dict[int, set[str]]:
+    """Parse ``# noqa: SPL-DXX-XXX`` suppression comments from source text.
+
+    A comment of the form ``# noqa: SPL-D03-001`` on a source line tells the
+    engine to discard any finding for that rule on that line.  Multiple rule
+    IDs can be comma-separated: ``# noqa: SPL-D03-001, SPL-D08-002``.
+
+    Args:
+        content: Full Python source text.
+
+    Returns:
+        Mapping of 1-based line number → set of suppressed rule IDs.
+        Empty dict when no noqa comments are present.
+    """
+    noqa_map: dict[int, set[str]] = {}
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        m = _NOQA_RE.search(line)
+        if m:
+            ids = {r.strip().upper() for r in m.group(1).split(",") if r.strip()}
+            if ids:
+                noqa_map[lineno] = ids
+    return noqa_map
 
 
 class ScanOrchestrator:
@@ -83,7 +113,9 @@ class ScanOrchestrator:
     ) -> None:
         self._config = config
         self._registry = RuleRegistry.instance()
-        self._tracer: BaseTracer = tracer if tracer is not None else TracerFactory.from_config(config)
+        self._tracer: BaseTracer = (
+            tracer if tracer is not None else TracerFactory.from_config(config)
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -285,6 +317,13 @@ class ScanOrchestrator:
                     target.relative_path,
                     exc,
                 )
+
+        if findings:
+            noqa_map = _build_noqa_map(target.content)
+            if noqa_map:
+                findings = [
+                    f for f in findings if f.rule_id not in noqa_map.get(f.line_number, set())
+                ]
 
         self._emit_file_stat(target.relative_path, len(findings), file_start)
         return findings

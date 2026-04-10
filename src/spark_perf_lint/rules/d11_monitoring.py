@@ -39,7 +39,13 @@ _HEAVY_OPS: frozenset[str] = frozenset(
 
 # URI schemes that identify storage paths (not table names)
 _PATH_SCHEMES: tuple[str, ...] = (
-    "s3://", "s3a://", "gs://", "abfs://", "wasbs://", "hdfs://", "file://",
+    "s3://",
+    "s3a://",
+    "gs://",
+    "abfs://",
+    "wasbs://",
+    "hdfs://",
+    "file://",
 )
 
 # Minimum number of write operations that classify a job as "long-running"
@@ -164,9 +170,7 @@ class NoExplainInTestsRule(CodeRule):
             return []
 
         # Only relevant when the file tests complex operations worth validating
-        has_heavy_op = any(
-            analyzer.find_method_calls(op) for op in _HEAVY_OPS
-        )
+        has_heavy_op = any(analyzer.find_method_calls(op) for op in _HEAVY_OPS)
         if not has_heavy_op:
             return []
 
@@ -174,11 +178,7 @@ class NoExplainInTestsRule(CodeRule):
             return []
 
         # Report at the first heavy operation found
-        first_line = min(
-            call.line
-            for op in _HEAVY_OPS
-            for call in analyzer.find_method_calls(op)
-        )
+        first_line = min(call.line for op in _HEAVY_OPS for call in analyzer.find_method_calls(op))
         return [
             self.create_finding(
                 analyzer.filename,
@@ -241,8 +241,7 @@ class NoSparkListenerRule(CodeRule):
         ")"
     )
     references = [
-        "https://spark.apache.org/docs/latest/monitoring.html"
-        "#sparklistener-interface",
+        "https://spark.apache.org/docs/latest/monitoring.html" "#sparklistener-interface",
     ]
     estimated_impact = "Blind to job performance degradation; metrics only available post-mortem"
     effort_level = EffortLevel.MINOR_CODE_CHANGE
@@ -426,9 +425,7 @@ class MissingErrorHandlingRule(CodeRule):
 
         # Gather all action calls in the file
         action_calls = [
-            call
-            for action in _SPARK_ACTIONS
-            for call in analyzer.find_method_calls(action)
+            call for action in _SPARK_ACTIONS for call in analyzer.find_method_calls(action)
         ]
         # Include write-terminal calls surfaced as SparkIOInfo
         write_lines = {io.line for io in analyzer.find_writes()}

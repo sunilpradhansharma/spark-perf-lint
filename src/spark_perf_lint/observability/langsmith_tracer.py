@@ -65,9 +65,7 @@ class LangSmithTracer(BaseTracer):
         super().__init__(config)
         obs_cfg = config.raw.get("observability", {})
         self._project: str = obs_cfg.get("langsmith_project", "spark-perf-lint")
-        self._api_key_env_var: str = obs_cfg.get(
-            "langsmith_api_key_env_var", "LANGCHAIN_API_KEY"
-        )
+        self._api_key_env_var: str = obs_cfg.get("langsmith_api_key_env_var", "LANGCHAIN_API_KEY")
 
     # ------------------------------------------------------------------
     # Lifecycle — all stubbed
@@ -104,9 +102,7 @@ class LangSmithTracer(BaseTracer):
         Raises:
             NotImplementedError: Always — stub implementation.
         """
-        raise NotImplementedError(
-            "LangSmithTracer.record_file is not yet implemented."
-        )
+        raise NotImplementedError("LangSmithTracer.record_file is not yet implemented.")
 
     def record_findings(self, findings: list[Finding]) -> None:
         """Attach findings to the active LangSmith run as metadata.
@@ -117,9 +113,7 @@ class LangSmithTracer(BaseTracer):
         Raises:
             NotImplementedError: Always — stub implementation.
         """
-        raise NotImplementedError(
-            "LangSmithTracer.record_findings is not yet implemented."
-        )
+        raise NotImplementedError("LangSmithTracer.record_findings is not yet implemented.")
 
     def end_run(self, report: AuditReport) -> None:
         """Finalise and upload the LangSmith trace.
@@ -136,8 +130,4 @@ class LangSmithTracer(BaseTracer):
         )
 
     def __repr__(self) -> str:
-        return (
-            f"LangSmithTracer("
-            f"project={self._project!r}, "
-            f"run_id={self._run_id!r})"
-        )
+        return f"LangSmithTracer(" f"project={self._project!r}, " f"run_id={self._run_id!r})"

@@ -223,9 +223,7 @@ class ClaudeLLMProvider(LLMProvider):
                 if attempt < len(_RETRY_DELAYS):
                     time.sleep(delay)
 
-        raise RuntimeError(
-            f"LLM call failed after {len(_RETRY_DELAYS)} attempts"
-        ) from last_exc
+        raise RuntimeError(f"LLM call failed after {len(_RETRY_DELAYS)} attempts") from last_exc
 
     def __repr__(self) -> str:
         return f"ClaudeLLMProvider(model={self._model!r})"

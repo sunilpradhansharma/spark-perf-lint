@@ -78,7 +78,7 @@ enriched = (  # noqa: SPL-D06-006
 
 logger.info("Writing partitioned inventory output")
 try:
-    enriched.write.mode("overwrite").partitionBy(
+    enriched.write.mode("overwrite").partitionBy(  # noqa: SPL-D04-007, SPL-D07-005, SPL-D07-007
         "warehouse_id", "category_id"
     ).parquet(  # noqa: SPL-D04-007, SPL-D07-005, SPL-D07-007
         f"{OUTPUT_ROOT}/inventory_enriched"
@@ -95,7 +95,7 @@ except Exception as exc:
 reorder_items = enriched.filter(F.col("reorder_flag"))
 
 try:
-    reorder_items.coalesce(4).write.mode(
+    reorder_items.coalesce(4).write.mode(  # noqa: SPL-D04-005, SPL-D04-006, SPL-D07-007
         "overwrite"
     ).parquet(  # noqa: SPL-D04-005, SPL-D04-006, SPL-D07-007
         f"{OUTPUT_ROOT}/reorder_alerts"

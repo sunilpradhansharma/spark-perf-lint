@@ -55,8 +55,7 @@ class TestNoExplainInTestsRule:
 
     def test_fires_for_test_file_with_join_no_explain(self):
         code = (
-            SPARK_HDR
-            + "def test_join():\n"
+            SPARK_HDR + "def test_join():\n"
             "    result = users.join(events, 'user_id')\n"
             "    assert result.count() == 10\n"
         )
@@ -67,8 +66,7 @@ class TestNoExplainInTestsRule:
 
     def test_fires_for_test_file_with_groupby_no_explain(self):
         code = (
-            SPARK_HDR
-            + "def test_agg():\n"
+            SPARK_HDR + "def test_agg():\n"
             "    result = df.groupBy('k').agg(count('*'))\n"
             "    assert result.count() > 0\n"
         )
@@ -76,8 +74,7 @@ class TestNoExplainInTestsRule:
 
     def test_no_finding_when_explain_present(self):
         code = (
-            SPARK_HDR
-            + "def test_join():\n"
+            SPARK_HDR + "def test_join():\n"
             "    result = users.join(events, 'user_id')\n"
             "    result.explain()\n"
             "    assert result.count() == 10\n"
@@ -86,17 +83,13 @@ class TestNoExplainInTestsRule:
 
     def test_no_finding_for_non_test_file(self):
         # Same code but filename is not a test module
-        code = (
-            SPARK_HDR
-            + "result = users.join(events, 'user_id')\n"
-        )
+        code = SPARK_HDR + "result = users.join(events, 'user_id')\n"
         assert findings(self.rule, code, filename="etl.py") == []
 
     def test_no_finding_for_test_file_without_heavy_ops(self):
         # Test file but only simple filter — no join/groupBy/agg
         code = (
-            SPARK_HDR
-            + "def test_filter():\n"
+            SPARK_HDR + "def test_filter():\n"
             "    result = df.filter('x > 0')\n"
             "    assert result.count() > 0\n"
         )
@@ -104,8 +97,7 @@ class TestNoExplainInTestsRule:
 
     def test_fires_for_test_file_with_underscore_suffix(self):
         code = (
-            SPARK_HDR
-            + "def test_join():\n"
+            SPARK_HDR + "def test_join():\n"
             "    result = a.join(b, 'id')\n"
             "    assert result.count() > 0\n"
         )
@@ -139,16 +131,11 @@ class TestNoSparkListenerRule:
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_query_execution_listeners_set(self):
-        code = _ss_cfg(
-            ("spark.sql.queryExecutionListeners", "com.example.QEListener")
-        )
+        code = _ss_cfg(("spark.sql.queryExecutionListeners", "com.example.QEListener"))
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_add_spark_listener_called(self):
-        code = (
-            f"{_SS}.getOrCreate()\n"
-            "spark.sparkContext.addSparkListener(my_listener)\n"
-        )
+        code = f"{_SS}.getOrCreate()\n" "spark.sparkContext.addSparkListener(my_listener)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_without_get_or_create(self):
@@ -170,8 +157,7 @@ class TestNoMetricsLoggingRule:
 
     def test_fires_when_two_writes_no_logging(self):
         code = (
-            SPARK_HDR
-            + "df.write.mode('overwrite').parquet('s3://b/a')\n"
+            SPARK_HDR + "df.write.mode('overwrite').parquet('s3://b/a')\n"
             "df2.write.mode('overwrite').parquet('s3://b/b')\n"
         )
         fs = findings(self.rule, code)
@@ -181,9 +167,7 @@ class TestNoMetricsLoggingRule:
 
     def test_no_finding_when_logging_imported(self):
         code = (
-            "import logging\n"
-            + SPARK_HDR
-            + "logger = logging.getLogger(__name__)\n"
+            "import logging\n" + SPARK_HDR + "logger = logging.getLogger(__name__)\n"
             "df.write.mode('overwrite').parquet('s3://b/a')\n"
             "df2.write.mode('overwrite').parquet('s3://b/b')\n"
         )
@@ -191,8 +175,7 @@ class TestNoMetricsLoggingRule:
 
     def test_no_finding_when_logger_used(self):
         code = (
-            SPARK_HDR
-            + "logger.info('starting job')\n"
+            SPARK_HDR + "logger.info('starting job')\n"
             "df.write.mode('overwrite').parquet('s3://b/a')\n"
             "df2.write.mode('overwrite').parquet('s3://b/b')\n"
         )
@@ -208,8 +191,7 @@ class TestNoMetricsLoggingRule:
 
     def test_fires_when_three_writes_no_logging(self):
         code = (
-            SPARK_HDR
-            + "a.write.parquet('s3://b/a')\n"
+            SPARK_HDR + "a.write.parquet('s3://b/a')\n"
             "b.write.parquet('s3://b/b')\n"
             "c.write.parquet('s3://b/c')\n"
         )
@@ -245,19 +227,12 @@ class TestMissingErrorHandlingRule:
         assert len(findings(self.rule, code)) == 1
 
     def test_no_finding_when_count_inside_try(self):
-        code = (
-            SPARK_HDR
-            + "try:\n"
-            "    n = df.count()\n"
-            "except Exception as e:\n"
-            "    raise\n"
-        )
+        code = SPARK_HDR + "try:\n" "    n = df.count()\n" "except Exception as e:\n" "    raise\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_write_inside_try(self):
         code = (
-            SPARK_HDR
-            + "try:\n"
+            SPARK_HDR + "try:\n"
             "    df.write.mode('overwrite').parquet('s3://b/out')\n"
             "except Exception as e:\n"
             "    raise\n"
@@ -266,8 +241,7 @@ class TestMissingErrorHandlingRule:
 
     def test_no_finding_when_all_actions_in_try(self):
         code = (
-            SPARK_HDR
-            + "try:\n"
+            SPARK_HDR + "try:\n"
             "    n = df.count()\n"
             "    rows = df.collect()\n"
             "except Exception:\n"
@@ -276,10 +250,7 @@ class TestMissingErrorHandlingRule:
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_file_with_no_actions(self):
-        code = (
-            SPARK_HDR
-            + "df2 = df.filter('x > 0').join(other, 'id')\n"
-        )
+        code = SPARK_HDR + "df2 = df.filter('x > 0').join(other, 'id')\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_without_spark_imports(self):
@@ -321,8 +292,7 @@ class TestHardcodedPathRule:
 
     def test_fires_for_both_read_and_write_paths(self):
         code = (
-            SPARK_HDR
-            + "df = spark.read.parquet('s3://bucket/input')\n"
+            SPARK_HDR + "df = spark.read.parquet('s3://bucket/input')\n"
             "df.write.parquet('s3://bucket/output')\n"
         )
         assert len(findings(self.rule, code)) == 2

@@ -10,7 +10,6 @@ Coverage:
 from __future__ import annotations
 
 import ast
-from typing import Any
 
 import pytest
 
@@ -45,21 +44,21 @@ def _is_spark_file(code: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _ANTI_PATTERN_SIGNATURES: dict[str, list[str]] = {
-    "aqe_disabled":        ['"spark.sql.adaptive.enabled"', '"false"'],
-    "broadcast_disabled":  ['"spark.sql.autoBroadcastJoinThreshold"', '"-1"'],
-    "cache_no_unpersist":  [".cache()"],
-    "collect_no_filter":   [".collect()"],
-    "cross_join":          [".crossJoin("],
-    "csv_read":            [".csv("],
-    "groupByKey":          [".groupByKey()"],
-    "infer_schema":        ['"inferSchema"', '"true"'],
-    "jdbc_no_partitions":  ['.format("jdbc")', ".load()"],
-    "python_udf":          ["@F.udf("],
-    "repartition_one":     [".repartition(1)"],
-    "select_star":         ['.select("*")'],
-    "show_in_prod":        [".show()"],
-    "toPandas_no_limit":   [".toPandas()"],
-    "withColumn_loop":     ["for _col in", ".withColumn("],
+    "aqe_disabled": ['"spark.sql.adaptive.enabled"', '"false"'],
+    "broadcast_disabled": ['"spark.sql.autoBroadcastJoinThreshold"', '"-1"'],
+    "cache_no_unpersist": [".cache()"],
+    "collect_no_filter": [".collect()"],
+    "cross_join": [".crossJoin("],
+    "csv_read": [".csv("],
+    "groupByKey": [".groupByKey()"],
+    "infer_schema": ['"inferSchema"', '"true"'],
+    "jdbc_no_partitions": ['.format("jdbc")', ".load()"],
+    "python_udf": ["@F.udf("],
+    "repartition_one": [".repartition(1)"],
+    "select_star": ['.select("*")'],
+    "show_in_prod": [".show()"],
+    "toPandas_no_limit": [".toPandas()"],
+    "withColumn_loop": ["for _col in", ".withColumn("],
 }
 
 
@@ -187,8 +186,7 @@ class TestAntiPatternInjection:
         """Injecting any single anti-pattern must not break Python syntax."""
         code = generate_spark_file(inject_anti_patterns=[pattern])
         assert _parses(code), (
-            f"generate_spark_file(inject_anti_patterns=[{pattern!r}]) "
-            f"produced invalid Python"
+            f"generate_spark_file(inject_anti_patterns=[{pattern!r}]) " f"produced invalid Python"
         )
 
     @pytest.mark.parametrize("pattern", sorted(ALL_ANTI_PATTERNS))
@@ -197,14 +195,12 @@ class TestAntiPatternInjection:
         assert _is_spark_file(code), f"Pattern {pattern!r} broke pyspark import"
 
     @pytest.mark.parametrize("pattern,signatures", sorted(_ANTI_PATTERN_SIGNATURES.items()))
-    def test_anti_pattern_signature_present(
-        self, pattern: str, signatures: list[str]
-    ) -> None:
+    def test_anti_pattern_signature_present(self, pattern: str, signatures: list[str]) -> None:
         """Each injected anti-pattern must produce its characteristic code."""
         code = generate_spark_file(
             inject_anti_patterns=[pattern],
-            n_caches=1,   # needed for cache_no_unpersist
-            n_udfs=0,     # UDFs are added by the anti-pattern itself
+            n_caches=1,  # needed for cache_no_unpersist
+            n_udfs=0,  # UDFs are added by the anti-pattern itself
         )
         for sig in signatures:
             assert sig in code, (
@@ -315,9 +311,7 @@ class TestAntiPatternInjection:
     def test_all_anti_patterns_complete_set(self) -> None:
         """Verify that _ANTI_PATTERN_SIGNATURES covers every anti-pattern."""
         missing = ALL_ANTI_PATTERNS - set(_ANTI_PATTERN_SIGNATURES)
-        assert not missing, (
-            f"_ANTI_PATTERN_SIGNATURES is missing entries for: {missing!r}"
-        )
+        assert not missing, f"_ANTI_PATTERN_SIGNATURES is missing entries for: {missing!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -362,16 +356,12 @@ class TestMultiFileProject:
 
     def test_non_spark_files_do_not_import_pyspark(self) -> None:
         project = generate_multi_file_project(n_files=10, spark_files_ratio=0.4)
-        plain_files = [
-            (fname, code)
-            for fname, code in project.items()
-            if not _is_spark_file(code)
-        ]
+        plain_files = [(fname, code) for fname, code in project.items() if not _is_spark_file(code)]
         assert plain_files, "Expected at least one non-Spark file"
         for fname, code in plain_files:
-            assert "pyspark" not in code, (
-                f"{fname} has 'pyspark' but was supposed to be a plain Python file"
-            )
+            assert (
+                "pyspark" not in code
+            ), f"{fname} has 'pyspark' but was supposed to be a plain Python file"
 
     def test_spark_filenames_prefixed_spark_job(self) -> None:
         project = generate_multi_file_project(n_files=6, spark_files_ratio=0.5)
@@ -398,9 +388,7 @@ class TestMultiFileProject:
         for fname, code in project.items():
             assert _is_spark_file(code)
             assert ".crossJoin(" in code, f"{fname} missing crossJoin"
-            assert '"spark.sql.adaptive.enabled", "false"' in code, (
-                f"{fname} missing aqe_disabled"
-            )
+            assert '"spark.sql.adaptive.enabled", "false"' in code, f"{fname} missing aqe_disabled"
 
     def test_anti_patterns_not_in_plain_files(self) -> None:
         project = generate_multi_file_project(

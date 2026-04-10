@@ -112,8 +112,7 @@ class TestSchemaInferenceRule:
 
     def test_no_finding_when_schema_explicitly_set(self):
         code = SPARK_HDR + (
-            "schema = 'id LONG, name STRING'\n"
-            "df = spark.read.schema(schema).csv('path')\n"
+            "schema = 'id LONG, name STRING'\n" "df = spark.read.schema(schema).csv('path')\n"
         )
         assert findings(self.rule, code) == []
 
@@ -296,9 +295,7 @@ class TestParquetCompressionNotSetRule:
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_codec_option_set(self):
-        code = SPARK_HDR + (
-            "df.write.mode('overwrite').option('codec', 'zstd').parquet('path')\n"
-        )
+        code = SPARK_HDR + ("df.write.mode('overwrite').option('codec', 'zstd').parquet('path')\n")
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_global_config_set(self):

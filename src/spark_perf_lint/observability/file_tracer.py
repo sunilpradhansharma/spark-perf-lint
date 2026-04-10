@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from spark_perf_lint.observability.tracer import BaseTracer, TraceLevel
+from spark_perf_lint.observability.tracer import BaseTracer
 from spark_perf_lint.types import Severity
 
 if TYPE_CHECKING:
@@ -152,9 +152,7 @@ class FileTracer(BaseTracer):
         if self._should_include_verbose():
             self._findings = list(findings)
         else:
-            self._findings = [
-                f for f in findings if f.severity >= Severity.WARNING
-            ]
+            self._findings = [f for f in findings if f.severity >= Severity.WARNING]
 
     def end_run(self, report: AuditReport) -> None:
         """Serialise and write the trace document.

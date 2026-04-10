@@ -52,14 +52,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import IO, Any
 
 from spark_perf_lint import __version__
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.reporters.markdown_reporter import MarkdownReporter
 from spark_perf_lint.types import AuditReport, Finding, Severity
-
 
 # ---------------------------------------------------------------------------
 # GitHub Actions workflow-command helpers
@@ -174,11 +173,11 @@ class _GitHubEnv:
     """
 
     is_github_actions: bool = False
-    repository: str = ""          # "owner/repo"
-    token: str = ""               # GITHUB_TOKEN
-    step_summary_path: str = ""   # GITHUB_STEP_SUMMARY
-    event_name: str = ""          # pull_request, push, …
-    event_path: str = ""          # path to event JSON payload
+    repository: str = ""  # "owner/repo"
+    token: str = ""  # GITHUB_TOKEN
+    step_summary_path: str = ""  # GITHUB_STEP_SUMMARY
+    event_name: str = ""  # pull_request, push, …
+    event_path: str = ""  # path to event JSON payload
     server_url: str = "https://github.com"
     sha: str = ""
     run_id: str = ""
@@ -331,7 +330,7 @@ class GitHubPRReporter:
         md = MarkdownReporter(
             self.report,
             self.config,
-            show_fix=False,       # keep step summary concise
+            show_fix=False,  # keep step summary concise
             compact=self.compact,
         ).to_str()
 
@@ -584,9 +583,7 @@ class GitHubPRReporter:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def _api_post(
-        self, url: str, payload: dict[str, Any], *, expected_status: int = 200
-    ) -> Any:
+    def _api_post(self, url: str, payload: dict[str, Any], *, expected_status: int = 200) -> Any:
         """Issue an authenticated POST with a JSON payload.
 
         Args:
@@ -603,9 +600,7 @@ class GitHubPRReporter:
         """
         return self._api_request("POST", url, payload, expected_status=expected_status)
 
-    def _api_patch(
-        self, url: str, payload: dict[str, Any], *, expected_status: int = 200
-    ) -> Any:
+    def _api_patch(self, url: str, payload: dict[str, Any], *, expected_status: int = 200) -> Any:
         """Issue an authenticated PATCH with a JSON payload.
 
         Args:
@@ -646,22 +641,16 @@ class GitHubPRReporter:
             _APIError: If the HTTP status code does not match *expected_status*.
         """
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, headers=self._api_headers(), method=method
-        )
+        req = urllib.request.Request(url, data=data, headers=self._api_headers(), method=method)
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 status = resp.status
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise _APIError(
-                f"HTTP {exc.code} {exc.reason} from {method} {url}"
-            ) from exc
+            raise _APIError(f"HTTP {exc.code} {exc.reason} from {method} {url}") from exc
 
         if status != expected_status:
-            raise _APIError(
-                f"Expected HTTP {expected_status}, got {status} from {method} {url}"
-            )
+            raise _APIError(f"Expected HTTP {expected_status}, got {status} from {method} {url}")
         return body
 
     # ------------------------------------------------------------------

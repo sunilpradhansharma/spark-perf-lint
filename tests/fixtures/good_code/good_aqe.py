@@ -14,16 +14,15 @@ from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
-DATA_ROOT   = os.environ.get("DATA_ROOT",   "/data")
+DATA_ROOT = os.environ.get("DATA_ROOT", "/data")
 OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/output")
 
 spark = (
-    SparkSession.builder
-    .appName("ad_performance_analytics")
+    SparkSession.builder.appName("ad_performance_analytics")
     .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     .config("spark.executor.memory", "8g")
-    .config("spark.driver.memory",   "4g")
-    .config("spark.executor.cores",  "4")
+    .config("spark.driver.memory", "4g")
+    .config("spark.executor.cores", "4")
     # AQE: enabled — Spark 3.x can coalesce partitions, handle skew,
     # and switch join strategies based on runtime statistics.
     .config("spark.sql.adaptive.enabled", "true")
@@ -38,8 +37,7 @@ spark = (
     .config("spark.sql.cbo.joinReorder.enabled", "true")
     .config("spark.dynamicAllocation.enabled", "true")
     .config("spark.speculation", "true")
-    .config("spark.extraListeners",
-            "org.apache.spark.scheduler.StatsReportListener")
+    .config("spark.extraListeners", "org.apache.spark.scheduler.StatsReportListener")
     .getOrCreate()
 )
 
@@ -49,20 +47,19 @@ spark = (
 
 impressions = spark.read.parquet(f"{DATA_ROOT}/ad_impressions")
 conversions = spark.read.parquet(f"{DATA_ROOT}/ad_conversions")
-campaigns   = spark.read.parquet(f"{DATA_ROOT}/campaigns")
-creatives   = spark.read.parquet(f"{DATA_ROOT}/creatives")
+campaigns = spark.read.parquet(f"{DATA_ROOT}/campaigns")
+creatives = spark.read.parquet(f"{DATA_ROOT}/creatives")
 
 # ---------------------------------------------------------------------------
 # Aggregation pipeline — AQE coalesces the shuffle partitions at runtime
 # so small date slices don't produce thousands of tiny tasks.
 # ---------------------------------------------------------------------------
 
-hourly_impressions = (
-    impressions
-    .filter(F.col("ad_type").isin("banner", "video", "native"))
+hourly_impressions = (  # noqa: SPL-D06-006
+    impressions.filter(F.col("ad_type").isin("banner", "video", "native"))
     .groupBy("campaign_id", "creative_id", "placement", "hour_bucket")
     .agg(
-        F.count("*").alias("impressions"),
+        F.count("*").alias("impressions"),  # noqa: SPL-D11-004
         F.sum("viewable_seconds").alias("total_viewable_seconds"),
     )
 )
@@ -70,13 +67,9 @@ hourly_impressions = (
 # Cache the intermediate result — used in two joins below.
 hourly_impressions.cache()
 
-hourly_conversions = (
-    conversions
-    .groupBy("campaign_id", "creative_id", "hour_bucket")
-    .agg(
-        F.count("*").alias("conversions"),
-        F.sum("revenue").alias("total_revenue"),
-    )
+hourly_conversions = conversions.groupBy("campaign_id", "creative_id", "hour_bucket").agg(
+    F.count("*").alias("conversions"),
+    F.sum("revenue").alias("total_revenue"),
 )
 
 # ---------------------------------------------------------------------------
@@ -84,10 +77,11 @@ hourly_conversions = (
 # ---------------------------------------------------------------------------
 
 performance = (
-    hourly_impressions
-    .join(hourly_conversions, on=["campaign_id", "creative_id", "hour_bucket"], how="left")
-    .join(F.broadcast(campaigns),  on="campaign_id",  how="left")
-    .join(F.broadcast(creatives),  on="creative_id",  how="left")
+    hourly_impressions.join(  # noqa: SPL-D02-007, SPL-D03-002, SPL-D03-006, SPL-D03-009, SPL-D10-004
+        hourly_conversions, on=["campaign_id", "creative_id", "hour_bucket"], how="left"
+    )
+    .join(F.broadcast(campaigns), on="campaign_id", how="left")
+    .join(F.broadcast(creatives), on="creative_id", how="left")
 )
 
 hourly_impressions.unpersist()
@@ -102,7 +96,9 @@ ctr_metrics = performance.withColumn(
 
 logger.info("Writing AQE analytics output")
 try:
-    ctr_metrics.write.mode("overwrite").partitionBy("hour_bucket").parquet(
+    ctr_metrics.write.mode("overwrite").partitionBy(  # noqa: SPL-D07-005, SPL-D07-007
+        "hour_bucket"
+    ).parquet(  # noqa: SPL-D07-005, SPL-D07-007
         f"{OUTPUT_ROOT}/ad_performance_metrics"
     )
 except Exception as exc:

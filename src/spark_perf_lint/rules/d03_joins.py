@@ -340,8 +340,7 @@ class JoinWithoutFilterRule(CodeRule):
         "Push predicates as close to the data source as possible."
     )
     before_example = (
-        "df = spark.read.parquet('s3://bucket/events')\n"
-        "result = df.join(users, 'user_id')"
+        "df = spark.read.parquet('s3://bucket/events')\n" "result = df.join(users, 'user_id')"
     )
     after_example = (
         "df = spark.read.parquet('s3://bucket/events').filter('date >= \"2024-01-01\"')\n"
@@ -398,9 +397,7 @@ class JoinKeyTypeMismatchRule(CodeRule):
     name = "Join key type mismatch risk"
     dimension = _DIM
     default_severity = Severity.WARNING
-    description = (
-        "join() condition compares different column names — verify the types match."
-    )
+    description = "join() condition compares different column names — verify the types match."
     explanation = (
         "When joining on a condition like ``df1.order_id == df2.id``, the two columns "
         "are implicitly cast to a common type before comparison.  If ``order_id`` is "

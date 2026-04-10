@@ -32,7 +32,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # =============================================================================
 # Regex catalogue — compiled once at module load
 # =============================================================================
@@ -41,15 +40,11 @@ from typing import Any
 # operator name (word chars + spaces up to the first parenthesis or newline).
 # Spark uses `:`, `:-`, `:  `, `+`, `-`, `|`, `\` as tree-drawing characters.
 _RE_NODE_HEADER = re.compile(
-    r"^(?P<indent>[\s+\-\\|:]*)"
-    r"(?P<operator>[A-Z][A-Za-z0-9_]+)"
-    r"(?P<rest>.*?)$"
+    r"^(?P<indent>[\s+\-\\|:]*)" r"(?P<operator>[A-Z][A-Za-z0-9_]+)" r"(?P<rest>.*?)$"
 )
 
 # Exchange (shuffle): covers both plain Exchange and AQEShuffleRead wrappers.
-_RE_EXCHANGE = re.compile(
-    r"\b(Exchange|AQEShuffleRead|ShuffleQueryStage)\b", re.IGNORECASE
-)
+_RE_EXCHANGE = re.compile(r"\b(Exchange|AQEShuffleRead|ShuffleQueryStage)\b", re.IGNORECASE)
 
 # Join type keywords (order matters — more specific first).
 _RE_JOIN_TYPE = re.compile(
@@ -133,7 +128,10 @@ class PlanNode:
     children: list[PlanNode] = field(default_factory=list)
 
     def __repr__(self) -> str:
-        return f"PlanNode(op={self.operator!r}, depth={self.indent_level}, children={len(self.children)})"
+        return (
+            f"PlanNode(op={self.operator!r}, depth={self.indent_level},"
+            f" children={len(self.children)})"
+        )
 
 
 # =============================================================================
@@ -375,8 +373,8 @@ class PlanAnalyzer:
         Returns:
             ``PlanAnalysis`` built from ``df.explain(extended=True)``.
         """
-        import io
         import contextlib
+        import io
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -676,25 +674,19 @@ class PlanAnalyzer:
             if not schema_m:
                 continue
 
-            schema_cols = len(
-                [c for c in schema_m.group(1).split(",") if c.strip()]
-            )
+            schema_cols = len([c for c in schema_m.group(1).split(",") if c.strip()])
             if schema_cols == 0:
                 continue
 
             # Try explicit "Output: [...]" first, then inline "[col#id, ...]"
             output_m = _RE_OUTPUT_COLUMNS.search(line)
             if output_m:
-                output_cols = len(
-                    [c for c in output_m.group(1).split(",") if c.strip()]
-                )
+                output_cols = len([c for c in output_m.group(1).split(",") if c.strip()])
             else:
                 proj_m = cls._RE_SCAN_PROJECTION.search(line)
                 if not proj_m:
                     continue
-                output_cols = len(
-                    [c for c in proj_m.group(1).split(",") if c.strip()]
-                )
+                output_cols = len([c for c in proj_m.group(1).split(",") if c.strip()])
 
             ratios.append(min(1.0, output_cols / schema_cols))
 
@@ -745,13 +737,10 @@ class PlanAnalyzer:
             # BroadcastHashJoin is generally faster than SortMergeJoin
             if "Broadcast" in after_j and "Broadcast" not in before_j:
                 diff.improvements.append(
-                    f"Join strategy improved: {before_j} → {after_j} "
-                    f"(broadcast avoids shuffle)"
+                    f"Join strategy improved: {before_j} → {after_j} " f"(broadcast avoids shuffle)"
                 )
             else:
-                diff.improvements.append(
-                    f"Join strategy changed: {before_j} → {after_j}"
-                )
+                diff.improvements.append(f"Join strategy changed: {before_j} → {after_j}")
 
         if diff.aqe_introduced:
             diff.improvements.append("AQE enabled: plan can adapt to runtime statistics")

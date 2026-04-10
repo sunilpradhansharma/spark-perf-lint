@@ -14,14 +14,12 @@ from __future__ import annotations
 
 import io
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.types import AuditReport, Dimension, EffortLevel, Finding, Severity
-
 
 # =============================================================================
 # Shared fixtures
@@ -59,7 +57,8 @@ def _make_finding(
         config_suggestion=config_suggestion or {},
         estimated_impact="10–100× data volume increase",
         effort_level=EffortLevel.MINOR_CODE_CHANGE,
-        references=references or ["https://spark.apache.org/docs/latest/sql-performance-tuning.html"],
+        references=references
+        or ["https://spark.apache.org/docs/latest/sql-performance-tuning.html"],
     )
 
 
@@ -165,9 +164,7 @@ class TestJsonReporter:
         data = self._reporter().to_dict()
         ts = data["metadata"]["generated_at"]
         # Must end with +00:00 or Z to prove UTC
-        assert ts.endswith("+00:00") or ts.endswith("Z"), (
-            f"Timestamp {ts!r} does not indicate UTC"
-        )
+        assert ts.endswith("+00:00") or ts.endswith("Z"), f"Timestamp {ts!r} does not indicate UTC"
 
     def test_scan_block_fields(self) -> None:
         report = _make_report(files_scanned=5, duration=0.456)
@@ -317,7 +314,9 @@ class TestMarkdownReporter:
 
     def test_summary_table_present(self) -> None:
         md = self._md()
-        assert "files_scanned" in md.lower() or "Files Scanned" in md or "files scanned" in md.lower()
+        assert (
+            "files_scanned" in md.lower() or "Files Scanned" in md or "files scanned" in md.lower()
+        )
 
     def test_findings_table_has_rule_id(self) -> None:
         md = self._md()

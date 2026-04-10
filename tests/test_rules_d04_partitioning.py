@@ -337,8 +337,7 @@ class TestMissingBucketByRule:
 
     def test_fires_on_save_as_table_without_bucket_when_joins_present(self):
         code = (
-            SPARK_HDR
-            + "result = df.join(other, 'id')\n"
+            SPARK_HDR + "result = df.join(other, 'id')\n"
             "df.write.mode('overwrite').saveAsTable('events')\n"
         )
         fs = findings(self.rule, code)
@@ -347,26 +346,18 @@ class TestMissingBucketByRule:
 
     def test_no_finding_when_bucket_by_present(self):
         code = (
-            SPARK_HDR
-            + "result = df.join(other, 'id')\n"
+            SPARK_HDR + "result = df.join(other, 'id')\n"
             "df.write.bucketBy(256, 'id').sortBy('id').saveAsTable('events')\n"
         )
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_no_joins_in_file(self):
-        code = (
-            SPARK_HDR
-            + "df.write.mode('overwrite').saveAsTable('events')\n"
-        )
+        code = SPARK_HDR + "df.write.mode('overwrite').saveAsTable('events')\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_parquet_write(self):
         # Only saveAsTable is flagged; parquet writes are handled by Rule 006
-        code = (
-            SPARK_HDR
-            + "result = df.join(other, 'id')\n"
-            "df.write.parquet('path')\n"
-        )
+        code = SPARK_HDR + "result = df.join(other, 'id')\n" "df.write.parquet('path')\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_non_spark_file(self):
@@ -398,16 +389,14 @@ class TestMissingPartitionFilterRule:
 
     def test_no_finding_when_filter_precedes_groupby(self):
         code = (
-            SPARK_HDR
-            + "result = (spark.read.parquet('s3://bucket/events')"
+            SPARK_HDR + "result = (spark.read.parquet('s3://bucket/events')"
             ".filter('date = \"2024-01-01\"').groupBy('user_id').count())\n"
         )
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_where_precedes_expensive_op(self):
         code = (
-            SPARK_HDR
-            + "result = (spark.read.parquet('s3://bucket/events')"
+            SPARK_HDR + "result = (spark.read.parquet('s3://bucket/events')"
             ".where('date = \"2024\"').distinct())\n"
         )
         assert findings(self.rule, code) == []

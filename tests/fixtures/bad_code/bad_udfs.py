@@ -7,11 +7,10 @@ will fail or stall on any production-scale dataset.
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import StringType, DoubleType
+from pyspark.sql.types import DoubleType, StringType
 
 spark = (
-    SparkSession.builder
-    .appName("customer_profile_transform")
+    SparkSession.builder.appName("customer_profile_transform")
     .config("spark.sql.shuffle.partitions", "200")
     .getOrCreate()
 )
@@ -19,6 +18,7 @@ spark = (
 # ---------------------------------------------------------------------------
 # Python UDF — row-at-a-time serialisation overhead
 # ---------------------------------------------------------------------------
+
 
 # SPL-D09-001: Python UDF invokes the Python worker for every row.
 # The equivalent F.lower(F.trim(F.col("email"))) runs entirely in the
@@ -44,24 +44,19 @@ def lifetime_value_score(purchases: int, avg_order: float) -> float:
 # ---------------------------------------------------------------------------
 
 customers = spark.read.parquet("/data/customers")
-orders    = spark.read.parquet("/data/orders")
+orders = spark.read.parquet("/data/orders")
 
-customer_stats = (
-    orders
-    .groupBy("customer_id")
-    .agg(
-        F.count("*").alias("purchase_count"),
-        F.avg("order_total").alias("avg_order_value"),
-    )
+customer_stats = orders.groupBy("customer_id").agg(
+    F.count("*").alias("purchase_count"),
+    F.avg("order_total").alias("avg_order_value"),
 )
 
 enriched = (
-    customers
-    .join(customer_stats, on="customer_id", how="left")
-    .withColumn("email_clean",  normalise_email(F.col("email")))
-    .withColumn("ltv_score",    lifetime_value_score(
-                                    F.col("purchase_count"),
-                                    F.col("avg_order_value")))
+    customers.join(customer_stats, on="customer_id", how="left")
+    .withColumn("email_clean", normalise_email(F.col("email")))
+    .withColumn(
+        "ltv_score", lifetime_value_score(F.col("purchase_count"), F.col("avg_order_value"))
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -69,8 +64,11 @@ enriched = (
 # ---------------------------------------------------------------------------
 
 score_columns = [
-    "recency_score", "frequency_score", "monetary_score",
-    "engagement_score", "loyalty_score",
+    "recency_score",
+    "frequency_score",
+    "monetary_score",
+    "engagement_score",
+    "loyalty_score",
 ]
 
 df = enriched
@@ -98,10 +96,8 @@ print(f"High-value customers found: {len(high_value_list)}")
 # toPandas() without a limit — same OOM risk
 # ---------------------------------------------------------------------------
 
-segment_summary = (
-    df
-    .groupBy("country", "customer_segment")
-    .agg(F.avg("ltv_score").alias("avg_ltv"), F.count("*").alias("n"))
+segment_summary = df.groupBy("country", "customer_segment").agg(
+    F.avg("ltv_score").alias("avg_ltv"), F.count("*").alias("n")
 )
 
 # SPL-D09-006: toPandas() materialises the entire DataFrame in driver

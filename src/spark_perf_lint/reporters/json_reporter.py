@@ -61,7 +61,6 @@ from spark_perf_lint import __version__
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.types import AuditReport
 
-
 # ---------------------------------------------------------------------------
 # Public reporter class
 # ---------------------------------------------------------------------------
@@ -147,9 +146,8 @@ class JsonReporter:
             Dictionary with tool name, version, timestamp, config source,
             severity threshold, and fail-on levels.
         """
-        generated_at = (
-            datetime.datetime.now(datetime.timezone.utc)
-            .isoformat(timespec="microseconds")
+        generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="microseconds"
         )
         config_source = (
             str(self.config.config_file_path)

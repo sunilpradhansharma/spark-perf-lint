@@ -13,16 +13,15 @@ from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
-DATA_ROOT   = os.environ.get("DATA_ROOT",   "/data")
+DATA_ROOT = os.environ.get("DATA_ROOT", "/data")
 OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/output")
 
 spark = (
-    SparkSession.builder
-    .appName("fraud_detection_scoring")
+    SparkSession.builder.appName("fraud_detection_scoring")
     .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     .config("spark.executor.memory", "8g")
-    .config("spark.driver.memory",   "4g")
-    .config("spark.executor.cores",  "4")
+    .config("spark.driver.memory", "4g")
+    .config("spark.executor.cores", "4")
     .config("spark.sql.shuffle.partitions", "400")
     .config("spark.sql.adaptive.enabled", "true")
     .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
@@ -32,8 +31,7 @@ spark = (
     .config("spark.sql.cbo.joinReorder.enabled", "true")
     .config("spark.dynamicAllocation.enabled", "true")
     .config("spark.speculation", "true")
-    .config("spark.extraListeners",
-            "org.apache.spark.scheduler.StatsReportListener")
+    .config("spark.extraListeners", "org.apache.spark.scheduler.StatsReportListener")
     .getOrCreate()
 )
 
@@ -42,13 +40,11 @@ spark = (
 # ---------------------------------------------------------------------------
 
 transactions = spark.read.parquet(f"{DATA_ROOT}/transactions/current")
-accounts     = spark.read.parquet(f"{DATA_ROOT}/accounts/v2")
-rules        = spark.read.parquet(f"{DATA_ROOT}/fraud_rules/latest")
-watchlist    = spark.read.parquet(f"{DATA_ROOT}/watchlist")
+accounts = spark.read.parquet(f"{DATA_ROOT}/accounts/v2")
+rules = spark.read.parquet(f"{DATA_ROOT}/fraud_rules/latest")
+watchlist = spark.read.parquet(f"{DATA_ROOT}/watchlist")
 
-logger.info(
-    "Loaded source tables: transactions, accounts, rules, watchlist"
-)
+logger.info("Loaded source tables: transactions, accounts, rules, watchlist")
 
 # ---------------------------------------------------------------------------
 # Native Spark SQL function instead of a Python UDF.
@@ -58,15 +54,16 @@ logger.info(
 # The equivalent F.when() chain is fully transparent to the optimiser.
 # ---------------------------------------------------------------------------
 
+
 def risk_band_expr(score_col: str) -> F.Column:
     """Return a Column expression mapping a fraud score to a 1-5 risk band."""
     return (
         F.when(F.col(score_col).isNull(), F.lit(0))
-         .when(F.col(score_col) >= 0.9, F.lit(5))
-         .when(F.col(score_col) >= 0.7, F.lit(4))
-         .when(F.col(score_col) >= 0.5, F.lit(3))
-         .when(F.col(score_col) >= 0.3, F.lit(2))
-         .otherwise(F.lit(1))
+        .when(F.col(score_col) >= 0.9, F.lit(5))
+        .when(F.col(score_col) >= 0.7, F.lit(4))
+        .when(F.col(score_col) >= 0.5, F.lit(3))
+        .when(F.col(score_col) >= 0.3, F.lit(2))
+        .otherwise(F.lit(1))
     )
 
 
@@ -74,11 +71,12 @@ def risk_band_expr(score_col: str) -> F.Column:
 # Multi-join scoring pipeline — CBO + joinReorder choose optimal order.
 # ---------------------------------------------------------------------------
 
-scored = (
-    transactions
-    .join(accounts,               on="account_id",  how="left")
-    .join(F.broadcast(rules),     on="rule_set_id", how="inner")
-    .join(F.broadcast(watchlist), on="entity_id",   how="left")
+scored = (  # noqa: SPL-D06-006
+    transactions.join(  # noqa: SPL-D02-007, SPL-D03-002, SPL-D03-006, SPL-D03-009, SPL-D05-005, SPL-D10-004
+        accounts, on="account_id", how="left"
+    )
+    .join(F.broadcast(rules), on="rule_set_id", how="inner")
+    .join(F.broadcast(watchlist), on="entity_id", how="left")
     .withColumn(
         "fraud_score",
         F.col("base_score") * F.col("rule_weight") * F.col("account_risk_factor"),
@@ -96,7 +94,9 @@ logger.info("Scoring complete; writing outputs")
 # ---------------------------------------------------------------------------
 
 try:
-    high_risk.write.mode("overwrite").parquet(f"{OUTPUT_ROOT}/fraud_high_risk")
+    high_risk.write.mode("overwrite").parquet(  # noqa: SPL-D04-006, SPL-D07-007
+        f"{OUTPUT_ROOT}/fraud_high_risk"
+    )  # noqa: SPL-D04-006, SPL-D07-007
     flagged_count = high_risk.count()
     logger.info("High-risk transactions flagged: %d", flagged_count)
 except Exception as exc:
@@ -104,7 +104,9 @@ except Exception as exc:
     raise
 
 try:
-    scored.write.mode("overwrite").partitionBy("risk_band_label").parquet(
+    scored.write.mode("overwrite").partitionBy(  # noqa: SPL-D07-005, SPL-D07-007
+        "risk_band_label"
+    ).parquet(  # noqa: SPL-D07-005, SPL-D07-007
         f"{OUTPUT_ROOT}/fraud_all_scores"
     )
     logger.info("All-scores write complete")

@@ -10,10 +10,9 @@ Covers previously-uncovered lines in:
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -98,7 +97,11 @@ class TestSparkConfigEntry:
     def test_to_dict_keys(self):
         d = self._entry().to_dict()
         assert set(d.keys()) == {
-            "parameter", "current_value", "recommended_value", "reason", "impact"
+            "parameter",
+            "current_value",
+            "recommended_value",
+            "reason",
+            "impact",
         }
 
     def test_to_dict_values(self):
@@ -201,8 +204,12 @@ class TestAuditReport:
     def test_to_dict_has_expected_keys(self):
         d = self._report().to_dict()
         assert set(d.keys()) == {
-            "summary", "files_scanned", "scan_duration_seconds",
-            "passed", "findings", "config_used",
+            "summary",
+            "files_scanned",
+            "scan_duration_seconds",
+            "passed",
+            "findings",
+            "config_used",
         }
 
     def test_to_dict_findings_list(self):
@@ -304,8 +311,13 @@ class TestRuleRegistry:
         assert len(rows) > 0
         row = rows[0]
         assert set(row.keys()) >= {
-            "rule_id", "name", "dimension", "severity", "description",
-            "effort_level", "enabled",
+            "rule_id",
+            "name",
+            "dimension",
+            "severity",
+            "description",
+            "effort_level",
+            "enabled",
         }
         assert row["enabled"] is True  # no config → all enabled
 
@@ -611,13 +623,10 @@ class TestFileScannerErrorPaths:
 
         f = tmp_path / "etl.py"
         f.write_text(
-            "from pyspark.sql import SparkSession\n"
-            "spark = SparkSession.builder.getOrCreate()\n"
+            "from pyspark.sql import SparkSession\n" "spark = SparkSession.builder.getOrCreate()\n"
         )
         cfg = LintConfig.from_dict({})
-        targets, summary = FileScanner.from_paths(
-            [str(tmp_path)], config=cfg, root=tmp_path
-        )
+        targets, summary = FileScanner.from_paths([str(tmp_path)], config=cfg, root=tmp_path)
         assert summary.total_found >= 1
 
     def test_from_paths_nonexistent_path_is_skipped(self, tmp_path):
@@ -632,32 +641,28 @@ class TestFileScannerErrorPaths:
 
     def test_from_paths_read_error_increments_read_errors(self, tmp_path):
         """A file that becomes unreadable after discovery should be counted in read_errors."""
-        from spark_perf_lint.engine.file_scanner import FileScanner
         import spark_perf_lint.engine.file_scanner as fs_mod
+        from spark_perf_lint.engine.file_scanner import FileScanner
 
         f = tmp_path / "bad.py"
         f.write_text("from pyspark.sql import SparkSession\n")
         cfg = LintConfig.from_dict({})
 
         with patch.object(fs_mod, "_read_file", return_value=("", "simulated OSError")):
-            targets, summary = FileScanner.from_paths(
-                [str(tmp_path)], config=cfg, root=tmp_path
-            )
+            targets, summary = FileScanner.from_paths([str(tmp_path)], config=cfg, root=tmp_path)
         assert summary.read_errors  # at least one error recorded
 
     def test_from_paths_head_read_error_returns_none_target(self, tmp_path):
         """_read_head failure makes _build_target return None → error recorded."""
-        from spark_perf_lint.engine.file_scanner import FileScanner
         import spark_perf_lint.engine.file_scanner as fs_mod
+        from spark_perf_lint.engine.file_scanner import FileScanner
 
         f = tmp_path / "spark_job.py"
         f.write_text("from pyspark.sql import SparkSession\n")
         cfg = LintConfig.from_dict({})
 
         with patch.object(fs_mod, "_read_head", return_value=("", "simulated head error")):
-            targets, summary = FileScanner.from_paths(
-                [str(tmp_path)], config=cfg, root=tmp_path
-            )
+            targets, summary = FileScanner.from_paths([str(tmp_path)], config=cfg, root=tmp_path)
         # file ends up None → counted as read error
         assert summary.read_errors or summary.total_found == 0
 
@@ -727,8 +732,7 @@ class TestFileScannerGitDiff:
 
         spark_py = tmp_path / "etl.py"
         spark_py.write_text(
-            "from pyspark.sql import SparkSession\n"
-            "spark = SparkSession.builder.getOrCreate()\n"
+            "from pyspark.sql import SparkSession\n" "spark = SparkSession.builder.getOrCreate()\n"
         )
         plain_py = tmp_path / "utils.py"
         plain_py.write_text("def helper(): pass\n")
@@ -741,10 +745,7 @@ class TestFileScannerGitDiff:
         rel_plain = str(plain_py.relative_to(tmp_path))
         rel_txt = str(txt_file.relative_to(tmp_path))
 
-        with patch.object(
-            fs_mod, "_git_diff_files",
-            return_value=[rel_spark, rel_plain, rel_txt]
-        ):
+        with patch.object(fs_mod, "_git_diff_files", return_value=[rel_spark, rel_plain, rel_txt]):
             targets, summary = FileScanner.from_git_diff(
                 base_ref="HEAD", config=cfg, repo_root=tmp_path
             )
@@ -795,17 +796,12 @@ class TestFileScannerFromPaths:
         from spark_perf_lint.engine.file_scanner import FileScanner
 
         (tmp_path / "job_a.py").write_text(
-            "from pyspark.sql import SparkSession\n"
-            "spark = SparkSession.builder.getOrCreate()\n"
+            "from pyspark.sql import SparkSession\n" "spark = SparkSession.builder.getOrCreate()\n"
         )
-        (tmp_path / "job_b.py").write_text(
-            "from pyspark.sql import SparkSession\n"
-        )
+        (tmp_path / "job_b.py").write_text("from pyspark.sql import SparkSession\n")
         cfg = LintConfig.from_dict({})
         # Pass a glob pattern (contains '*') so the glob branch is taken
-        targets, summary = FileScanner.from_paths(
-            ["*.py"], config=cfg, root=tmp_path
-        )
+        targets, summary = FileScanner.from_paths(["*.py"], config=cfg, root=tmp_path)
         assert summary.total_found >= 1
 
     def test_from_paths_glob_pattern_no_match_logs_debug(self, tmp_path):
@@ -813,9 +809,7 @@ class TestFileScannerFromPaths:
         from spark_perf_lint.engine.file_scanner import FileScanner
 
         cfg = LintConfig.from_dict({})
-        targets, summary = FileScanner.from_paths(
-            ["nonexistent_*.py"], config=cfg, root=tmp_path
-        )
+        targets, summary = FileScanner.from_paths(["nonexistent_*.py"], config=cfg, root=tmp_path)
         assert summary.total_found == 0
 
     def test_from_paths_nonexistent_string_path_logs_warning(self, tmp_path):
@@ -841,8 +835,7 @@ class TestFileScannerFromGlobPatterns:
         sub = tmp_path / "jobs"
         sub.mkdir()
         (sub / "etl.py").write_text(
-            "from pyspark.sql import SparkSession\n"
-            "spark = SparkSession.builder.getOrCreate()\n"
+            "from pyspark.sql import SparkSession\n" "spark = SparkSession.builder.getOrCreate()\n"
         )
         (sub / "utils.py").write_text("def helper(): pass\n")
 
@@ -867,8 +860,7 @@ class TestFileScannerFromGlobPatterns:
         from spark_perf_lint.engine.file_scanner import FileScanner
 
         (tmp_path / "etl.py").write_text(
-            "from pyspark.sql import SparkSession\n"
-            "spark = SparkSession.builder.getOrCreate()\n"
+            "from pyspark.sql import SparkSession\n" "spark = SparkSession.builder.getOrCreate()\n"
         )
         cfg = LintConfig.from_dict({})
         targets, summary = FileScanner.from_glob_patterns(
@@ -890,7 +882,5 @@ class TestFileScannerFromGlobPatterns:
 
         cfg = LintConfig.from_dict({})
         with patch.object(fs_mod, "_build_target", return_value=None):
-            targets, summary = FileScanner.from_glob_patterns(
-                ["*.py"], config=cfg, root=tmp_path
-            )
+            targets, summary = FileScanner.from_glob_patterns(["*.py"], config=cfg, root=tmp_path)
         assert summary.read_errors

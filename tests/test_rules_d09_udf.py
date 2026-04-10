@@ -60,8 +60,7 @@ class TestPythonUdfDetectedRule:
 
     def test_fires_on_udf_decorator(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def my_func(s):\n"
             "    return s.lower().strip()\n"
         )
@@ -72,8 +71,7 @@ class TestPythonUdfDetectedRule:
 
     def test_fires_on_multiple_udfs(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def func_a(s):\n"
             "    return s.lower()\n\n"
             "@udf(returnType=StringType())\n"
@@ -85,28 +83,19 @@ class TestPythonUdfDetectedRule:
 
     def test_no_finding_for_pandas_udf(self):
         code = (
-            UDF_HDR
-            + "@pandas_udf(returnType=DoubleType())\n"
+            UDF_HDR + "@pandas_udf(returnType=DoubleType())\n"
             "def my_pudf(s):\n"
             "    return s * 2\n"
         )
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_plain_function(self):
-        code = (
-            SPARK_HDR
-            + "def my_func(s):\n"
-            "    return s.lower()\n"
-        )
+        code = SPARK_HDR + "def my_func(s):\n" "    return s.lower()\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_without_spark_imports(self):
         # No pyspark import at all — has_spark_imports() returns False
-        code = (
-            "@udf\n"
-            "def f(s):\n"
-            "    return s\n"
-        )
+        code = "@udf\n" "def f(s):\n" "    return s\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_non_spark_file(self):
@@ -123,8 +112,7 @@ class TestUdfReplaceableRule:
 
     def test_fires_on_lower_udf(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def my_lower(s):\n"
             "    return s.lower()\n"
         )
@@ -135,8 +123,7 @@ class TestUdfReplaceableRule:
 
     def test_fires_on_upper_udf(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def my_upper(s):\n"
             "    return s.upper()\n"
         )
@@ -146,8 +133,7 @@ class TestUdfReplaceableRule:
 
     def test_fires_on_strip_udf(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def my_strip(s):\n"
             "    return s.strip()\n"
         )
@@ -155,8 +141,7 @@ class TestUdfReplaceableRule:
 
     def test_no_finding_for_complex_udf_body(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def my_func(s):\n"
             "    return s.lower().strip()\n"
         )
@@ -164,8 +149,7 @@ class TestUdfReplaceableRule:
 
     def test_no_finding_for_multi_statement_udf(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def my_func(s):\n"
             "    x = s.lower()\n"
             "    return x\n"
@@ -174,8 +158,7 @@ class TestUdfReplaceableRule:
 
     def test_no_finding_for_pandas_udf(self):
         code = (
-            UDF_HDR
-            + "@pandas_udf(returnType=StringType())\n"
+            UDF_HDR + "@pandas_udf(returnType=StringType())\n"
             "def my_pudf(s):\n"
             "    return s.str.lower()\n"
         )
@@ -194,11 +177,7 @@ class TestWithColumnInLoopRule:
     rule = WithColumnInLoopRule()
 
     def test_fires_on_with_column_in_for_loop(self):
-        code = (
-            SPARK_HDR
-            + "for c in ['a', 'b', 'c']:\n"
-            "    df = df.withColumn(c, col(c) * 2)\n"
-        )
+        code = SPARK_HDR + "for c in ['a', 'b', 'c']:\n" "    df = df.withColumn(c, col(c) * 2)\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D09-003"
@@ -206,8 +185,7 @@ class TestWithColumnInLoopRule:
 
     def test_fires_on_with_column_in_while_loop(self):
         code = (
-            SPARK_HDR
-            + "i = 0\n"
+            SPARK_HDR + "i = 0\n"
             "while i < 5:\n"
             "    df = df.withColumn(f'col_{i}', col(f'x_{i}'))\n"
             "    i += 1\n"
@@ -216,17 +194,11 @@ class TestWithColumnInLoopRule:
         assert len(fs) == 1
 
     def test_no_finding_for_with_column_outside_loop(self):
-        code = (
-            SPARK_HDR
-            + "df = df.withColumn('new_col', col('x') * 2)\n"
-        )
+        code = SPARK_HDR + "df = df.withColumn('new_col', col('x') * 2)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_without_spark_imports(self):
-        code = (
-            "for c in cols:\n"
-            "    df = df.withColumn(c, c)\n"
-        )
+        code = "for c in cols:\n" "    df = df.withColumn(c, c)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_non_spark_file(self):
@@ -242,47 +214,28 @@ class TestRowByRowIterationRule:
     rule = RowByRowIterationRule()
 
     def test_fires_on_for_collect(self):
-        code = (
-            SPARK_HDR
-            + "for row in df.collect():\n"
-            "    process(row)\n"
-        )
+        code = SPARK_HDR + "for row in df.collect():\n" "    process(row)\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D09-004"
         assert "collect" in fs[0].message
 
     def test_fires_on_for_to_local_iterator(self):
-        code = (
-            SPARK_HDR
-            + "for row in df.toLocalIterator():\n"
-            "    process(row)\n"
-        )
+        code = SPARK_HDR + "for row in df.toLocalIterator():\n" "    process(row)\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert "toLocalIterator" in fs[0].message
 
     def test_no_finding_for_plain_list_iteration(self):
-        code = (
-            SPARK_HDR
-            + "for item in my_list:\n"
-            "    process(item)\n"
-        )
+        code = SPARK_HDR + "for item in my_list:\n" "    process(item)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_range_loop(self):
-        code = (
-            SPARK_HDR
-            + "for i in range(10):\n"
-            "    do_something(i)\n"
-        )
+        code = SPARK_HDR + "for i in range(10):\n" "    do_something(i)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_without_spark_imports(self):
-        code = (
-            "for row in df.collect():\n"
-            "    process(row)\n"
-        )
+        code = "for row in df.collect():\n" "    process(row)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_non_spark_file(self):
@@ -372,40 +325,25 @@ class TestCountForEmptinessRule:
     rule = CountForEmptinessRule()
 
     def test_fires_on_count_eq_zero(self):
-        code = (
-            SPARK_HDR
-            + "if df.count() == 0:\n"
-            "    raise ValueError('empty')\n"
-        )
+        code = SPARK_HDR + "if df.count() == 0:\n" "    raise ValueError('empty')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D09-007"
         assert "count" in fs[0].message
 
     def test_fires_on_count_gt_zero(self):
-        code = (
-            SPARK_HDR
-            + "if df.count() > 0:\n"
-            "    print('has data')\n"
-        )
+        code = SPARK_HDR + "if df.count() > 0:\n" "    print('has data')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
 
     def test_fires_on_count_in_comparison_with_variable(self):
         code = (
-            SPARK_HDR
-            + "n = 100\n"
-            "if df.count() < n:\n"
-            "    raise ValueError('too few rows')\n"
+            SPARK_HDR + "n = 100\n" "if df.count() < n:\n" "    raise ValueError('too few rows')\n"
         )
         assert len(findings(self.rule, code)) == 1
 
     def test_no_finding_for_count_assigned_to_variable(self):
-        code = (
-            SPARK_HDR
-            + "row_count = df.count()\n"
-            "print(row_count)\n"
-        )
+        code = SPARK_HDR + "row_count = df.count()\n" "print(row_count)\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_without_spark_imports(self):
@@ -437,11 +375,7 @@ class TestShowInProductionRule:
         assert len(fs) == 1
 
     def test_fires_on_multiple_show_calls(self):
-        code = (
-            SPARK_HDR
-            + "df.show()\n"
-            "df.filter('x > 0').show(10)\n"
-        )
+        code = SPARK_HDR + "df.show()\n" "df.filter('x > 0').show(10)\n"
         assert len(findings(self.rule, code)) == 2
 
     def test_no_finding_without_show(self):
@@ -478,11 +412,7 @@ class TestExplainInProductionRule:
         assert "printSchema" in fs[0].message
 
     def test_fires_on_both_explain_and_print_schema(self):
-        code = (
-            SPARK_HDR
-            + "df.explain()\n"
-            "df.printSchema()\n"
-        )
+        code = SPARK_HDR + "df.explain()\n" "df.printSchema()\n"
         assert len(findings(self.rule, code)) == 2
 
     def test_no_finding_without_explain_or_print_schema(self):
@@ -539,8 +469,7 @@ class TestPandasUdfWithoutTypeHintsRule:
 
     def test_fires_on_pandas_udf_without_hints(self):
         code = (
-            UDF_HDR
-            + "@pandas_udf(returnType=DoubleType())\n"
+            UDF_HDR + "@pandas_udf(returnType=DoubleType())\n"
             "def my_udf(col):\n"
             "    return col * 2\n"
         )
@@ -551,8 +480,7 @@ class TestPandasUdfWithoutTypeHintsRule:
 
     def test_no_finding_with_return_type_hint(self):
         code = (
-            UDF_HDR
-            + "import pandas as pd\n"
+            UDF_HDR + "import pandas as pd\n"
             "@pandas_udf('double')\n"
             "def my_udf(col: pd.Series) -> pd.Series:\n"
             "    return col * 2\n"
@@ -561,8 +489,7 @@ class TestPandasUdfWithoutTypeHintsRule:
 
     def test_no_finding_with_param_annotation_only(self):
         code = (
-            UDF_HDR
-            + "import pandas as pd\n"
+            UDF_HDR + "import pandas as pd\n"
             "@pandas_udf('double')\n"
             "def my_udf(col: pd.Series):\n"
             "    return col * 2\n"
@@ -572,10 +499,7 @@ class TestPandasUdfWithoutTypeHintsRule:
     def test_no_finding_for_regular_udf(self):
         # @udf without type hints is caught by D09-001, not D09-011
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
-            "def my_udf(s):\n"
-            "    return s.lower()\n"
+            UDF_HDR + "@udf(returnType=StringType())\n" "def my_udf(s):\n" "    return s.lower()\n"
         )
         assert findings(self.rule, code) == []
 
@@ -596,8 +520,7 @@ class TestNestedUdfCallRule:
 
     def test_fires_when_outer_udf_calls_inner_udf(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def inner(s):\n"
             "    return s.strip()\n\n"
             "@udf(returnType=StringType())\n"
@@ -613,8 +536,7 @@ class TestNestedUdfCallRule:
     def test_fires_when_pandas_udf_calls_regular_udf(self):
         # inner is called directly (not passed as argument) inside the pandas_udf body
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def inner(s):\n"
             "    return s.strip()\n\n"
             "@pandas_udf(returnType=StringType())\n"
@@ -626,8 +548,7 @@ class TestNestedUdfCallRule:
 
     def test_no_finding_when_udf_calls_plain_function(self):
         code = (
-            UDF_HDR
-            + "def helper(s):\n"
+            UDF_HDR + "def helper(s):\n"
             "    return s.strip()\n\n"
             "@udf(returnType=StringType())\n"
             "def my_udf(s):\n"
@@ -637,10 +558,7 @@ class TestNestedUdfCallRule:
 
     def test_no_finding_with_single_udf(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
-            "def my_udf(s):\n"
-            "    return s.lower()\n"
+            UDF_HDR + "@udf(returnType=StringType())\n" "def my_udf(s):\n" "    return s.lower()\n"
         )
         assert findings(self.rule, code) == []
 

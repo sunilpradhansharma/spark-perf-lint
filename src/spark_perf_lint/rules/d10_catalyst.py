@@ -195,8 +195,7 @@ class CboNotEnabledRule(CodeRule):
         "Then collect table statistics: ANALYZE TABLE t COMPUTE STATISTICS."
     )
     before_example = (
-        "spark = SparkSession.builder.getOrCreate()\n"
-        "result = a.join(b, 'id').join(c, 'key')"
+        "spark = SparkSession.builder.getOrCreate()\n" "result = a.join(b, 'id').join(c, 'key')"
     )
     after_example = (
         "spark = (\n"
@@ -501,9 +500,7 @@ class DeepMethodChainRule(CodeRule):
     references = [
         "https://spark.apache.org/docs/latest/sql-performance-tuning.html",
     ]
-    estimated_impact = (
-        "Driver-side plan analysis overhead; risk of plan visitor stack overflow"
-    )
+    estimated_impact = "Driver-side plan analysis overhead; risk of plan visitor stack overflow"
     effort_level = EffortLevel.MINOR_CODE_CHANGE
 
     def check(self, analyzer: ASTAnalyzer, config: LintConfig) -> list[Finding]:  # noqa: D102

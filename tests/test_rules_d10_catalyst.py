@@ -61,8 +61,7 @@ class TestUdfBlocksPredicatePushdownRule:
 
     def test_fires_when_udf_and_filter_present(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def norm(s):\n"
             "    return s.lower()\n\n"
             "df.withColumn('n', norm(col('s'))).filter(col('n') == 'x')\n"
@@ -74,8 +73,7 @@ class TestUdfBlocksPredicatePushdownRule:
 
     def test_fires_when_udf_and_where_present(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def clean(s):\n"
             "    return s.strip()\n\n"
             "df.where(col('status') == 'active')\n"
@@ -86,8 +84,7 @@ class TestUdfBlocksPredicatePushdownRule:
 
     def test_fires_once_per_udf_when_multiple_udfs(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def f1(s):\n"
             "    return s.lower()\n\n"
             "@udf(returnType=StringType())\n"
@@ -99,8 +96,7 @@ class TestUdfBlocksPredicatePushdownRule:
 
     def test_no_finding_when_udf_but_no_filter(self):
         code = (
-            UDF_HDR
-            + "@udf(returnType=StringType())\n"
+            UDF_HDR + "@udf(returnType=StringType())\n"
             "def norm(s):\n"
             "    return s.lower()\n\n"
             "df.withColumn('n', norm(col('s'))).write.parquet('out')\n"
@@ -133,26 +129,19 @@ class TestCboNotEnabledRule:
     rule = CboNotEnabledRule()
 
     def test_fires_on_two_joins_without_cbo(self):
-        code = (
-            SPARK_HDR
-            + "result = a.join(b, 'id').join(c, 'key')\n"
-        )
+        code = SPARK_HDR + "result = a.join(b, 'id').join(c, 'key')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D10-002"
         assert "cbo.enabled" in fs[0].message
 
     def test_fires_on_three_joins_without_cbo(self):
-        code = (
-            SPARK_HDR
-            + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref')\n"
-        )
+        code = SPARK_HDR + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref')\n"
         assert len(findings(self.rule, code)) == 1
 
     def test_no_finding_when_cbo_enabled(self):
         code = (
-            _ss_cfg(("spark.sql.cbo.enabled", "true"))
-            + "result = a.join(b, 'id').join(c, 'key')\n"
+            _ss_cfg(("spark.sql.cbo.enabled", "true")) + "result = a.join(b, 'id').join(c, 'key')\n"
         )
         assert findings(self.rule, code) == []
 
@@ -184,10 +173,7 @@ class TestJoinReorderDisabledRule:
     rule = JoinReorderDisabledRule()
 
     def test_fires_on_three_joins_without_reorder(self):
-        code = (
-            SPARK_HDR
-            + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref')\n"
-        )
+        code = SPARK_HDR + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D10-003"
@@ -210,10 +196,7 @@ class TestJoinReorderDisabledRule:
         assert findings(self.rule, code) == []
 
     def test_fires_with_four_joins(self):
-        code = (
-            SPARK_HDR
-            + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref').join(e, 'z')\n"
-        )
+        code = SPARK_HDR + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref').join(e, 'z')\n"
         assert len(findings(self.rule, code)) == 1
 
     def test_no_finding_without_spark_imports(self):
@@ -229,10 +212,7 @@ class TestTableStatsNotCollectedRule:
     rule = TableStatsNotCollectedRule()
 
     def test_fires_when_join_without_analyze(self):
-        code = (
-            SPARK_HDR
-            + "result = spark.table('events').join(spark.table('users'), 'id')\n"
-        )
+        code = SPARK_HDR + "result = spark.table('events').join(spark.table('users'), 'id')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert fs[0].rule_id == "SPL-D10-004"
@@ -240,16 +220,14 @@ class TestTableStatsNotCollectedRule:
 
     def test_no_finding_when_analyze_table_present(self):
         code = (
-            SPARK_HDR
-            + "spark.sql('ANALYZE TABLE events COMPUTE STATISTICS FOR ALL COLUMNS')\n"
+            SPARK_HDR + "spark.sql('ANALYZE TABLE events COMPUTE STATISTICS FOR ALL COLUMNS')\n"
             "result = spark.table('events').join(spark.table('users'), 'id')\n"
         )
         assert findings(self.rule, code) == []
 
     def test_no_finding_when_analyze_table_uppercase(self):
         code = (
-            SPARK_HDR
-            + "spark.sql('ANALYZE TABLE users COMPUTE STATISTICS')\n"
+            SPARK_HDR + "spark.sql('ANALYZE TABLE users COMPUTE STATISTICS')\n"
             "result = a.join(b, 'id')\n"
         )
         assert findings(self.rule, code) == []
@@ -262,10 +240,7 @@ class TestTableStatsNotCollectedRule:
         assert findings(self.rule, "x = 1\n") == []
 
     def test_fires_on_multiple_joins_without_analyze(self):
-        code = (
-            SPARK_HDR
-            + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref')\n"
-        )
+        code = SPARK_HDR + "r = a.join(b, 'id').join(c, 'k').join(d, 'ref')\n"
         fs = findings(self.rule, code)
         assert len(fs) == 1
         assert "3" in fs[0].message
@@ -312,11 +287,7 @@ class TestNondeterministicInFilterRule:
         assert findings(self.rule, code) == []
 
     def test_fires_once_per_filter_with_nondeterministic(self):
-        code = (
-            SPARK_HDR
-            + "s1 = df.filter(rand() < 0.1)\n"
-            "s2 = df.filter(randn() > 0)\n"
-        )
+        code = SPARK_HDR + "s1 = df.filter(rand() < 0.1)\n" "s2 = df.filter(randn() > 0)\n"
         assert len(findings(self.rule, code)) == 2
 
     def test_no_finding_without_spark_imports(self):
@@ -326,6 +297,7 @@ class TestNondeterministicInFilterRule:
 # =============================================================================
 # SPL-D10-006 — Complex nested query plan risk (>20 chained ops)
 # =============================================================================
+
 
 # Build a helper to construct a deeply chained expression
 def _chain(n: int) -> str:
@@ -354,10 +326,7 @@ class TestDeepMethodChainRule:
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_short_chain(self):
-        code = (
-            SPARK_HDR
-            + "result = df.filter('x > 0').dropDuplicates(['id']).join(other, 'id')\n"
-        )
+        code = SPARK_HDR + "result = df.filter('x > 0').dropDuplicates(['id']).join(other, 'id')\n"
         assert findings(self.rule, code) == []
 
     def test_no_finding_for_standalone_expression_under_threshold(self):

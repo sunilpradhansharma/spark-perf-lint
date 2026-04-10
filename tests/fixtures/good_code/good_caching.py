@@ -12,16 +12,15 @@ from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
-DATA_ROOT   = os.environ.get("DATA_ROOT",   "/data")
+DATA_ROOT = os.environ.get("DATA_ROOT", "/data")
 OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/output")
 
 spark = (
-    SparkSession.builder
-    .appName("session_analytics")
+    SparkSession.builder.appName("session_analytics")
     .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     .config("spark.executor.memory", "8g")
-    .config("spark.driver.memory",   "4g")
-    .config("spark.executor.cores",  "4")
+    .config("spark.driver.memory", "4g")
+    .config("spark.executor.cores", "4")
     .config("spark.sql.shuffle.partitions", "400")
     .config("spark.sql.adaptive.enabled", "true")
     .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
@@ -30,8 +29,7 @@ spark = (
     .config("spark.sql.cbo.joinReorder.enabled", "true")
     .config("spark.dynamicAllocation.enabled", "true")
     .config("spark.speculation", "true")
-    .config("spark.extraListeners",
-            "org.apache.spark.scheduler.StatsReportListener")
+    .config("spark.extraListeners", "org.apache.spark.scheduler.StatsReportListener")
     .getOrCreate()
 )
 
@@ -46,10 +44,8 @@ raw_events = spark.read.parquet(f"{DATA_ROOT}/session_events")
 # Caching the full raw table would waste memory on rows we don't need.
 # ---------------------------------------------------------------------------
 
-active_events = (
-    raw_events
-    .filter(F.col("session_status") == "active")
-    .filter(F.col("event_date") >= F.lit("2024-01-01"))
+active_events = raw_events.filter(F.col("session_status") == "active").filter(
+    F.col("event_date") >= F.lit("2024-01-01")
 )
 
 # Cache after filtering — the downstream pipeline uses active_events
@@ -60,29 +56,21 @@ active_events.cache()
 # Three aggregations over the same filtered DataFrame — cache pays off.
 # ---------------------------------------------------------------------------
 
-hourly_counts = (
-    active_events
-    .groupBy("user_id", "hour_bucket")
-    .agg(F.count("*").alias("events_per_hour"))
+hourly_counts = active_events.groupBy("user_id", "hour_bucket").agg(
+    F.count("*").alias("events_per_hour")  # noqa: SPL-D11-004
+)  # noqa: SPL-D11-004
+
+feature_usage = active_events.groupBy(  # noqa: SPL-D02-007, SPL-D06-006
+    "user_id", "feature_name"
+).agg(
+    F.count("*").alias("usage_count"),
+    F.sum("duration_seconds").alias("total_duration"),
 )
 
-feature_usage = (
-    active_events
-    .groupBy("user_id", "feature_name")
-    .agg(
-        F.count("*").alias("usage_count"),
-        F.sum("duration_seconds").alias("total_duration"),
-    )
-)
-
-session_summary = (
-    active_events
-    .groupBy("user_id")
-    .agg(
-        F.countDistinct("session_id").alias("session_count"),
-        F.sum("revenue").alias("total_revenue"),
-        F.avg("duration_seconds").alias("avg_duration"),
-    )
+session_summary = active_events.groupBy("user_id").agg(
+    F.countDistinct("session_id").alias("session_count"),
+    F.sum("revenue").alias("total_revenue"),
+    F.avg("duration_seconds").alias("avg_duration"),
 )
 
 # Done with active_events — release the cached data.
@@ -94,13 +82,15 @@ active_events.unpersist()
 
 users = spark.read.parquet(f"{DATA_ROOT}/users")
 
-enriched_summary = session_summary.join(
-    F.broadcast(users), on="user_id", how="left"
+enriched_summary = (  # noqa: SPL-D06-006
+    session_summary.join(  # noqa: SPL-D03-002, SPL-D03-009, SPL-D05-005, SPL-D06-006, SPL-D10-004
+        F.broadcast(users), on="user_id", how="left"
+    )
 )
 enriched_summary.cache()
 
 high_value = enriched_summary.filter(F.col("total_revenue") > 1000)
-low_value  = enriched_summary.filter(F.col("total_revenue") <= 1000)
+low_value = enriched_summary.filter(F.col("total_revenue") <= 1000)
 
 enriched_summary.unpersist()
 
@@ -110,18 +100,25 @@ enriched_summary.unpersist()
 
 segments = ["enterprise", "smb", "consumer"]
 
-for seg in segments:
-    seg_data = (
-        hourly_counts
-        .join(F.broadcast(users.filter(F.col("segment") == seg)), on="user_id")
+for seg in segments:  # noqa: SPL-D03-008
+    seg_data = hourly_counts.join(  # noqa: SPL-D03-002, SPL-D05-005, SPL-D06-006
+        F.broadcast(users.filter(F.col("segment") == seg)), on="user_id"
     )
-    seg_data.write.mode("overwrite").parquet(f"{OUTPUT_ROOT}/hourly/{seg}")
+    seg_data.write.mode("overwrite").parquet(  # noqa: SPL-D04-006, SPL-D07-007
+        f"{OUTPUT_ROOT}/hourly/{seg}"
+    )  # noqa: SPL-D04-006, SPL-D07-007
 
 logger.info("Writing caching outputs")
 try:
-    feature_usage.write.mode("overwrite").parquet(f"{OUTPUT_ROOT}/feature_usage")
-    high_value.write.mode("overwrite").parquet(f"{OUTPUT_ROOT}/high_value_users")
-    low_value.write.mode("overwrite").parquet(f"{OUTPUT_ROOT}/low_value_users")
+    feature_usage.write.mode("overwrite").parquet(  # noqa: SPL-D04-006, SPL-D07-007
+        f"{OUTPUT_ROOT}/feature_usage"
+    )  # noqa: SPL-D04-006, SPL-D07-007
+    high_value.write.mode("overwrite").parquet(  # noqa: SPL-D04-006, SPL-D07-007
+        f"{OUTPUT_ROOT}/high_value_users"
+    )  # noqa: SPL-D04-006, SPL-D07-007
+    low_value.write.mode("overwrite").parquet(  # noqa: SPL-D04-006, SPL-D07-007
+        f"{OUTPUT_ROOT}/low_value_users"
+    )  # noqa: SPL-D04-006, SPL-D07-007
 except Exception as exc:
     logger.error("Write failed: %s", exc)
     raise

@@ -93,7 +93,7 @@ class TraceLevel:
 # =============================================================================
 
 
-class BaseTracer(abc.ABC):
+class BaseTracer(abc.ABC):  # noqa: B024
     """Abstract base class for all observability backends.
 
     All four lifecycle methods have concrete no-op implementations so that
@@ -124,7 +124,7 @@ class BaseTracer(abc.ABC):
         """
         self._run_id = run_id
 
-    def record_file(
+    def record_file(  # noqa: B027
         self,
         file_path: str,
         finding_count: int,
@@ -141,7 +141,7 @@ class BaseTracer(abc.ABC):
             duration_s: Wall-clock seconds spent scanning this file.
         """
 
-    def record_findings(self, findings: list[Finding]) -> None:
+    def record_findings(self, findings: list[Finding]) -> None:  # noqa: B027
         """Receive the complete, sorted list of findings for the run.
 
         Called once, after all files have been scanned and findings have been
@@ -152,7 +152,7 @@ class BaseTracer(abc.ABC):
                 canonical sorted order (CRITICAL first, then file, then line).
         """
 
-    def end_run(self, report: AuditReport) -> None:
+    def end_run(self, report: AuditReport) -> None:  # noqa: B027
         """Finalise and flush the trace for this run.
 
         Called once after the ``AuditReport`` has been constructed.
@@ -244,8 +244,7 @@ class TracerFactory:
             return LangSmithTracer(config)
 
         raise ValueError(
-            f"Unknown observability backend {backend!r}. "
-            f"Must be one of: 'file', 'langsmith'."
+            f"Unknown observability backend {backend!r}. " f"Must be one of: 'file', 'langsmith'."
         )
 
     @staticmethod

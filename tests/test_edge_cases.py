@@ -26,7 +26,6 @@ import pytest
 from spark_perf_lint.config import LintConfig
 from spark_perf_lint.engine.orchestrator import ScanOrchestrator
 from spark_perf_lint.types import Severity
-from tests.conftest import assert_finding_exists, assert_no_finding, assert_severity
 from tests.fixtures.code_generator import generate_spark_file
 
 # ---------------------------------------------------------------------------
@@ -102,9 +101,9 @@ def test_syntax_error_produces_parse_error_finding(code):
         f"Expected exactly 1 finding for syntax error, got {len(findings)}: "
         f"{_rule_ids(findings)}"
     )
-    assert findings[0].rule_id == "SPL-D00-000", (
-        f"Expected SPL-D00-000 but got {findings[0].rule_id}"
-    )
+    assert (
+        findings[0].rule_id == "SPL-D00-000"
+    ), f"Expected SPL-D00-000 but got {findings[0].rule_id}"
     assert findings[0].severity == Severity.INFO
 
 
@@ -147,9 +146,9 @@ def test_multiple_antipatterns_on_one_line_correct_severity():
         matching = [f for f in findings if f.rule_id == rule_id]
         if matching:
             for f in matching:
-                assert f.severity == Severity.CRITICAL, (
-                    f"{rule_id} should be CRITICAL, got {f.severity}"
-                )
+                assert (
+                    f.severity == Severity.CRITICAL
+                ), f"{rule_id} should be CRITICAL, got {f.severity}"
 
 
 # =============================================================================
@@ -191,9 +190,7 @@ def test_deep_chain_produces_no_critical_findings():
     """A deeply chained but correct pipeline must produce zero CRITICAL findings."""
     findings = _scan(_DEEP_CHAIN_CODE)
     criticals = _critical_ids(findings)
-    assert not criticals, (
-        f"Expected no CRITICAL findings in deep chain, got: {criticals}"
-    )
+    assert not criticals, f"Expected no CRITICAL findings in deep chain, got: {criticals}"
 
 
 def test_deep_chain_total_finding_count():
@@ -201,8 +198,7 @@ def test_deep_chain_total_finding_count():
     findings = _scan(_DEEP_CHAIN_CODE)
     # Should have at most 20 findings — deep chain is not a worst-case pattern file
     assert len(findings) <= 20, (
-        f"Deep chain produced {len(findings)} findings, expected ≤ 20: "
-        f"{_rule_ids(findings)}"
+        f"Deep chain produced {len(findings)} findings, expected ≤ 20: " f"{_rule_ids(findings)}"
     )
 
 
@@ -253,9 +249,9 @@ def test_false_positive_resistance_no_crossjoin_finding(code):
     """String .join() and pandas .join() must not trigger the crossJoin rule SPL-D03-001."""
     findings = _scan(code)
     cross_findings = [f for f in findings if f.rule_id == "SPL-D03-001"]
-    assert not cross_findings, (
-        f"False positive: SPL-D03-001 (crossJoin) fired on non-Spark join: {cross_findings}"
-    )
+    assert (
+        not cross_findings
+    ), f"False positive: SPL-D03-001 (crossJoin) fired on non-Spark join: {cross_findings}"
 
 
 def test_string_join_no_critical_findings():
@@ -307,8 +303,7 @@ def test_multiline_csv_fires_csv_rule():
     findings = _scan(_MULTILINE_CSV_CODE)
     csv_rules = [f for f in findings if f.rule_id == "SPL-D07-001"]
     assert csv_rules, (
-        f"Expected SPL-D07-001 to fire on multiline CSV read, "
-        f"got: {_rule_ids(findings)}"
+        f"Expected SPL-D07-001 to fire on multiline CSV read, " f"got: {_rule_ids(findings)}"
     )
 
 
@@ -317,8 +312,7 @@ def test_multiline_csv_fires_infer_schema_rule():
     findings = _scan(_MULTILINE_CSV_CODE)
     schema_rules = [f for f in findings if f.rule_id == "SPL-D07-002"]
     assert schema_rules, (
-        f"Expected SPL-D07-002 to fire on multiline inferSchema, "
-        f"got: {_rule_ids(findings)}"
+        f"Expected SPL-D07-002 to fire on multiline inferSchema, " f"got: {_rule_ids(findings)}"
     )
 
 
@@ -385,9 +379,7 @@ def test_spark_sql_findings_have_valid_rule_ids():
     findings = _scan(_SPARK_SQL_CODE)
     pattern = re.compile(r"^SPL-D\d{2}-\d{3}$")
     for f in findings:
-        assert pattern.match(f.rule_id), (
-            f"Malformed rule_id: {f.rule_id!r}"
-        )
+        assert pattern.match(f.rule_id), f"Malformed rule_id: {f.rule_id!r}"
 
 
 # =============================================================================
@@ -443,9 +435,9 @@ def test_conditional_crossjoin_fires_critical():
     """crossJoin inside an if-branch must still trigger SPL-D03-001."""
     findings = _scan(_CONDITIONAL_CODE)
     critical_ids = set(_critical_ids(findings))
-    assert "SPL-D03-001" in critical_ids, (
-        f"Expected SPL-D03-001 inside if-branch, got criticals: {critical_ids}"
-    )
+    assert (
+        "SPL-D03-001" in critical_ids
+    ), f"Expected SPL-D03-001 inside if-branch, got criticals: {critical_ids}"
 
 
 def test_conditional_safe_else_branch_no_extra_criticals():
@@ -454,17 +446,16 @@ def test_conditional_safe_else_branch_no_extra_criticals():
     # Only D03-001 from the crossJoin is expected among criticals
     criticals = _critical_ids(findings)
     non_cross_criticals = [r for r in criticals if r != "SPL-D03-001"]
-    assert not non_cross_criticals, (
-        f"Unexpected CRITICAL findings beyond crossJoin: {non_cross_criticals}"
-    )
+    assert (
+        not non_cross_criticals
+    ), f"Unexpected CRITICAL findings beyond crossJoin: {non_cross_criticals}"
 
 
 def test_nested_conditional_crossjoin_fires():
     """crossJoin nested inside two if levels must still be detected."""
     findings = _scan(_CONDITIONAL_NESTED_CODE)
     assert "SPL-D03-001" in _rule_ids(findings), (
-        f"SPL-D03-001 not found in nested conditional code. "
-        f"Got: {_rule_ids(findings)}"
+        f"SPL-D03-001 not found in nested conditional code. " f"Got: {_rule_ids(findings)}"
     )
 
 
@@ -531,9 +522,9 @@ class DataProcessor:
 def test_class_based_crossjoin_in_method_fires():
     """crossJoin inside a class method must trigger SPL-D03-001."""
     findings = _scan(_CLASS_BASED_CODE)
-    assert "SPL-D03-001" in _rule_ids(findings), (
-        f"SPL-D03-001 not found in class-based code. Got: {_rule_ids(findings)}"
-    )
+    assert "SPL-D03-001" in _rule_ids(
+        findings
+    ), f"SPL-D03-001 not found in class-based code. Got: {_rule_ids(findings)}"
 
 
 def test_class_based_crossjoin_severity_is_critical():
@@ -542,9 +533,9 @@ def test_class_based_crossjoin_severity_is_critical():
     cross_findings = [f for f in findings if f.rule_id == "SPL-D03-001"]
     assert cross_findings, "SPL-D03-001 did not fire"
     for f in cross_findings:
-        assert f.severity == Severity.CRITICAL, (
-            f"Expected CRITICAL, got {f.severity} on line {f.line_number}"
-        )
+        assert (
+            f.severity == Severity.CRITICAL
+        ), f"Expected CRITICAL, got {f.severity} on line {f.line_number}"
 
 
 def test_class_multi_method_only_bad_method_fires():
@@ -599,8 +590,7 @@ def test_stress_1000_line_file_produces_minimum_findings():
     )
     findings = _scan(code)
     assert len(findings) >= 8, (
-        f"Expected >= 8 findings in stress test, got {len(findings)}: "
-        f"{_rule_ids(findings)}"
+        f"Expected >= 8 findings in stress test, got {len(findings)}: " f"{_rule_ids(findings)}"
     )
 
 
@@ -620,8 +610,7 @@ def test_stress_1000_line_file_contains_expected_criticals():
     fired_criticals = set(_critical_ids(findings))
     missing = _STRESS_EXPECTED_CRITICALS - fired_criticals
     assert not missing, (
-        f"Missing expected CRITICAL rules: {missing}. "
-        f"All criticals fired: {fired_criticals}"
+        f"Missing expected CRITICAL rules: {missing}. " f"All criticals fired: {fired_criticals}"
     )
 
 
@@ -644,9 +633,7 @@ def test_stress_1000_line_file_scanned_under_3_seconds():
     orchestrator.scan_content(code, "stress_test.py")
     elapsed = time.perf_counter() - start
 
-    assert elapsed < 3.0, (
-        f"Stress test scan took {elapsed:.3f}s, expected < 3.0s"
-    )
+    assert elapsed < 3.0, f"Stress test scan took {elapsed:.3f}s, expected < 3.0s"
 
 
 @pytest.mark.slow
@@ -662,9 +649,7 @@ def test_stress_1000_line_file_line_count():
         inject_anti_patterns=_STRESS_ANTI_PATTERNS,
     )
     lines = code.splitlines()
-    assert len(lines) >= 1000, (
-        f"Generated file has {len(lines)} lines, expected >= 1000"
-    )
+    assert len(lines) >= 1000, f"Generated file has {len(lines)} lines, expected >= 1000"
 
 
 @pytest.mark.slow
@@ -681,6 +666,4 @@ def test_stress_no_parse_error():
     )
     findings = _scan(code)
     parse_errors = [f for f in findings if f.rule_id == "SPL-D00-000"]
-    assert not parse_errors, (
-        f"Generated stress file has syntax errors: {parse_errors}"
-    )
+    assert not parse_errors, f"Generated stress file has syntax errors: {parse_errors}"

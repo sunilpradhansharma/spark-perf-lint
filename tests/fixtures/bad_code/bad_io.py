@@ -9,8 +9,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 spark = (
-    SparkSession.builder
-    .appName("multi_source_ingestion")
+    SparkSession.builder.appName("multi_source_ingestion")
     .config("spark.sql.shuffle.partitions", "400")
     .getOrCreate()
 )
@@ -46,7 +45,7 @@ orders_jdbc = spark.read.jdbc(
 returns_csv = spark.read.csv(
     "/landing/returns/",
     header=True,
-    inferSchema=True,   # SPL-D07-002: schema inference enabled
+    inferSchema=True,  # SPL-D07-002: schema inference enabled
 )
 
 # ---------------------------------------------------------------------------
@@ -72,9 +71,8 @@ all_orders = orders_jdbc.select("*")
 # ---------------------------------------------------------------------------
 
 combined = (
-    all_orders
-    .join(returns_csv,  on="order_id", how="left")
-    .join(events_json,  on="session_id", how="left")
+    all_orders.join(returns_csv, on="order_id", how="left")
+    .join(events_json, on="session_id", how="left")
     .filter(F.col("order_status") != "cancelled")
 )
 

@@ -13,16 +13,15 @@ from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
-DATA_ROOT   = os.environ.get("DATA_ROOT",   "/data")
+DATA_ROOT = os.environ.get("DATA_ROOT", "/data")
 OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/output")
 
 spark = (
-    SparkSession.builder
-    .appName("content_scoring")
+    SparkSession.builder.appName("content_scoring")
     .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     .config("spark.executor.memory", "8g")
-    .config("spark.driver.memory",   "4g")
-    .config("spark.executor.cores",  "4")
+    .config("spark.driver.memory", "4g")
+    .config("spark.executor.cores", "4")
     .config("spark.sql.shuffle.partitions", "400")
     .config("spark.sql.adaptive.enabled", "true")
     .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
@@ -31,8 +30,7 @@ spark = (
     .config("spark.sql.cbo.joinReorder.enabled", "true")
     .config("spark.dynamicAllocation.enabled", "true")
     .config("spark.speculation", "true")
-    .config("spark.extraListeners",
-            "org.apache.spark.scheduler.StatsReportListener")
+    .config("spark.extraListeners", "org.apache.spark.scheduler.StatsReportListener")
     .getOrCreate()
 )
 
@@ -40,8 +38,8 @@ spark = (
 # Load data
 # ---------------------------------------------------------------------------
 
-articles  = spark.read.parquet(f"{DATA_ROOT}/articles")
-metadata  = spark.read.parquet(f"{DATA_ROOT}/article_metadata")   # small
+articles = spark.read.parquet(f"{DATA_ROOT}/articles")
+metadata = spark.read.parquet(f"{DATA_ROOT}/article_metadata")  # small
 
 # ---------------------------------------------------------------------------
 # Use native Spark functions instead of Python UDFs.
@@ -55,16 +53,16 @@ metadata  = spark.read.parquet(f"{DATA_ROOT}/article_metadata")   # small
 scored = articles.withColumn(
     "quality_tier",
     F.when(F.col("quality_score") >= 0.9, "premium")
-     .when(F.col("quality_score") >= 0.7, "standard")
-     .when(F.col("quality_score") >= 0.5, "basic")
-     .otherwise("rejected"),
+    .when(F.col("quality_score") >= 0.7, "standard")
+    .when(F.col("quality_score") >= 0.5, "basic")
+    .otherwise("rejected"),
 )
 
 scored = scored.withColumn(
     "word_count_bucket",
     F.when(F.col("word_count") >= 2000, "long")
-     .when(F.col("word_count") >= 500,  "medium")
-     .otherwise("short"),
+    .when(F.col("word_count") >= 500, "medium")
+    .otherwise("short"),
 )
 
 # ---------------------------------------------------------------------------
@@ -92,8 +90,7 @@ enriched = scored.select(*feature_cols)
 # ---------------------------------------------------------------------------
 
 top_articles = (
-    enriched
-    .filter(F.col("quality_tier") == "premium")
+    enriched.filter(F.col("quality_tier") == "premium")  # noqa: SPL-D11-004
     .orderBy(F.col("views").desc())
     .limit(50)
     .collect()
@@ -105,12 +102,7 @@ logger.info("Top %d premium articles retrieved", len(top_articles))
 # toPandas() with limit — small, bounded result only.
 # ---------------------------------------------------------------------------
 
-sample_df = (
-    enriched
-    .filter(F.col("quality_tier") == "rejected")
-    .limit(200)
-    .toPandas()
-)
+sample_df = enriched.filter(F.col("quality_tier") == "rejected").limit(200).toPandas()
 
 logger.info("Rejected sample size: %d", len(sample_df))
 
@@ -120,7 +112,9 @@ logger.info("Rejected sample size: %d", len(sample_df))
 
 logger.info("Writing enriched articles")
 try:
-    enriched.write.mode("overwrite").partitionBy("quality_tier").parquet(
+    enriched.write.mode("overwrite").partitionBy(  # noqa: SPL-D07-005, SPL-D07-007
+        "quality_tier"
+    ).parquet(  # noqa: SPL-D07-005, SPL-D07-007
         f"{OUTPUT_ROOT}/articles_enriched"
     )
 except Exception as exc:

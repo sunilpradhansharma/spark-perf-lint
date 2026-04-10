@@ -6,15 +6,9 @@ import pytest
 
 from spark_perf_lint.engine.ast_analyzer import (
     ASTAnalyzer,
-    AssignmentInfo,
-    FuncDefInfo,
-    LoopInfo,
     MethodCallInfo,
     ParseError,
-    SparkConfigInfo,
-    SparkIOInfo,
 )
-
 
 # =============================================================================
 # Helpers
@@ -203,9 +197,9 @@ class TestFindAttributeAccesses:
 class TestFindSparkSessionConfigs:
     def test_builder_config_single(self):
         code = (
-            'spark = SparkSession.builder'
+            "spark = SparkSession.builder"
             '.config("spark.executor.memory", "8g")'
-            '.getOrCreate()\n'
+            ".getOrCreate()\n"
         )
         a = ana(code)
         configs = a.find_spark_session_configs()
@@ -371,27 +365,19 @@ class TestFindSparkReadWrites:
 
     def test_no_spurious_io_from_intermediate_calls(self):
         """option/mode/partitionBy must NOT generate extra SparkIOInfo entries."""
-        a = ana(
-            "df.write.mode('overwrite').option('compression', 'snappy').parquet('/out')\n"
-        )
+        a = ana("df.write.mode('overwrite').option('compression', 'snappy').parquet('/out')\n")
         writes = a.find_writes()
         assert len(writes) == 1
         assert writes[0].options.get("compression") == "snappy"
 
     def test_read_and_write_separated(self):
-        code = (
-            "df = spark.read.parquet('/in')\n"
-            "df.write.mode('overwrite').parquet('/out')\n"
-        )
+        code = "df = spark.read.parquet('/in')\n" "df.write.mode('overwrite').parquet('/out')\n"
         a = ana(code)
         assert len(a.find_reads()) == 1
         assert len(a.find_writes()) == 1
 
     def test_find_spark_read_writes_combined(self):
-        code = (
-            "df = spark.read.parquet('/in')\n"
-            "df.write.parquet('/out')\n"
-        )
+        code = "df = spark.read.parquet('/in')\n" "df.write.parquet('/out')\n"
         io = ana(code).find_spark_read_writes()
         ops = [x.operation for x in io]
         assert "read" in ops
@@ -426,11 +412,7 @@ class TestFindFunctionDefinitions:
         assert defs[0].udf_type == "pandas_udf"
 
     def test_udf_from_pyspark(self):
-        code = (
-            "from pyspark.sql.functions import udf\n"
-            "@udf\n"
-            "def my_udf(x):\n    return x\n"
-        )
+        code = "from pyspark.sql.functions import udf\n" "@udf\n" "def my_udf(x):\n    return x\n"
         defs = ana(code).find_function_definitions()
         udf_defs = [d for d in defs if d.is_udf]
         assert len(udf_defs) == 1
@@ -443,10 +425,7 @@ class TestFindFunctionDefinitions:
         assert defs[0].is_udf is True
 
     def test_find_udf_definitions_filter(self):
-        code = (
-            "def helper(x):\n    return x\n\n"
-            "@udf\ndef transform(val):\n    return val\n"
-        )
+        code = "def helper(x):\n    return x\n\n" "@udf\ndef transform(val):\n    return val\n"
         a = ana(code)
         all_defs = a.find_function_definitions()
         udf_only = a.find_udf_definitions()

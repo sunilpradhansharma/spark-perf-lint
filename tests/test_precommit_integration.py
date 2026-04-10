@@ -144,8 +144,7 @@ class TestHookExitCodes:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         assert result.returncode == 1, (
-            f"Expected exit 1 (blocked) for CRITICAL finding.\n"
-            f"stdout: {result.stdout[:400]}"
+            f"Expected exit 1 (blocked) for CRITICAL finding.\n" f"stdout: {result.stdout[:400]}"
         )
 
     def test_clean_file_exits_0(self, tmp_path: Path) -> None:
@@ -155,13 +154,10 @@ class TestHookExitCodes:
         result = _run_hook("--fail-on", "CRITICAL", files=[good])
 
         assert result.returncode == 0, (
-            f"Expected exit 0 (allowed) for clean file.\n"
-            f"stdout: {result.stdout[:400]}"
+            f"Expected exit 0 (allowed) for clean file.\n" f"stdout: {result.stdout[:400]}"
         )
 
-    def test_warning_does_not_block_when_fail_on_critical(
-        self, tmp_path: Path
-    ) -> None:
+    def test_warning_does_not_block_when_fail_on_critical(self, tmp_path: Path) -> None:
         """A WARNING finding should not block when fail_on=[CRITICAL].
 
         Scopes the scan to --dimension D02 so only shuffle rules run.
@@ -170,9 +166,12 @@ class TestHookExitCodes:
         warn_file = _write_py(tmp_path / "jobs" / "warn.py", _BAD_SORT_BY_KEY)
 
         result = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--severity-threshold", "WARNING",
-            "--dimension", "D02",
+            "--fail-on",
+            "CRITICAL",
+            "--severity-threshold",
+            "WARNING",
+            "--dimension",
+            "D02",
             files=[warn_file],
         )
 
@@ -181,22 +180,22 @@ class TestHookExitCodes:
             f"stdout: {result.stdout[:400]}"
         )
 
-    def test_warning_blocks_when_fail_on_includes_warning(
-        self, tmp_path: Path
-    ) -> None:
+    def test_warning_blocks_when_fail_on_includes_warning(self, tmp_path: Path) -> None:
         """A WARNING finding should block when fail_on includes WARNING."""
         warn_file = _write_py(tmp_path / "jobs" / "warn.py", _BAD_SORT_BY_KEY)
 
         result = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--fail-on", "WARNING",
-            "--dimension", "D02",
+            "--fail-on",
+            "CRITICAL",
+            "--fail-on",
+            "WARNING",
+            "--dimension",
+            "D02",
             files=[warn_file],
         )
 
         assert result.returncode == 1, (
-            f"WARNING finding should block with fail_on=WARNING.\n"
-            f"stdout: {result.stdout[:400]}"
+            f"WARNING finding should block with fail_on=WARNING.\n" f"stdout: {result.stdout[:400]}"
         )
 
     def test_no_verify_simulation_exits_0(self, tmp_path: Path) -> None:
@@ -211,8 +210,7 @@ class TestHookExitCodes:
         result = _run_hook("--fail-on", "CRITICAL", files=[empty])
 
         assert result.returncode == 0, (
-            f"Empty file should produce exit 0.\n"
-            f"stdout: {result.stdout[:400]}"
+            f"Empty file should produce exit 0.\n" f"stdout: {result.stdout[:400]}"
         )
 
 
@@ -230,26 +228,22 @@ class TestHookOutput:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert "SPL-D03-001" in result.stdout, (
-            f"Expected SPL-D03-001 in output.\nOutput: {result.stdout[:500]}"
-        )
+        assert (
+            "SPL-D03-001" in result.stdout
+        ), f"Expected SPL-D03-001 in output.\nOutput: {result.stdout[:500]}"
 
     def test_quiet_flag_suppresses_header(self, tmp_path: Path) -> None:
         """--quiet should suppress the branded header panel."""
         bad = _write_py(tmp_path / "jobs" / "pipeline.py", _BAD_CROSS_JOIN)
 
         full_result = _run_hook("--fail-on", "CRITICAL", files=[bad])
-        quiet_result = _run_hook(
-            "--quiet", "--fail-on", "CRITICAL", files=[bad]
-        )
+        quiet_result = _run_hook("--quiet", "--fail-on", "CRITICAL", files=[bad])
 
         # Full output includes header with brand name; quiet should be shorter
-        assert len(full_result.stdout) > len(quiet_result.stdout), (
-            "--quiet output should be shorter than full output."
-        )
-        assert "v0." not in quiet_result.stdout, (
-            "Quiet mode should suppress the versioned header."
-        )
+        assert len(full_result.stdout) > len(
+            quiet_result.stdout
+        ), "--quiet output should be shorter than full output."
+        assert "v0." not in quiet_result.stdout, "Quiet mode should suppress the versioned header."
 
     def test_no_fix_suppresses_code_panels(self, tmp_path: Path) -> None:
         """--no-fix should omit before/after code panels."""
@@ -259,9 +253,9 @@ class TestHookOutput:
         result_nofix = _run_hook("--no-fix", files=[bad])
 
         # --fix adds code panels so output is longer
-        assert len(result_fix.stdout) >= len(result_nofix.stdout), (
-            "--fix output should be at least as long as --no-fix output."
-        )
+        assert len(result_fix.stdout) >= len(
+            result_nofix.stdout
+        ), "--fix output should be at least as long as --no-fix output."
 
     def test_multiple_files_all_scanned(self, tmp_path: Path) -> None:
         """All filenames passed as args must appear in the output."""
@@ -269,7 +263,8 @@ class TestHookOutput:
         bad2 = _write_py(tmp_path / "b.py", _BAD_SORT_BY_KEY)
 
         result = _run_hook(
-            "--severity-threshold", "INFO",
+            "--severity-threshold",
+            "INFO",
             files=[bad1, bad2],
         )
 
@@ -283,9 +278,9 @@ class TestHookOutput:
         result = _run_hook("--verbose", files=[bad])
 
         # Dimension breakdown lists dimension display names like "D03 · Joins"
-        assert "D03" in result.stdout, (
-            f"--verbose should include dimension breakdown.\nOutput: {result.stdout[:800]}"
-        )
+        assert (
+            "D03" in result.stdout
+        ), f"--verbose should include dimension breakdown.\nOutput: {result.stdout[:800]}"
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +301,7 @@ class TestHookDefinitionYaml:
         import yaml
 
         repo_root = Path(__file__).parent.parent
-        data = yaml.safe_load(
-            (repo_root / ".pre-commit-hooks.yaml").read_text(encoding="utf-8")
-        )
+        data = yaml.safe_load((repo_root / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
         assert isinstance(data, list), "Root element must be a YAML list"
         assert len(data) >= 1, "Must define at least one hook"
 
@@ -317,25 +310,21 @@ class TestHookDefinitionYaml:
         import yaml
 
         repo_root = Path(__file__).parent.parent
-        data = yaml.safe_load(
-            (repo_root / ".pre-commit-hooks.yaml").read_text(encoding="utf-8")
-        )
+        data = yaml.safe_load((repo_root / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
 
         required = {"id", "name", "entry", "language"}
         for hook in data:
             missing = required - set(hook.keys())
-            assert not missing, (
-                f"Hook {hook.get('id', '?')!r} is missing required fields: {missing}"
-            )
+            assert (
+                not missing
+            ), f"Hook {hook.get('id', '?')!r} is missing required fields: {missing}"
 
     def test_main_hook_attributes(self) -> None:
         """The spark-perf-lint hook must have the expected attribute values."""
         import yaml
 
         repo_root = Path(__file__).parent.parent
-        data = yaml.safe_load(
-            (repo_root / ".pre-commit-hooks.yaml").read_text(encoding="utf-8")
-        )
+        data = yaml.safe_load((repo_root / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
 
         hook = next((h for h in data if h["id"] == "spark-perf-lint"), None)
         assert hook is not None, "Hook with id 'spark-perf-lint' not found"
@@ -404,13 +393,10 @@ class TestConfigDiscovery:
         # loaded (if config was ignored the default fail_on=CRITICAL still applies,
         # but we can verify the config_source path in the output when verbose)
         assert result.returncode == 1, (
-            f"Expected exit 1 — CRITICAL crossJoin should block.\n"
-            f"stdout: {result.stdout[:400]}"
+            f"Expected exit 1 — CRITICAL crossJoin should block.\n" f"stdout: {result.stdout[:400]}"
         )
 
-    def test_config_in_subdirectory_not_picked_up_from_sibling(
-        self, tmp_path: Path
-    ) -> None:
+    def test_config_in_subdirectory_not_picked_up_from_sibling(self, tmp_path: Path) -> None:
         """A config in a sibling directory must NOT be used for files elsewhere.
 
         Layout::
@@ -512,9 +498,9 @@ class TestMixedSparkNonSparkFiles:
 
         result = _run_hook("--fail-on", "CRITICAL", files=non_spark)
 
-        assert result.returncode == 0, (
-            f"Non-Spark files should never block a commit.\nstdout: {result.stdout[:400]}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"Non-Spark files should never block a commit.\nstdout: {result.stdout[:400]}"
 
     def test_mixed_files_only_spark_files_blocked(self, tmp_path: Path) -> None:
         """2 Spark files + 3 non-Spark files: commit is blocked by Spark findings only."""
@@ -542,8 +528,10 @@ class TestMixedSparkNonSparkFiles:
         plain.write_text("import os\n", encoding="utf-8")
 
         result = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--severity-threshold", "INFO",
+            "--fail-on",
+            "CRITICAL",
+            "--severity-threshold",
+            "INFO",
             files=[spark, plain],
         )
 
@@ -562,7 +550,8 @@ class TestMixedSparkNonSparkFiles:
             plain_files.append(p)
 
         result = _run_hook(
-            "--fail-on", "CRITICAL",
+            "--fail-on",
+            "CRITICAL",
             files=[spark1, spark2, *plain_files],
         )
 
@@ -586,18 +575,21 @@ class TestExitCodeMatrix:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[clean])
 
-        assert result.returncode == 0, (
-            f"Clean file should produce exit 0.\nstdout: {result.stdout[:400]}"
-        )
+        assert (
+            result.returncode == 0
+        ), f"Clean file should produce exit 0.\nstdout: {result.stdout[:400]}"
 
     def test_warning_with_fail_on_critical_exits_0(self, tmp_path: Path) -> None:
         """WARNING finding + fail_on=CRITICAL → exit 0 (not blocked)."""
         warn = _write_py(tmp_path / "warn.py", _BAD_SORT_BY_KEY)
 
         result = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--severity-threshold", "WARNING",
-            "--dimension", "D02",
+            "--fail-on",
+            "CRITICAL",
+            "--severity-threshold",
+            "WARNING",
+            "--dimension",
+            "D02",
             files=[warn],
         )
 
@@ -613,8 +605,7 @@ class TestExitCodeMatrix:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         assert result.returncode == 1, (
-            "CRITICAL finding must block when fail_on=CRITICAL.\n"
-            f"stdout: {result.stdout[:400]}"
+            "CRITICAL finding must block when fail_on=CRITICAL.\n" f"stdout: {result.stdout[:400]}"
         )
 
     @pytest.mark.parametrize(
@@ -622,9 +613,9 @@ class TestExitCodeMatrix:
         [
             # (source, [--fail-on args], expected_exit_code)
             (_GOOD_ETL, ["CRITICAL"], 0),
-            (_BAD_SORT_BY_KEY, ["CRITICAL"], 0),         # WARNING only → pass
-            (_BAD_CROSS_JOIN, ["CRITICAL"], 1),           # CRITICAL → block
-            (_BAD_SORT_BY_KEY, ["WARNING"], 1),           # WARNING → block
+            (_BAD_SORT_BY_KEY, ["CRITICAL"], 0),  # WARNING only → pass
+            (_BAD_CROSS_JOIN, ["CRITICAL"], 1),  # CRITICAL → block
+            (_BAD_SORT_BY_KEY, ["WARNING"], 1),  # WARNING → block
             (_BAD_SORT_BY_KEY, ["CRITICAL", "WARNING"], 1),  # both → block on WARNING
         ],
         ids=[
@@ -684,7 +675,8 @@ class TestArgsPassthrough:
 
         # Emulate: spark-perf-lint scan --severity-threshold CRITICAL file1.py file2.py
         result = _run_hook(
-            "--severity-threshold", "CRITICAL",
+            "--severity-threshold",
+            "CRITICAL",
             files=[f1, f2],
         )
 
@@ -696,9 +688,12 @@ class TestArgsPassthrough:
         warn = _write_py(tmp_path / "warn.py", _BAD_SORT_BY_KEY)
 
         result = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--fail-on", "WARNING",
-            "--dimension", "D02",
+            "--fail-on",
+            "CRITICAL",
+            "--fail-on",
+            "WARNING",
+            "--dimension",
+            "D02",
             files=[warn],
         )
 
@@ -712,20 +707,24 @@ class TestArgsPassthrough:
 
         # Scan a clean file with only D02 rules — no CRITICAL findings expected
         result_d02_clean = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--dimension", "D02",
+            "--fail-on",
+            "CRITICAL",
+            "--dimension",
+            "D02",
             files=[clean],
         )
         # Scan the bad file with D03 included — cross-join rule fires
         result_d03 = _run_hook(
-            "--fail-on", "CRITICAL",
-            "--dimension", "D03",
+            "--fail-on",
+            "CRITICAL",
+            "--dimension",
+            "D03",
             files=[bad],
         )
 
-        assert result_d02_clean.returncode == 0, (
-            "Clean file scanned with only D02 rules should produce no CRITICAL findings"
-        )
+        assert (
+            result_d02_clean.returncode == 0
+        ), "Clean file scanned with only D02 rules should produce no CRITICAL findings"
         assert result_d03.returncode == 1, "D03 scan should find crossJoin"
 
     def test_unknown_arg_produces_error(self, tmp_path: Path) -> None:
@@ -761,9 +760,7 @@ class TestOutputFormat:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         long_lines = [
-            ln
-            for ln in result.stdout.splitlines()
-            if len(_ANSI_ESCAPE.sub("", ln)) > 120
+            ln for ln in result.stdout.splitlines() if len(_ANSI_ESCAPE.sub("", ln)) > 120
         ]
         assert not long_lines, (
             f"Output contains {len(long_lines)} visible line(s) wider than 120 chars:\n"
@@ -780,9 +777,9 @@ class TestOutputFormat:
         full = _run_hook("--fail-on", "CRITICAL", files=[bad])
         quiet = _run_hook("--quiet", "--fail-on", "CRITICAL", files=[bad])
 
-        assert len(quiet.stdout) < len(full.stdout), (
-            "--quiet output should be shorter than full output."
-        )
+        assert len(quiet.stdout) < len(
+            full.stdout
+        ), "--quiet output should be shorter than full output."
 
     def test_rule_id_always_present_in_output(self, tmp_path: Path) -> None:
         """Every finding card must contain the rule ID so developers can look it up."""
@@ -790,9 +787,9 @@ class TestOutputFormat:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert "SPL-D03-001" in result.stdout, (
-            f"Rule ID not found in output.\nstdout: {result.stdout[:500]}"
-        )
+        assert (
+            "SPL-D03-001" in result.stdout
+        ), f"Rule ID not found in output.\nstdout: {result.stdout[:500]}"
 
     def test_severity_label_present_in_output(self, tmp_path: Path) -> None:
         """Finding output must include the severity label."""
@@ -808,6 +805,6 @@ class TestOutputFormat:
 
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
-        assert "Traceback (most recent call last)" not in result.stdout, (
-            "A Python traceback leaked into the hook output."
-        )
+        assert (
+            "Traceback (most recent call last)" not in result.stdout
+        ), "A Python traceback leaked into the hook output."
