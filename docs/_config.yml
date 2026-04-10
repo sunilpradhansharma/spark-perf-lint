@@ -1,0 +1,26 @@
+title: spark-perf-lint
+description: Enterprise-grade Apache Spark performance linter
+url: https://sunilpradhansharma.github.io
+baseurl: /spark-perf-lint
+theme: just-the-docs
+color_scheme: dark
+search_enabled: true
+nav_enabled: true
+
+aux_links:
+  "GitHub": "https://github.com/sunilpradhansharma/spark-perf-lint"
+aux_links_new_tab: true
+
+footer_content: "Copyright &copy; 2026 Sunil Pradhan Sharma"
+
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# Just the Docs settings
+heading_anchors: true
+permalink: pretty
+exclude:
+  - "*.gemspec"
+  - Gemfile.lock
+  - node_modules/
