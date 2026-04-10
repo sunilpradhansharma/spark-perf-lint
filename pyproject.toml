@@ -7,7 +7,7 @@ name = "spark-perf-lint"
 version = "0.1.0"
 description = "Enterprise-grade Apache Spark performance linter — 93 rules across 11 dimensions"
 readme = "README.md"
-license = "MIT"
+license = "LicenseRef-SunilPradhanSharma"
 authors = [{ name = "Sunil Pradhan Sharma", email = "sucandra.dasa@gmail.com" }]
 maintainers = [{ name = "Sunil Pradhan Sharma", email = "sucandra.dasa@gmail.com" }]
 keywords = [

@@ -777,7 +777,7 @@ Contributions are welcome — whether that is a new rule, a bug fix, an improvem
 
 ## License
 
-You are free to use, copy, modify, and distribute this repository for any purpose, including commercial use, provided the original copyright notice is retained.
+Free to use for any purpose including commercial. Credit to Sunil Pradhan Sharma required. See LICENSE.
 
 ---
 
