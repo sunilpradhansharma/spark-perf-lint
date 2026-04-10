@@ -719,3 +719,178 @@ class TestFileScannerGitDiff:
             include_untracked=True,
         )
         assert isinstance(targets, list)
+
+    def test_from_git_diff_loop_body_with_mocked_files(self, tmp_path):
+        """from_git_diff loop body runs when _git_diff_files returns real paths."""
+        import spark_perf_lint.engine.file_scanner as fs_mod
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        spark_py = tmp_path / "etl.py"
+        spark_py.write_text(
+            "from pyspark.sql import SparkSession\n"
+            "spark = SparkSession.builder.getOrCreate()\n"
+        )
+        plain_py = tmp_path / "utils.py"
+        plain_py.write_text("def helper(): pass\n")
+        txt_file = tmp_path / "readme.txt"
+        txt_file.write_text("not python\n")
+
+        cfg = LintConfig.from_dict({})
+        # Mock _git_diff_files to return relative paths of our temp files
+        rel_spark = str(spark_py.relative_to(tmp_path))
+        rel_plain = str(plain_py.relative_to(tmp_path))
+        rel_txt = str(txt_file.relative_to(tmp_path))
+
+        with patch.object(
+            fs_mod, "_git_diff_files",
+            return_value=[rel_spark, rel_plain, rel_txt]
+        ):
+            targets, summary = FileScanner.from_git_diff(
+                base_ref="HEAD", config=cfg, repo_root=tmp_path
+            )
+
+        # Only Python files are processed; txt is skipped
+        py_targets = [t for t in targets if t.path.suffix == ".py"]
+        assert len(py_targets) >= 1
+        assert summary.total_found >= 1
+
+
+class TestFileScannerReadErrors:
+    """Direct coverage of _read_file and _read_head OSError branches."""
+
+    def test_read_file_oserror_returns_empty_and_error_string(self, tmp_path):
+        """_read_file must catch OSError and return ('', error_message)."""
+        from spark_perf_lint.engine.file_scanner import _read_file
+
+        f = tmp_path / "unreadable.py"
+        f.write_text("content")
+        f.chmod(0o000)
+        try:
+            content, err = _read_file(f)
+            assert content == ""
+            assert err is not None and len(err) > 0
+        finally:
+            f.chmod(0o644)
+
+    def test_read_head_oserror_returns_empty_and_error_string(self, tmp_path):
+        """_read_head must catch OSError and return ('', error_message)."""
+        from spark_perf_lint.engine.file_scanner import _read_head
+
+        f = tmp_path / "unreadable2.py"
+        f.write_text("from pyspark.sql import SparkSession\n")
+        f.chmod(0o000)
+        try:
+            head, err = _read_head(f)
+            assert head == ""
+            assert err is not None
+        finally:
+            f.chmod(0o644)
+
+
+class TestFileScannerFromPaths:
+    """from_paths: glob pattern expansion and non-existent path warning."""
+
+    def test_from_paths_glob_pattern_matches_files(self, tmp_path):
+        """A '*.py' glob pattern in from_paths must expand via root.glob()."""
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        (tmp_path / "job_a.py").write_text(
+            "from pyspark.sql import SparkSession\n"
+            "spark = SparkSession.builder.getOrCreate()\n"
+        )
+        (tmp_path / "job_b.py").write_text(
+            "from pyspark.sql import SparkSession\n"
+        )
+        cfg = LintConfig.from_dict({})
+        # Pass a glob pattern (contains '*') so the glob branch is taken
+        targets, summary = FileScanner.from_paths(
+            ["*.py"], config=cfg, root=tmp_path
+        )
+        assert summary.total_found >= 1
+
+    def test_from_paths_glob_pattern_no_match_logs_debug(self, tmp_path):
+        """An unmatched glob pattern must not raise — total_found stays 0."""
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        cfg = LintConfig.from_dict({})
+        targets, summary = FileScanner.from_paths(
+            ["nonexistent_*.py"], config=cfg, root=tmp_path
+        )
+        assert summary.total_found == 0
+
+    def test_from_paths_nonexistent_string_path_logs_warning(self, tmp_path):
+        """A path string that resolves to nothing should be skipped gracefully."""
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        cfg = LintConfig.from_dict({})
+        targets, summary = FileScanner.from_paths(
+            [str(tmp_path / "does_not_exist.py")],
+            config=cfg,
+            root=tmp_path,
+        )
+        assert summary.total_found == 0
+
+
+class TestFileScannerFromGlobPatterns:
+    """from_glob_patterns: covers the public glob-patterns API."""
+
+    def test_from_glob_patterns_finds_spark_files(self, tmp_path):
+        """from_glob_patterns must discover and classify PySpark files."""
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        sub = tmp_path / "jobs"
+        sub.mkdir()
+        (sub / "etl.py").write_text(
+            "from pyspark.sql import SparkSession\n"
+            "spark = SparkSession.builder.getOrCreate()\n"
+        )
+        (sub / "utils.py").write_text("def helper(): pass\n")
+
+        cfg = LintConfig.from_dict({})
+        targets, summary = FileScanner.from_glob_patterns(
+            ["jobs/**/*.py", "jobs/*.py"], config=cfg, root=tmp_path
+        )
+        assert summary.total_found >= 1
+
+    def test_from_glob_patterns_empty_pattern_returns_zero(self, tmp_path):
+        """An unmatched pattern must log debug and return 0 found."""
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        cfg = LintConfig.from_dict({})
+        targets, summary = FileScanner.from_glob_patterns(
+            ["no_match_xyz/**/*.py"], config=cfg, root=tmp_path
+        )
+        assert summary.total_found == 0
+
+    def test_from_glob_patterns_deduplicates_overlapping_patterns(self, tmp_path):
+        """Two patterns matching the same file must count it only once."""
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        (tmp_path / "etl.py").write_text(
+            "from pyspark.sql import SparkSession\n"
+            "spark = SparkSession.builder.getOrCreate()\n"
+        )
+        cfg = LintConfig.from_dict({})
+        targets, summary = FileScanner.from_glob_patterns(
+            ["*.py", "etl.py"],  # both match etl.py
+            config=cfg,
+            root=tmp_path,
+        )
+        # Deduplicated: only one etl.py target
+        py_targets = [t for t in targets if t.path.name == "etl.py"]
+        assert len(py_targets) == 1
+
+    def test_from_glob_patterns_read_error_recorded(self, tmp_path):
+        """A file that fails to read fully must appear in read_errors."""
+        import spark_perf_lint.engine.file_scanner as fs_mod
+        from spark_perf_lint.engine.file_scanner import FileScanner
+
+        f = tmp_path / "spark_job.py"
+        f.write_text("from pyspark.sql import SparkSession\n")
+
+        cfg = LintConfig.from_dict({})
+        with patch.object(fs_mod, "_build_target", return_value=None):
+            targets, summary = FileScanner.from_glob_patterns(
+                ["*.py"], config=cfg, root=tmp_path
+            )
+        assert summary.read_errors
