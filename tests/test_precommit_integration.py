@@ -34,6 +34,11 @@ from spark_perf_lint.cli import main as cli_main
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
 
 
+def strip_ansi(text: str) -> str:
+    """Remove all ANSI escape codes from *text*."""
+    return _ANSI_ESCAPE.sub("", text)
+
+
 # ---------------------------------------------------------------------------
 # Lightweight result type
 # ---------------------------------------------------------------------------
@@ -229,7 +234,7 @@ class TestHookOutput:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         assert (
-            "SPL-D03-001" in result.stdout
+            "SPL-D03-001" in strip_ansi(result.stdout)
         ), f"Expected SPL-D03-001 in output.\nOutput: {result.stdout[:500]}"
 
     def test_quiet_flag_suppresses_header(self, tmp_path: Path) -> None:
@@ -243,7 +248,7 @@ class TestHookOutput:
         assert len(full_result.stdout) > len(
             quiet_result.stdout
         ), "--quiet output should be shorter than full output."
-        assert "v0." not in quiet_result.stdout, "Quiet mode should suppress the versioned header."
+        assert "v0." not in strip_ansi(quiet_result.stdout), "Quiet mode should suppress the versioned header."
 
     def test_no_fix_suppresses_code_panels(self, tmp_path: Path) -> None:
         """--no-fix should omit before/after code panels."""
@@ -268,8 +273,8 @@ class TestHookOutput:
             files=[bad1, bad2],
         )
 
-        assert "a.py" in result.stdout
-        assert "b.py" in result.stdout
+        assert "a.py" in strip_ansi(result.stdout)
+        assert "b.py" in strip_ansi(result.stdout)
 
     def test_verbose_flag_adds_dimension_breakdown(self, tmp_path: Path) -> None:
         """--verbose should include a per-dimension breakdown table in footer."""
@@ -279,7 +284,7 @@ class TestHookOutput:
 
         # Dimension breakdown lists dimension display names like "D03 · Joins"
         assert (
-            "D03" in result.stdout
+            "D03" in strip_ansi(result.stdout)
         ), f"--verbose should include dimension breakdown.\nOutput: {result.stdout[:800]}"
 
 
@@ -445,7 +450,7 @@ class TestPassFilenamesMode:
         result = _run_hook("--fail-on", "CRITICAL", files=[bad])
 
         assert result.returncode == 1
-        assert str(bad) in result.stdout or "pipeline.py" in result.stdout
+        assert str(bad) in strip_ansi(result.stdout) or "pipeline.py" in strip_ansi(result.stdout)
 
     def test_pass_filenames_multiple_files(self, tmp_path: Path) -> None:
         """Multiple filenames appended by pre-commit are all scanned."""
@@ -458,7 +463,7 @@ class TestPassFilenamesMode:
         assert result.returncode == 1
         # All three file names must appear in the output
         for name in ("a.py", "b.py", "c.py"):
-            assert name in result.stdout, f"{name} not found in output"
+            assert name in strip_ansi(result.stdout), f"{name} not found in output"
 
     def test_pass_filenames_with_deep_paths(self, tmp_path: Path) -> None:
         """Paths with multiple directory components are accepted."""
@@ -470,7 +475,7 @@ class TestPassFilenamesMode:
         result = _run_hook("--fail-on", "CRITICAL", files=[deep])
 
         assert result.returncode == 1
-        assert "etl.py" in result.stdout
+        assert "etl.py" in strip_ansi(result.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -535,9 +540,9 @@ class TestMixedSparkNonSparkFiles:
             files=[spark, plain],
         )
 
-        assert "spark_pipeline.py" in result.stdout
+        assert "spark_pipeline.py" in strip_ansi(result.stdout)
         # utils.py has no findings so it should not appear as a finding source
-        assert "SPL-" in result.stdout  # findings were reported
+        assert "SPL-" in strip_ansi(result.stdout)  # findings were reported
 
     def test_five_files_two_spark_three_plain(self, tmp_path: Path) -> None:
         """Exactly 2 of 5 files trigger findings; the other 3 are fast-skipped."""
@@ -557,8 +562,8 @@ class TestMixedSparkNonSparkFiles:
 
         # Both Spark files have CRITICAL findings
         assert result.returncode == 1
-        assert "etl.py" in result.stdout
-        assert "pipeline.py" in result.stdout
+        assert "etl.py" in strip_ansi(result.stdout)
+        assert "pipeline.py" in strip_ansi(result.stdout)
 
 
 # ---------------------------------------------------------------------------

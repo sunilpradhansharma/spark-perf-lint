@@ -81,6 +81,19 @@ markers = [
     "tier3: requires a running Spark runtime",
 ]
 
+[tool.coverage.run]
+omit = [
+    "*/spark_perf_lint/tier3/*",
+    "*/spark_perf_lint/observability/langsmith_tracer.py",
+    "*/spark_perf_lint/observability/viewer.py",
+    "*/spark_perf_lint/observability/file_tracer.py",
+    "*/spark_perf_lint/engine/plan_analyzer.py",
+    "*/spark_perf_lint/reporters/github_pr.py",
+]
+
+[tool.coverage.report]
+fail_under = 90
+
 [tool.mypy]
 python_version = "3.10"
 strict = true
