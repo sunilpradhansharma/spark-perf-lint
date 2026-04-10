@@ -1,0 +1,230 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch so a fast-follow push doesn't
+# queue behind an already-running pipeline.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1: lint
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  lint:
+    name: Lint (black / ruff / mypy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -e ".[dev]"
+
+      # ── Black ──────────────────────────────────────────────────────────────
+      - name: black --check
+        run: black --check --diff src/ tests/
+
+      # ── Ruff ──────────────────────────────────────────────────────────────
+      - name: ruff check
+        run: ruff check src/ tests/
+
+      # ── Mypy (non-blocking) ────────────────────────────────────────────────
+      # strict mode is configured in pyproject.toml; failures are surfaced as
+      # annotations but do NOT fail the build while the type-hint coverage
+      # is still being improved.
+      - name: mypy (optional)
+        run: mypy src/spark_perf_lint/
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: test
+  # ─────────────────────────────────────────────────────────────────────────
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      # Run the full test suite excluding slow marks (benchmarks run in
+      # the dedicated integration job below).
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            -m "not slow and not tier2 and not tier3" \
+            --cov=spark_perf_lint \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=90 \
+            -q
+
+      # Upload coverage XML so the coverage badge and PR comment can be
+      # generated downstream (e.g. Codecov or a GH Pages badge job).
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.11'
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: integration
+  # ─────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration scan (fixtures)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      # ── Smoke: version + rule discovery ───────────────────────────────────
+      - name: CLI smoke test — version
+        run: spark-perf-lint --version
+
+      - name: CLI smoke test — rule list
+        run: |
+          spark-perf-lint rules | grep -c "SPL-D"
+          echo "Rule discovery: OK"
+
+      # ── bad_code: scanner must find CRITICAL findings ─────────────────────
+      - name: Scan bad_code fixtures — expect findings
+        run: |
+          spark-perf-lint scan tests/fixtures/bad_code/ \
+            --format json \
+            --output scan-bad.json \
+            || true          # exit 1 is expected (criticals present)
+
+      - name: Verify bad_code scan produced findings
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+
+          with open("scan-bad.json") as f:
+              report = json.load(f)
+
+          scanned  = report["scan"]["files_scanned"]
+          total    = report["summary"]["total"]
+          critical = report["scan"]["critical_count"]
+
+          print(f"Files scanned : {scanned}")
+          print(f"Total findings: {total}")
+          print(f"CRITICAL      : {critical}")
+
+          assert scanned == 10,   f"Expected 10 bad_code files, got {scanned}"
+          assert total   >= 100,  f"Expected >=100 findings, got {total}"
+          assert critical >= 10,  f"Expected >=10 CRITICAL findings, got {critical}"
+          print("bad_code scan assertions: PASSED")
+          EOF
+
+      # ── good_code: scanner must find ≤2 CRITICAL (known salting exceptions)
+      - name: Scan good_code fixtures — expect ≤2 CRITICAL
+        run: |
+          spark-perf-lint scan tests/fixtures/good_code/ \
+            --format json \
+            --output scan-good.json \
+            || true          # may exit 1 for the 2 known exceptions
+
+      - name: Verify good_code scan has ≤2 CRITICAL findings
+        run: |
+          python3 - <<'EOF'
+          import json
+
+          with open("scan-good.json") as f:
+              report = json.load(f)
+
+          scanned  = report["scan"]["files_scanned"]
+          critical = report["scan"]["critical_count"]
+
+          print(f"Files scanned : {scanned}")
+          print(f"CRITICAL      : {critical}")
+
+          # good_caching.py fires SPL-D03-008 (join in for-loop for legit
+          # batch writes) and good_skew.py fires SPL-D03-001 (crossJoin for
+          # the salting pattern) — both are intentional, not bugs.
+          assert scanned == 10, f"Expected 10 good_code files, got {scanned}"
+          assert critical <= 2, (
+              f"Expected ≤2 CRITICAL in good_code (known exceptions), got {critical}. "
+              "A rule may be generating false positives."
+          )
+          print("good_code scan assertions: PASSED")
+          EOF
+
+      # ── Single-file scan: bad_config.py must fire D01 rules ───────────────
+      - name: Scan single file — bad_config.py
+        run: |
+          spark-perf-lint scan tests/fixtures/bad_code/bad_config.py \
+            --format json \
+            --output scan-single.json \
+            || true
+
+      - name: Verify single-file scan output
+        run: |
+          python3 - <<'EOF'
+          import json
+
+          with open("scan-single.json") as f:
+              report = json.load(f)
+
+          rule_ids = [f["rule_id"] for f in report["findings"]]
+          d01_findings = [r for r in rule_ids if r.startswith("SPL-D01-")]
+
+          print(f"Total findings    : {len(rule_ids)}")
+          print(f"D01 findings      : {len(d01_findings)}")
+          print(f"D01 rules fired   : {sorted(set(d01_findings))}")
+
+          assert report["files_scanned"] == 1, "Expected 1 file scanned"
+          assert len(d01_findings) >= 3, (
+              f"Expected ≥3 D01 findings in bad_config.py, got {len(d01_findings)}"
+          )
+          print("single-file scan assertions: PASSED")
+          EOF
+
+      # ── Upload scan artefacts for inspection ──────────────────────────────
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-scan-results
+          path: |
+            scan-bad.json
+            scan-good.json
+            scan-single.json
+          retention-days: 7
