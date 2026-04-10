@@ -1,0 +1,164 @@
+# .spark-perf-lint.yaml — Common project configurations
+# ──────────────────────────────────────────────────────────────────────────────
+# Copy one of the profiles below into your project root and rename it to
+# .spark-perf-lint.yaml.  Adjust values to match your team's standards.
+#
+# Full reference: spark-perf-lint explain --help
+# Generate with defaults: spark-perf-lint init
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# ==============================================================================
+# PROFILE 1 — Strict (new projects, green-field codebases)
+# Blocks on WARNING and above; all 11 dimensions enabled.
+# ==============================================================================
+#
+# general:
+#   severity_threshold: INFO      # show everything, block on WARNING+
+#   fail_on: [WARNING, CRITICAL]
+#   report_format: [terminal]
+#   max_findings: 0
+#
+# thresholds:
+#   broadcast_threshold_mb: 10
+#   max_shuffle_partitions: 2000
+#   min_shuffle_partitions: 10
+#   max_udf_complexity: 8         # stricter than default (10)
+#
+# ignore:
+#   files:
+#     - "**/*_test.py"
+#     - "**/conftest.py"
+#   directories:
+#     - .venv
+#     - venv
+#     - build
+#     - dist
+
+
+# ==============================================================================
+# PROFILE 2 — Gradual adoption (existing codebase, phased rollout)
+# Block only on CRITICAL; show WARNING as advisory.  Legacy dirs excluded.
+# Disable the two noisiest D11 rules until observability is set up.
+# ==============================================================================
+#
+# general:
+#   severity_threshold: WARNING
+#   fail_on: [CRITICAL]
+#   report_format: [terminal]
+#   max_findings: 50              # cap output on large first-run scans
+#
+# rules:
+#   d11_monitoring:
+#     enabled: true
+#     rules:
+#       SPL-D11-001: false        # no SparkListener yet — coming in Q2
+#       SPL-D11-002: false        # event log not set up in dev environment
+#
+# severity_override:
+#   SPL-D07-002: WARNING          # CSV writes are legacy; move to WARNING for now
+#   SPL-D02-001: INFO             # shuffle partitions are managed by AQE in Spark 3
+#
+# ignore:
+#   files:
+#     - "**/*_test.py"
+#     - "**/conftest.py"
+#     - "**/test_*.py"
+#   rules:
+#     - SPL-D09-005               # lambdas-as-UDFs are used extensively in old code
+#   directories:
+#     - .venv
+#     - venv
+#     - build
+#     - dist
+#     - legacy                    # ~500 files in migration queue; tackle separately
+#     - deprecated
+#     - notebooks                 # exploratory notebooks are not production code
+
+
+# ==============================================================================
+# PROFILE 3 — CI / GitHub Actions (strict, machine-readable output)
+# All findings shown; JSON + GitHub PR annotations; fail on CRITICAL.
+# ==============================================================================
+#
+# general:
+#   severity_threshold: INFO
+#   fail_on: [CRITICAL]
+#   report_format: [github_pr, json]
+#   max_findings: 0
+#
+# thresholds:
+#   broadcast_threshold_mb: 10
+#   max_shuffle_partitions: 2000
+#   min_shuffle_partitions: 10
+#
+# ignore:
+#   files:
+#     - "**/*_test.py"
+#     - "**/conftest.py"
+#   directories:
+#     - .venv
+#     - venv
+#     - build
+#     - dist
+#     - notebooks
+
+
+# ==============================================================================
+# PROFILE 4 — Data platform team (org-wide config, enforced via CI)
+# Standardises Spark configs across all team repos.  Custom severity
+# overrides for platform-specific patterns.  LLM analysis enabled.
+# ==============================================================================
+#
+# general:
+#   severity_threshold: INFO
+#   fail_on: [CRITICAL]
+#   report_format: [terminal]
+#
+# thresholds:
+#   broadcast_threshold_mb: 50    # team uses 50GB+ executors; larger broadcasts OK
+#   max_shuffle_partitions: 4000  # large-cluster default
+#   min_executor_memory_gb: 8     # org standard: minimum 8g executor memory
+#   min_driver_memory_gb: 4       # org standard: minimum 4g driver memory
+#
+# severity_override:
+#   SPL-D03-001: CRITICAL         # cross joins are always blocking for us
+#   SPL-D08-001: CRITICAL         # AQE must be on in all production jobs
+#   SPL-D11-002: WARNING          # event log is managed by platform; advisory only
+#   SPL-D07-002: WARNING          # CSV writes are legacy; promote to CRITICAL next quarter
+#
+# # Enforce org-standard Spark configuration values
+# spark_config_audit:
+#   enabled: true
+#   configs:
+#     spark.sql.adaptive.enabled:
+#       expected_value: "true"
+#       severity: CRITICAL
+#     spark.serializer:
+#       expected_value: "org.apache.spark.serializer.KryoSerializer"
+#       severity: WARNING
+#     spark.executor.memory:
+#       expected_value: null      # assert it is explicitly set; any value accepted
+#       severity: WARNING
+#     spark.executor.cores:
+#       expected_value: null
+#       severity: WARNING
+#
+# # Enable Tier 2 LLM analysis for complex findings
+# llm:
+#   enabled: true
+#   model: claude-haiku-4-5-20251001    # fast + cheap for pre-commit
+#   min_severity_for_llm: WARNING
+#   max_llm_calls: 10
+#   batch_size: 5
+#
+# ignore:
+#   files:
+#     - "**/*_test.py"
+#     - "**/conftest.py"
+#   directories:
+#     - .venv
+#     - venv
+#     - build
+#     - dist
+#     - notebooks

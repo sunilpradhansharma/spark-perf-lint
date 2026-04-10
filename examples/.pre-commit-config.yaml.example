@@ -1,0 +1,75 @@
+# .pre-commit-config.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+# Complete pre-commit configuration for a PySpark project.
+# Combines spark-perf-lint with ruff, mypy, and standard file-hygiene hooks.
+#
+# Setup:
+#   pip install pre-commit
+#   pre-commit install
+#   pre-commit run --all-files   # run against every file once to baseline
+#
+# See: https://pre-commit.com  |  docs/PRE_COMMIT_SETUP.md
+# ──────────────────────────────────────────────────────────────────────────────
+
+default_language_version:
+  python: python3.10
+
+# Run all hooks in parallel where possible
+default_stages: [pre-commit]
+
+repos:
+  # ── Code formatting ─────────────────────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.0
+    hooks:
+      - id: ruff-format          # Black-compatible formatter
+      - id: ruff                 # Linter (replaces flake8, isort, pyupgrade)
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # ── Type checking ────────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [pyspark-stubs]
+        args: [--ignore-missing-imports]
+
+  # ── Spark performance linter ─────────────────────────────────────────────────
+  - repo: https://github.com/YOUR_USERNAME/spark-perf-lint
+    rev: v0.1.0
+    hooks:
+      - id: spark-perf-lint
+        # Block commits that introduce CRITICAL anti-patterns.
+        # Show all findings at WARNING and above in the terminal.
+        args:
+          - '--severity-threshold'
+          - 'WARNING'
+          - '--fail-on'
+          - 'CRITICAL'
+          - '--format'
+          - 'terminal'
+        # Exclude notebooks and legacy directories (fast-path bypass)
+        exclude: '^(notebooks/|legacy/|deprecated/)'
+
+  # ── Standard file hygiene ────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: debug-statements       # catches leftover pdb/breakpoint() calls
+      - id: detect-private-key
+
+  # ── Secrets scanning ─────────────────────────────────────────────────────────
+  # Uncomment to add Gitleaks or detect-secrets:
+  # - repo: https://github.com/Yelp/detect-secrets
+  #   rev: v1.4.0
+  #   hooks:
+  #     - id: detect-secrets
+  #       args: ['--baseline', '.secrets.baseline']

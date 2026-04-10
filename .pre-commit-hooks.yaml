@@ -1,0 +1,11 @@
+- id: spark-perf-lint
+  name: Spark Performance Linter
+  description: Lint PySpark code for performance anti-patterns (D01–D11, 93 rules).
+  entry: spark-perf-lint scan
+  language: python
+  files: '\.py$'
+  types: [python]
+  stages: [pre-commit]
+  pass_filenames: true
+  require_serial: false
+  minimum_pre_commit_version: '3.0.0'

@@ -702,3 +702,7 @@ def explain(rule_id: str, output_format: str) -> None:
         )
     )
     click.echo("")
+
+
+if __name__ == "__main__":
+    main()
