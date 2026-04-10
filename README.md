@@ -31,7 +31,7 @@ Each finding carries a six-layer structure: what was found, why it hurts, a conc
 
 ## Quick Start
 
-📖 **Full documentation:** [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/)
+🌐 **Explore the interactive site:** [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/) — browse all 93 rules, decision guides, and architecture diagrams in one place.
 
 ### a. Pre-commit hook (catches issues before every commit)
 
@@ -784,9 +784,9 @@ Contributions are welcome — whether that is a new rule, a bug fix, an improvem
 
 ---
 
-## Documentation
+## 🌐 Live Site
 
-Visit the full documentation site at [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/) for detailed guides on rules, configuration, pre-commit setup, and architecture.
+Explore rules, architecture, and setup guides at [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/)
 
 ---
 
