@@ -847,5 +847,110 @@ def explain(rule_id: str, output_format: str) -> None:
     click.echo("")
 
 
+# =============================================================================
+# spark-perf-lint traces
+# =============================================================================
+
+
+@main.command("traces")
+@click.option(
+    "--dir",
+    "trace_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=".spark-perf-lint-traces",
+    show_default=True,
+    help="Directory containing spl-trace-*.json files.",
+    metavar="DIR",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default="spl-traces-report.html",
+    show_default=True,
+    help="Destination HTML file.",
+    metavar="PATH",
+)
+@click.option(
+    "--title",
+    "title",
+    default="spark-perf-lint Trace Report",
+    show_default=True,
+    help="Report title shown in the page header.",
+    metavar="TEXT",
+)
+@click.option(
+    "--open",
+    "open_browser",
+    is_flag=True,
+    default=False,
+    help="Open the generated report in the default browser after writing.",
+)
+def traces(
+    trace_dir: Path,
+    output_path: Path,
+    title: str,
+    open_browser: bool,
+) -> None:
+    """Generate a static HTML report from trace files.
+
+    Reads all spl-trace-*.json files in DIR, produces a self-contained
+    HTML report with a findings trend chart, run history table, dimension
+    breakdown, and hotspot files.
+
+    To produce trace files, enable observability in .spark-perf-lint.yaml:
+
+    \b
+      observability:
+        enabled: true
+        backend: file
+        output_dir: .spark-perf-lint-traces
+        trace_level: standard
+
+    Examples:\n
+      spark-perf-lint traces\n
+      spark-perf-lint traces --dir ./traces --output report.html\n
+      spark-perf-lint traces --open
+    """
+    from spark_perf_lint.observability.viewer import generate_report
+
+    if not trace_dir.is_dir():
+        click.echo(
+            click.style(
+                f"Trace directory not found: {trace_dir}\n"
+                "Enable observability and run a scan first.",
+                fg="yellow",
+            ),
+            err=True,
+        )
+        sys.exit(2)
+
+    try:
+        n = generate_report(trace_dir, output_path, title=title)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(click.style(f"Failed to generate report: {exc}", fg="red"), err=True)
+        sys.exit(2)
+
+    if n == 0:
+        click.echo(
+            click.style(
+                f"No trace files found in {trace_dir}. "
+                "Enable observability and run a scan first.",
+                fg="yellow",
+            )
+        )
+    else:
+        click.echo(
+            click.style(f"Report generated: ", fg="bright_black")
+            + click.style(str(output_path), fg="bright_cyan", bold=True)
+            + click.style(f"  ({n} trace{'s' if n != 1 else ''} loaded)", fg="bright_black")
+        )
+
+    if open_browser and output_path.exists():
+        import webbrowser
+
+        webbrowser.open(output_path.resolve().as_uri())
+
+
 if __name__ == "__main__":
     main()
