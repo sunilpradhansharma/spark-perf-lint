@@ -2470,3 +2470,565 @@ rules:
     estimated_speedup: "Eliminates map-side overhead from creating and tracking excess partitions"
     effort: CONFIG_ONLY
     common_in: "AQE-enabled jobs with legacy manual partition tuning, migrated Spark 2.x configs"
+
+  # ---------------------------------------------------------------------------
+  # D09 — UDF and Code Patterns (SPL-D09-001 through SPL-D09-012)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D09-001
+    short_recommendation: >-
+      Replace row-at-a-time @udf functions with native Spark SQL functions or
+      @pandas_udf for vectorised batch processing.
+    detailed_recommendation: |
+      A Python UDF registered with @udf (or udf(lambda ...)) is called once per
+      row. For every row Spark must: serialise the row from JVM objects to Python
+      pickle format, deserialise in the Python worker, execute the Python function,
+      then serialise the result back to JVM format. This per-row round-trip adds
+      2–10× overhead compared to native Spark SQL functions. Worse, the JVM cannot
+      apply predicate pushdown, column pruning, or whole-stage code generation across
+      a UDF boundary. Alternatives in order of preference: (1) Native Spark SQL
+      functions (from pyspark.sql.functions import *) cover most common
+      transformations; (2) @pandas_udf processes a full partition as a pd.Series /
+      pd.DataFrame, batch-serialising rows instead of one at a time; (3) SQL
+      expressions via expr() leverage Catalyst optimisation.
+    before_code: |
+      @udf(returnType=StringType())
+      def normalise(s):
+          return s.lower().strip()
+
+      df.withColumn('normalised', normalise(col('s')))
+    after_code: |
+      # Native SQL function — no serialisation overhead
+      df.withColumn('normalised', lower(trim(col('s'))))
+
+      # Or for complex Python logic, use @pandas_udf (vectorised):
+      import pandas as pd
+
+      @pandas_udf('string')
+      def normalise(s: pd.Series) -> pd.Series:
+          return s.str.lower().str.strip()
+
+      df.withColumn('normalised', normalise(col('s')))
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.pandas_udf.html"
+    estimated_speedup: "2–10× speedup per row; restores Catalyst whole-stage code generation"
+    effort: MINOR_CODE_CHANGE
+    common_in: "ML feature pipelines, ETL transformations, string/numeric preprocessing jobs"
+
+  - rule_id: SPL-D09-002
+    short_recommendation: >-
+      Delete the @udf and use the native Spark SQL equivalent: lower(), upper(),
+      trim(), ltrim(), rtrim(), or initcap().
+    detailed_recommendation: |
+      This UDF's entire body is a single call to a Python string method (lower,
+      upper, strip, etc.) that has an identical Spark SQL built-in function. Using
+      the UDF invokes the full Python serialisation round-trip for every row; using
+      the native function executes inside the JVM without any data movement. Spark
+      SQL equivalents: s.lower() → lower(col('s')), s.upper() → upper(col('s')),
+      s.strip() → trim(col('s')), s.lstrip() → ltrim(col('s')),
+      s.rstrip() → rtrim(col('s')), s.title() → initcap(col('s')).
+    before_code: |
+      @udf(returnType=StringType())
+      def my_lower(s):
+          return s.lower()
+
+      df.withColumn('name', my_lower(col('name')))
+    after_code: |
+      df.withColumn('name', lower(col('name')))
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/functions/string.html"
+    estimated_speedup: "Eliminates per-row JVM↔Python serialisation for a zero-logic transformation"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Legacy PySpark ETL with early UDF adoption, string normalisation jobs"
+
+  - rule_id: SPL-D09-003
+    short_recommendation: >-
+      Replace withColumn() inside a loop with a single select() call outside the
+      loop to avoid O(N²) query plan growth.
+    detailed_recommendation: |
+      Every call to withColumn() creates a new Project node in Spark's logical
+      query plan, wrapping all previous nodes. Inside a loop of N iterations this
+      produces a plan with N nested projections — planning and analysis time grows
+      quadratically. On large loops (> 100 iterations) this can take minutes just
+      in the driver before any data is processed. The fix is to build a list of
+      column expressions first and apply them in a single select() call outside the
+      loop: df.select(*existing_cols, *[expr.alias(name) for name, expr in new_cols]).
+      A single select() with N expressions produces one plan node, eliminating the
+      quadratic blowup entirely.
+    before_code: |
+      for col_name in column_list:
+          df = df.withColumn(col_name, compute(col(col_name)))
+    after_code: |
+      exprs = [compute(col(c)).alias(c) for c in column_list]
+      df = df.select(*df.columns, *exprs)
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.withColumn.html"
+    estimated_speedup: "O(N²) → O(1) plan building; eliminates driver hang for N > 100 columns"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Feature engineering, wide-table ETL, dynamic column derivation pipelines"
+
+  - rule_id: SPL-D09-004
+    short_recommendation: >-
+      Replace row-by-row iteration over df.collect() / df.toLocalIterator() with
+      df.foreach() or df.foreachPartition() to keep processing distributed.
+    detailed_recommendation: |
+      Iterating over a Spark DataFrame in a Python for loop via df.collect(),
+      df.toLocalIterator(), or direct iteration materialises every row as a Python
+      Row object on the driver. This has two serious problems: (1) Driver OOM —
+      the entire dataset must fit in the driver's heap; (2) No parallelism —
+      processing is single-threaded on the driver while the cluster sits idle.
+      Replace with distributed operations: use SQL expressions for
+      filter/aggregation; use a join instead of iterating to look up values; use
+      df.foreach() / df.foreachPartition() for side-effecting work across executors;
+      use df.limit(N).collect() only when a small intentional sample is needed.
+    before_code: |
+      for row in df.collect():
+          process(row)
+    after_code: |
+      # Distribute processing — no data movement to driver
+      df.foreach(process)
+
+      # Or for partition-level batching (more efficient):
+      def process_partition(rows):
+          for row in rows:
+              process(row)
+
+      df.foreachPartition(process_partition)
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.foreach.html"
+    estimated_speedup: "Restores distributed execution; eliminates driver OOM and idle cluster"
+    effort: MAJOR_REFACTOR
+    common_in: "Legacy ETL ported from Pandas, row-level side-effect processing, early PySpark code"
+
+  - rule_id: SPL-D09-005
+    short_recommendation: >-
+      Add limit() or filter() before collect(), or write results to storage with
+      df.write.parquet() to avoid driver OOM.
+    detailed_recommendation: |
+      collect() materialises the entire DataFrame as a Python list on the driver.
+      Without a prior filter() or limit(), the result set is unbounded: a 100 GB
+      dataset will attempt to fit in driver heap, causing java.lang.OutOfMemoryError
+      or driver restart. Legitimate uses of collect(): collecting a small aggregated
+      result (df.groupBy('key').count().collect()), collecting with a hard limit
+      (df.limit(1000).collect()), or collecting a single value (df.select('val').first()).
+      For large datasets that must be written to Python, use df.write.parquet() with
+      a downstream reader, or df.toLocalIterator() with streaming processing.
+    before_code: |
+      rows = df.join(other, 'id').collect()
+    after_code: |
+      # Collect a bounded sample
+      rows = df.join(other, 'id').limit(1000).collect()
+
+      # Or write to storage instead of collecting
+      df.join(other, 'id').write.mode('overwrite').parquet('s3://bucket/output/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.collect.html"
+    estimated_speedup: "Prevents driver OOM; limits data movement to necessary rows only"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Interactive analysis code promoted to production, result collection patterns"
+
+  - rule_id: SPL-D09-006
+    short_recommendation: >-
+      Add limit() or filter() before toPandas() to bound the result set; for
+      full dataset access use pyspark.pandas or write to storage.
+    detailed_recommendation: |
+      toPandas() fetches every row from every executor and assembles them into a
+      single pandas.DataFrame in the driver's heap. Without a prior limit() or
+      filter(), this is identical in effect to collect() but with the additional
+      overhead of pandas object creation. Common legitimate patterns: small
+      aggregated result (df.groupBy('k').count().toPandas()); bounded sample for
+      plotting/exploration (df.sample(0.01).limit(10_000).toPandas()). For
+      large-scale DataFrame-to-pandas conversion, use pyspark.pandas (Koalas API)
+      which keeps data distributed, or write to Parquet and read with pandas.
+    before_code: |
+      pdf = df.join(other, 'id').toPandas()
+    after_code: |
+      # Bounded sample for exploration
+      pdf = df.join(other, 'id').limit(50_000).toPandas()
+
+      # Or use pyspark.pandas for full distributed access:
+      # import pyspark.pandas as ps
+      # psdf = ps.from_pandas(pdf)  # stays distributed
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.toPandas.html"
+    estimated_speedup: "Prevents driver OOM proportional to total dataset size"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Data science pipelines converting to pandas for visualisation, notebook analysis code"
+
+  - rule_id: SPL-D09-007
+    short_recommendation: >-
+      Replace df.count() == 0 emptiness checks with df.isEmpty (Spark 3.3+) or
+      df.limit(1).count() == 0 to short-circuit the full scan.
+    detailed_recommendation: |
+      df.count() scans and counts every row in the DataFrame — an O(N) distributed
+      operation. When used only to check whether a DataFrame is empty
+      (if df.count() == 0, if df.count() > 0), the full scan is wasteful: the
+      answer is known as soon as the first row is found. Alternatives: df.isEmpty
+      (Spark 3.3+) is a dedicated method that stops after finding any row;
+      df.limit(1).count() == 0 caps at one row before counting — O(1) once any
+      executor finds a row; df.first() is None returns None if the DataFrame is
+      empty. For DataFrames backed by cheap sources (in-memory or already cached),
+      count() may be acceptable — suppress the finding if so.
+    before_code: |
+      if df.count() == 0:
+          raise ValueError('No data found')
+
+      if df.count() > 0:
+          process(df)
+    after_code: |
+      # Spark 3.3+ — short-circuits on first row
+      if df.isEmpty:
+          raise ValueError('No data found')
+
+      # Pre-3.3 fallback — caps scan at one row
+      if df.limit(1).count() == 0:
+          raise ValueError('No data found')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.isEmpty.html"
+    estimated_speedup: "O(N) → O(1) empty check; stops at first row instead of scanning all rows"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Data validation, pipeline guard clauses, input sanity checks"
+
+  - rule_id: SPL-D09-008
+    short_recommendation: >-
+      Remove show() calls before production deployment; replace with structured
+      logging if result summaries are needed.
+    detailed_recommendation: |
+      df.show() materialises the top N rows and prints them to stdout. In a
+      production pipeline this is problematic for two reasons: (1) Wasted
+      computation — materialising rows solely to print them triggers the full
+      upstream query plan; (2) Silent in logs — production jobs typically redirect
+      stdout, so the output is lost while the computation cost remains. show() is
+      a development/debugging tool. Replace with: structured logging via the Python
+      logging module, writing a sample to storage (df.limit(100).write.csv('debug/')),
+      or a proper data quality assertion.
+    before_code: |
+      df.groupBy('status').count().show()
+    after_code: |
+      result = df.groupBy('status').count()
+      # Log summary instead of printing to stdout
+      logger.info('status counts: %s', result.collect())
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.show.html"
+    estimated_speedup: "Eliminates unintended materialisation; no stdout pollution in production logs"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Development code promoted without cleanup, notebook-to-pipeline migrations"
+
+  - rule_id: SPL-D09-009
+    short_recommendation: >-
+      Remove explain() and printSchema() from production pipelines; capture output
+      via logging.debug() if query plan visibility is needed in production.
+    detailed_recommendation: |
+      df.explain() and df.printSchema() print query plan / schema information to
+      stdout. In production: output goes to a log file or is discarded entirely;
+      explain() can trigger partial query analysis which adds driver overhead; their
+      presence is a sign that debugging code was not removed before merge. For
+      ongoing query plan visibility in production, use structured logging:
+      logging.debug(df._jdf.queryExecution().toString()) captures the query plan
+      as a string that can be written to your logging framework rather than stdout.
+    before_code: |
+      df.join(other, 'id').explain(True)
+      df.printSchema()
+    after_code: |
+      # Remove entirely, or if plan visibility is needed:
+      import logging
+      logger = logging.getLogger(__name__)
+      logger.debug('Query plan: %s', df._jdf.queryExecution().toString())
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.explain.html"
+    estimated_speedup: "Removes unnecessary driver-side analysis overhead and stdout noise"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Development code not cleaned before merge, debugging left in production"
+
+  - rule_id: SPL-D09-010
+    short_recommendation: >-
+      Replace .rdd operations with DataFrame API equivalents; use df.mapInPandas()
+      or @pandas_udf for transformations that genuinely require Python iteration.
+    detailed_recommendation: |
+      Accessing .rdd forces a full deserialisation of each partition from Spark's
+      internal binary format (Tungsten) into Python Row objects — immediately
+      dropping all columnar efficiency. Common patterns and their DataFrame API
+      equivalents: .rdd.map(f) → df.select(expr(...)) or df.withColumn(...);
+      .rdd.filter(f) → df.filter(...); .rdd.flatMap(f) → df.select(explode(...));
+      .rdd.reduce(f) → df.agg(...); .rdd.count() → df.count(). If the operation
+      genuinely cannot be expressed in the DataFrame API, use @pandas_udf or
+      mapInPandas() / mapInArrow() which batch-process partitions without full
+      row-level deserialisation, preserving Arrow-based columnar transfer.
+    before_code: |
+      result = df.rdd.map(lambda r: (r['id'], r['val'] * 2)).toDF()
+    after_code: |
+      # DataFrame API — stays in columnar format throughout
+      result = df.select(col('id'), (col('val') * 2).alias('val'))
+
+      # For complex Python logic that can't use native functions:
+      import pandas as pd
+
+      def transform(batch: pd.DataFrame) -> pd.DataFrame:
+          batch['val'] = batch['val'] * 2
+          return batch[['id', 'val']]
+
+      result = df.mapInPandas(transform, schema='id LONG, val DOUBLE')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.rdd.html"
+    estimated_speedup: "Restores columnar execution; re-enables Catalyst and Tungsten optimisations"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Legacy RDD-based code adapted to DataFrame API, complex transformations without SQL equivalents"
+
+  - rule_id: SPL-D09-011
+    short_recommendation: >-
+      Add pd.Series type hints to @pandas_udf functions to enable correct
+      vectorisation mode inference and avoid the deprecated returnType argument.
+    detailed_recommendation: |
+      Spark 3.0+ recommends using Python type hints on @pandas_udf functions to
+      explicitly declare the vectorised execution mode and output type. Without
+      hints, Spark falls back to runtime introspection to determine the UDF's return
+      type, which: can produce incorrect vectorisation if the return type is
+      ambiguous; requires the legacy returnType keyword argument, which is
+      deprecated; makes the function's contract opaque to code reviewers and IDEs.
+      Use Python type hints to declare pd.Series, pd.DataFrame, or
+      Iterator[pd.Series] return types. The decorator infers the Spark execution
+      mode (SCALAR, GROUPED_AGG, etc.) from the annotation automatically.
+    before_code: |
+      @pandas_udf(returnType=DoubleType())
+      def my_udf(col):
+          return col * 2
+    after_code: |
+      import pandas as pd
+
+      @pandas_udf('double')
+      def my_udf(col: pd.Series) -> pd.Series:
+          return col * 2
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.pandas_udf.html"
+    estimated_speedup: "Prevents type inference errors; enables correct vectorisation mode selection"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Legacy Spark 2.x pandas_udf code, early Arrow-based UDF adoption"
+
+  - rule_id: SPL-D09-012
+    short_recommendation: >-
+      Remove the @udf decorator from the inner (helper) function; call it as a
+      plain Python function inside the outer UDF to avoid a confusing double boundary.
+    detailed_recommendation: |
+      When a UDF calls another UDF function directly from its body, Spark executes
+      the inner UDF as a plain Python function call (not as a registered Spark UDF).
+      While this technically works, it is a code-smell: the outer UDF already pays
+      the full Python serialisation cost; the inner function should be a plain
+      helper, not a Spark-registered UDF. Registering the inner function as a @udf
+      implies it is intended for independent use in withColumn()/select(), but
+      calling it inside another UDF bypasses Spark's execution planner entirely,
+      signalling possible confusion between DataFrame-level and row-level logic.
+      Refactor: turn the inner UDF into a plain Python helper function (no @udf
+      decorator) and keep the outer UDF as the single Spark boundary.
+    before_code: |
+      @udf(returnType=StringType())
+      def inner(s):
+          return s.strip()
+
+      @udf(returnType=StringType())
+      def outer(s):
+          return inner(s).lower()  # nested UDF call — inner() bypasses Spark planner
+    after_code: |
+      def _strip(s):  # plain helper — no @udf overhead
+          return s.strip()
+
+      @udf(returnType=StringType())
+      def outer(s):
+          return _strip(s).lower()
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.functions.udf.html"
+    estimated_speedup: "Clarifies execution boundary; eliminates redundant @udf overhead on inner helper"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Complex UDF libraries, shared utility UDF registrations"
+
+  # ---------------------------------------------------------------------------
+  # D10 — Catalyst Optimizer (SPL-D10-001 through SPL-D10-006)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D10-001
+    short_recommendation: >-
+      Replace the @udf with a native Spark SQL expression to restore Catalyst
+      predicate pushdown and Parquet/ORC partition pruning.
+    detailed_recommendation: |
+      Catalyst's predicate pushdown optimisation moves filter()/where() expressions
+      as close to the data source as possible — ideally into the reader itself
+      (Parquet/ORC column pruning, partition elimination). A @udf is a black-box
+      from Catalyst's perspective: it cannot inspect the Python function body, so
+      it cannot safely push filters past it. Any filter() applied to a column
+      produced by a UDF must execute after the UDF has run on every row. This
+      prevents: Parquet/ORC predicate pushdown (physical plan skips row groups
+      early); partition pruning at the file reader level; whole-stage code
+      generation across the UDF boundary. Replacing the UDF with a native Spark
+      SQL expression restores all of these optimisations because Catalyst can then
+      inspect and reorder the predicate freely.
+    before_code: |
+      @udf(returnType=StringType())
+      def normalise(s):
+          return s.lower().strip()
+
+      df.withColumn('n', normalise(col('s'))).filter(col('n') == 'target')
+    after_code: |
+      # Native functions — Catalyst can push this filter to the Parquet reader
+      df.filter(trim(lower(col('s'))) == 'target')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#predicate-pushdown-filtering"
+    estimated_speedup: "Restores Parquet/ORC predicate pushdown and partition pruning; avoids full table scan"
+    effort: MINOR_CODE_CHANGE
+    common_in: "String normalisation filters, computed column predicates, legacy UDF-heavy pipelines"
+
+  - rule_id: SPL-D10-002
+    short_recommendation: >-
+      Enable spark.sql.cbo.enabled and collect table statistics with ANALYZE TABLE
+      to give Catalyst accurate cardinality estimates for multi-join queries.
+    detailed_recommendation: |
+      Spark's Cost-Based Optimiser (CBO) uses table and column statistics —
+      collected via ANALYZE TABLE — to estimate the cardinality and size of
+      intermediate results. With CBO enabled, Catalyst can: choose the correct
+      join strategy (broadcast vs sort-merge vs shuffle-hash); re-order joins to
+      process smaller tables first; push down filters based on column statistics
+      (min/max ranges). Without CBO, Catalyst falls back to heuristic rules that
+      assume worst-case sizes, often choosing sort-merge joins where a broadcast
+      join would be far cheaper. On queries with 2+ joins the difference can be
+      5–20× in plan quality. Enable CBO globally in the session config, then
+      collect statistics with ANALYZE TABLE t COMPUTE STATISTICS FOR ALL COLUMNS.
+    before_code: |
+      spark = SparkSession.builder.getOrCreate()
+      result = a.join(b, 'id').join(c, 'key')
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config('spark.sql.cbo.enabled', 'true')
+          .config('spark.sql.cbo.joinReorder.enabled', 'true')
+          .getOrCreate()
+      )
+      spark.sql('ANALYZE TABLE a COMPUTE STATISTICS FOR ALL COLUMNS')
+      spark.sql('ANALYZE TABLE b COMPUTE STATISTICS FOR ALL COLUMNS')
+      spark.sql('ANALYZE TABLE c COMPUTE STATISTICS FOR ALL COLUMNS')
+      result = a.join(b, 'id').join(c, 'key')
+    config_changes:
+      spark.sql.cbo.enabled: "true"
+      spark.sql.cbo.joinReorder.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#cost-based-query-optimization-cbo-in-spark-sql"
+    estimated_speedup: "5–20× plan quality improvement for multi-join queries via accurate cost estimates"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Complex analytics queries, star-schema joins, multi-table ETL"
+
+  - rule_id: SPL-D10-003
+    short_recommendation: >-
+      Enable spark.sql.cbo.joinReorder.enabled so Catalyst can reorder 3+ table
+      joins to minimise intermediate DataFrame sizes.
+    detailed_recommendation: |
+      With spark.sql.cbo.joinReorder.enabled = true and CBO enabled, Catalyst uses
+      a dynamic-programming algorithm (DP-based bushy join enumeration) to find
+      the lowest-cost ordering of N-way joins. The optimal order can reduce the
+      sizes of intermediate DataFrames dramatically — e.g., joining a small lookup
+      table first shrinks the result before the expensive join. Without join
+      reordering, Catalyst executes joins in the left-to-right order written in
+      the source, which may produce large intermediate results that make subsequent
+      joins slow or trigger out-of-memory errors. Requirements:
+      spark.sql.cbo.enabled = true must also be set, and table statistics must be
+      collected via ANALYZE TABLE.
+    before_code: |
+      result = a.join(huge, 'id').join(b, 'key').join(small, 'ref')
+    after_code: |
+      spark.conf.set('spark.sql.cbo.enabled', 'true')
+      spark.conf.set('spark.sql.cbo.joinReorder.enabled', 'true')
+      # Catalyst will reorder: process small and b before huge
+      result = a.join(huge, 'id').join(b, 'key').join(small, 'ref')
+    config_changes:
+      spark.sql.cbo.enabled: "true"
+      spark.sql.cbo.joinReorder.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#join-strategy-hints-for-sql-queries"
+    estimated_speedup: "Optimal join order reduces intermediate DataFrame sizes; prevents OOM on N-way joins"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Star/snowflake schema queries, fact-dimension joins, complex analytical queries"
+
+  - rule_id: SPL-D10-004
+    short_recommendation: >-
+      Add ANALYZE TABLE ... COMPUTE STATISTICS FOR ALL COLUMNS before join-heavy
+      queries to give CBO and AQE accurate cardinality information.
+    detailed_recommendation: |
+      Spark's Cost-Based Optimiser and runtime adaptive strategies (AQE) rely on
+      per-table and per-column statistics to make accurate estimates. These
+      statistics are populated by running ANALYZE TABLE t COMPUTE STATISTICS (or
+      the column-level variant) before the query. Without statistics: join strategy
+      selection defaults to heuristics (size thresholds); AQE skew detection uses
+      partition byte counts rather than row counts; CBO cardinality estimates are
+      off, leading to poor join ordering. Run ANALYZE TABLE once after data is
+      written, or schedule it as part of the pipeline's post-write step. For Delta
+      tables, statistics are maintained automatically when
+      delta.dataSkippingNumIndexedCols is set.
+    before_code: |
+      result = spark.table('events').join(spark.table('users'), 'user_id')
+    after_code: |
+      spark.sql('ANALYZE TABLE events COMPUTE STATISTICS FOR ALL COLUMNS')
+      spark.sql('ANALYZE TABLE users COMPUTE STATISTICS FOR ALL COLUMNS')
+      result = spark.table('events').join(spark.table('users'), 'user_id')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-ref-syntax-aux-analyze-table.html"
+    estimated_speedup: "Enables CBO to select optimal join strategies; improves AQE skew detection accuracy"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Delta Lake pipelines, Hive metastore workflows, production ETL without statistics maintenance"
+
+  - rule_id: SPL-D10-005
+    short_recommendation: >-
+      Replace rand()/uuid() in filter() with df.sample(fraction) or materialise
+      the random column first with withColumn() before filtering.
+    detailed_recommendation: |
+      Non-deterministic functions such as rand(), randn(), uuid(), and
+      monotonically_increasing_id() return a different value each time Catalyst
+      evaluates them. When used inside filter() or where(), Catalyst's rule-based
+      optimiser may: evaluate the expression multiple times per row during plan
+      rewrites; move the filter to a different position in the plan during predicate
+      pushdown, changing the effective sample size; produce non-reproducible results
+      across re-executions or retries. If random sampling is the goal, use
+      df.sample(fraction) which has well-defined semantics and consistent optimiser
+      behaviour. If a random column is needed for downstream use, materialise it
+      before filtering: df.withColumn('r', rand()).filter(col('r') < 0.1). Spark
+      3+ marks non-deterministic expressions and may prevent some optimisations
+      automatically, but the intent is still unclear and fragile.
+    before_code: |
+      sample = df.filter(rand() < 0.1)
+    after_code: |
+      # Clear semantics — Catalyst treats sample() specially
+      sample = df.sample(fraction=0.1, seed=42)
+
+      # Or materialise the random column first if needed downstream:
+      sample = df.withColumn('r', rand(seed=42)).filter(col('r') < 0.1).drop('r')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.sample.html"
+    estimated_speedup: "Reproducible sampling; prevents double-evaluation and filter reordering by Catalyst"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Data sampling pipelines, A/B test data preparation, exploratory analysis scripts"
+
+  - rule_id: SPL-D10-006
+    short_recommendation: >-
+      Break method chains longer than 20 operations into named intermediate
+      DataFrames to reduce Catalyst plan analysis time and stack overflow risk.
+    detailed_recommendation: |
+      Every chained DataFrame operation adds a node to Spark's logical query plan
+      tree. Catalyst must traverse, analyse, and optimise this tree before
+      generating the physical plan. With a very deep chain: plans with >20 nodes
+      take noticeably longer for the driver to analyse — pure driver-side overhead
+      before any data is processed; stack overflow in recursive plan visitors is a
+      documented Spark bug for chains of hundreds of nodes; exception stack traces
+      span the full plan tree making debugging harder. Break very long chains by
+      materialising intermediate DataFrames at logical checkpoints. This does not
+      add Spark stages; it only simplifies the plan tree, making analysis faster
+      and errors easier to locate.
+    before_code: |
+      result = (
+          df.filter('a > 0').dropDuplicates(['id']).join(b, 'id')
+            .join(c, 'key').groupBy('cat').agg(sum('val'))
+            # ... 15 more operations chained here ...
+      )
+    after_code: |
+      # Break into named intermediate DataFrames at logical checkpoints
+      clean = df.filter('a > 0').dropDuplicates(['id'])
+      enriched = clean.join(b, 'id').join(c, 'key')
+      result = enriched.groupBy('cat').agg(sum('val'))
+      # Continue splitting remaining ops into named steps
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "Reduces driver-side plan analysis time; eliminates plan visitor stack overflow risk"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Notebook-originated pipelines, complex feature engineering, iteratively built transformation chains"
