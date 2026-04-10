@@ -240,31 +240,71 @@ def _render_report(
     quiet: bool,
     verbose: bool,
 ) -> None:
-    """Render *report* using :class:`~spark_perf_lint.reporters.terminal.TerminalReporter`.
+    """Render *report* using every format listed in ``config.report_formats``.
+
+    When a single format is active, ``output_path`` (if supplied) redirects that
+    reporter's output to a file.  When multiple formats are active, ``output_path``
+    is ignored and each reporter writes to its natural destination (stdout for
+    terminal/json/markdown; GitHub Actions streams for github_pr).
 
     Args:
         report: ``AuditReport`` produced by the orchestrator.
         config: Resolved configuration used during the scan.
-        output_path: If set, write plain-text output here instead of stdout.
+        output_path: Write the report here instead of stdout (single-format only).
         show_fix: Whether to render before/after code panels.
         quiet: Suppress header and footer; emit only finding cards.
         verbose: Include explanations, diffs, references, and dimension breakdown.
     """
-    from spark_perf_lint.reporters.terminal import TerminalReporter
+    formats = config.report_formats  # e.g. ["terminal"], ["json"], ["terminal", "json"]
+    single_format = len(formats) == 1
 
-    reporter = TerminalReporter(
-        report,
-        config,
-        show_fix=show_fix,
-        quiet=quiet,
-        verbose=verbose,
-    )
+    for fmt in formats:
+        # output_path only applies when exactly one format is requested
+        target_path: Path | None = output_path if single_format else None
 
-    if output_path is not None:
-        with output_path.open("w", encoding="utf-8") as fh:
-            reporter.render(file=fh)
-    else:
-        reporter.render()
+        if fmt == "terminal":
+            from spark_perf_lint.reporters.terminal import TerminalReporter
+
+            reporter = TerminalReporter(
+                report,
+                config,
+                show_fix=show_fix,
+                quiet=quiet,
+                verbose=verbose,
+            )
+            if target_path is not None:
+                with target_path.open("w", encoding="utf-8") as fh:
+                    reporter.render(file=fh)
+            else:
+                reporter.render()
+
+        elif fmt == "json":
+            from spark_perf_lint.reporters.json_reporter import JsonReporter
+
+            jr = JsonReporter(report, config)
+            if target_path is not None:
+                with target_path.open("w", encoding="utf-8") as fh:
+                    jr.write(file=fh)
+            else:
+                jr.write()
+
+        elif fmt == "markdown":
+            from spark_perf_lint.reporters.markdown_reporter import MarkdownReporter
+
+            mr = MarkdownReporter(report, config, show_fix=show_fix)
+            if target_path is not None:
+                with target_path.open("w", encoding="utf-8") as fh:
+                    mr.render(file=fh)
+            else:
+                mr.render()
+
+        elif fmt == "github_pr":
+            from spark_perf_lint.reporters.github_pr import GitHubPRReporter
+
+            gpr = GitHubPRReporter(report, config, show_fix=show_fix)
+            # GitHub PR reporter manages its own streams (stdout annotations,
+            # $GITHUB_STEP_SUMMARY, and optional PR comment API call).
+            gpr.run(annotations_file=None, post_comment=True, write_summary=True)
 
 
 # =============================================================================
