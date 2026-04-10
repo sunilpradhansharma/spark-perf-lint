@@ -2,7 +2,6 @@ include README.md
 include LICENSE
 include CHANGELOG.md
 include pyproject.toml
-include setup.cfg
 include .pre-commit-hooks.yaml
 include .spark-perf-lint.yaml
 recursive-include src *.py
