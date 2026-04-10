@@ -5,6 +5,9 @@ Goals validated here:
   - Incremental: staged-file mode scans only the files it receives
   - Parallel: concurrent.futures workers used for batches ≥ 3 files
   - Benchmark: 20-file commit scanned end-to-end in < 5 seconds
+  - Benchmark: 1000-line synthetic PySpark file scanned in < 2 seconds
+  - Benchmark: 50-file mixed project (Spark + plain) scanned in < 10 seconds
+  - Benchmark: non-Spark file classification costs < 50 ms per file
 
 ``@pytest.mark.slow`` tests are skipped unless ``-m slow`` is passed or the
 full marker set is activated via the ``--run-slow`` flag.  All other tests run
@@ -30,6 +33,7 @@ from spark_perf_lint.engine.orchestrator import (
     _PARALLEL_THRESHOLD,
     ScanOrchestrator,
 )
+from tests.fixtures.code_generator import generate_multi_file_project, generate_spark_file
 
 # =============================================================================
 # Synthetic source templates
@@ -434,3 +438,117 @@ class TestBenchmark:
         # Report duration should be close to wall time (within 2×)
         assert report.scan_duration_seconds > 0
         assert report.scan_duration_seconds <= wall * 2 + 0.1
+
+    # ------------------------------------------------------------------
+    # Code-generator benchmarks
+    # ------------------------------------------------------------------
+
+    def test_1000_line_spark_file_scanned_under_2_seconds(self) -> None:
+        """A synthetic 1000-line PySpark file must be fully scanned in < 2 s.
+
+        The file is generated in memory and scanned via ``scan_content`` so
+        the timing measures only AST parsing + rule execution, not disk I/O.
+        """
+        code = generate_spark_file(
+            n_lines=1000,
+            n_joins=5,
+            n_group_bys=3,
+            n_caches=2,
+            n_udfs=2,
+            n_writes=3,
+        )
+        actual_lines = len(code.splitlines())
+        assert actual_lines >= 1000, (
+            f"Precondition: generated file must have >= 1000 lines, got {actual_lines}"
+        )
+
+        config = LintConfig.from_dict({"general": {"severity_threshold": "INFO"}})
+        orch = ScanOrchestrator(config)
+
+        t0 = time.perf_counter()
+        report = orch.scan_content(code, "bench_1000_lines.py")
+        elapsed = time.perf_counter() - t0
+
+        assert report.files_scanned == 1
+        assert len(report.findings) > 0, "Expected at least one finding from generated code"
+        assert elapsed < 2.0, (
+            f"Scanning a {actual_lines}-line PySpark file took {elapsed:.3f}s — "
+            f"exceeds 2-second budget.\n"
+            f"  findings={len(report.findings)}, "
+            f"  duration_reported={report.scan_duration_seconds:.3f}s"
+        )
+
+    def test_50_mixed_files_full_scan_under_10_seconds(
+        self, tmp_path: Path
+    ) -> None:
+        """50 generated files (25 PySpark + 25 plain Python) must complete in < 10 s.
+
+        Uses ``generate_multi_file_project`` so the project mirrors a realistic
+        ETL repository with a mix of Spark jobs and utility modules.  Plain
+        Python files must be fast-pathed; only Spark files run through all rules.
+        """
+        project = generate_multi_file_project(n_files=50, spark_files_ratio=0.5)
+        for fname, code in project.items():
+            (tmp_path / fname).write_text(code, encoding="utf-8")
+
+        # Confirm the ratio split
+        spark_fnames = [f for f in project if f.startswith("spark_job_")]
+        plain_fnames = [f for f in project if f.startswith("utils_")]
+        assert len(spark_fnames) == 25
+        assert len(plain_fnames) == 25
+
+        config = LintConfig.from_dict({"general": {"severity_threshold": "INFO"}})
+        orch = ScanOrchestrator(config)
+
+        t0 = time.perf_counter()
+        report = orch.scan([str(tmp_path)])
+        elapsed = time.perf_counter() - t0
+
+        assert report.files_scanned == 25, (
+            f"Expected 25 PySpark files scanned (50 % ratio), got {report.files_scanned}.\n"
+            f"Plain files should be fast-pathed and not counted."
+        )
+        assert len(report.findings) > 0, "Expected findings from generated Spark files"
+        assert elapsed < 10.0, (
+            f"Full scan of 50 generated files took {elapsed:.3f}s — "
+            f"exceeds 10-second budget.\n"
+            f"  files_scanned={report.files_scanned}, findings={len(report.findings)}"
+        )
+
+    def test_non_spark_file_skip_under_50ms_per_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-Spark file classification must cost < 50 ms per file on average.
+
+        Generates 50 plain Python utility files via ``generate_multi_file_project``
+        and times how long the file scanner takes to classify and discard them.
+        The fast-path head-scan (8 KB read) must keep per-file cost well below
+        the 50 ms threshold so pre-commit hooks remain fast for large changesets.
+        """
+        project = generate_multi_file_project(n_files=50, spark_files_ratio=0.0)
+        assert len(project) == 50, "Precondition: 50 plain Python files"
+        for fname, code in project.items():
+            (tmp_path / fname).write_text(code, encoding="utf-8")
+
+        config = LintConfig.from_dict({"general": {"severity_threshold": "INFO"}})
+
+        t0 = time.perf_counter()
+        targets, summary = FileScanner.from_paths([str(tmp_path)], config)
+        elapsed = time.perf_counter() - t0
+
+        scannable = FileScanner.scannable(targets)
+        assert scannable == [], (
+            f"All plain Python files should be fast-pathed and skipped, "
+            f"but {len(scannable)} were marked scannable."
+        )
+        assert summary.non_pyspark == 50, (
+            f"Expected 50 non-PySpark files, got {summary.non_pyspark}"
+        )
+
+        per_file_ms = (elapsed / 50) * 1000
+        assert per_file_ms < 50.0, (
+            f"Non-Spark file classification averaged {per_file_ms:.2f} ms/file — "
+            f"exceeds 50 ms budget.\n"
+            f"  total_elapsed={elapsed*1000:.1f}ms for 50 files\n"
+            f"  Fast-path (head-scan) may be broken or bypassed."
+        )
