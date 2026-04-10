@@ -1307,3 +1307,553 @@ rules:
     estimated_speedup: "Eliminates one full wasted shuffle; 2x shuffle I/O reduction for that stage"
     effort: MINOR_CODE_CHANGE
     common_in: "ETL join pipelines, manually-partitioned DataFrames, multi-key join chains"
+
+  # ---------------------------------------------------------------------------
+  # D05 — Data Skew (SPL-D05-001 through SPL-D05-007)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D05-001
+    short_recommendation: >-
+      Add a secondary high-cardinality key to the join; low-cardinality keys
+      (status, type, is_*) route the dominant group to a single straggler task.
+    detailed_recommendation: |
+      When a join key has very few distinct values (status, type, is_active), all
+      rows sharing a value must be processed by the same reducer task. If 80% of
+      records have status = 'active', one task handles 80% of the data while the
+      rest of the cluster finishes quickly — a classic straggler that blocks the
+      entire stage. Unlike ID-based skew (which salting solves), low-cardinality
+      join skew is structural: the key definition itself causes the imbalance.
+      The most direct fix is adding a secondary high-cardinality key to the join
+      condition: `join(other, ['status', 'user_id'])` breaks ties within each
+      status group, spreading the load across many more tasks. Also enable AQE
+      skew join splitting (`spark.sql.adaptive.skewJoin.enabled = true`) as a
+      safety net so Spark can automatically split any oversized partitions at
+      runtime even when the code pattern cannot be changed.
+    before_code: |
+      # All 'active' rows routed to one reducer task
+      result = df.join(other, 'status')
+    after_code: |
+      # user_id breaks ties within each status group
+      result = df.join(other, ['status', 'user_id'])
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+      spark.sql.adaptive.skewJoin.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#adaptive-query-execution"
+    estimated_speedup: "Eliminates straggler task; stage wall-clock time approaches median task time"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Status-based joins, event-type partitioning, boolean-flag joins"
+
+  - rule_id: SPL-D05-002
+    short_recommendation: >-
+      Use two-phase aggregation with a random bucket column to distribute the
+      dominant group across tasks before the final groupBy rollup.
+    detailed_recommendation: |
+      `groupBy('status')` routes all rows with the same status to a single
+      partition. If 90% of rows are status = 'active', that reducer task runs
+      for the entire stage while all others finish seconds earlier. Unlike join
+      skew, you cannot simply add a secondary key because the aggregation must
+      see all rows for each group to produce a correct result. The two-phase
+      aggregation pattern solves this: first aggregate by `(status, rand_bucket)`
+      to distribute the computation across many partial-sum tasks, then aggregate
+      the partial results by `status` alone. The total work increases by one extra
+      groupBy pass, but each individual task handles a proportional slice of the
+      data. Also enable `spark.sql.adaptive.skewJoin.enabled = true` — Spark 3.2+
+      AQE can split skewed groupBy partitions automatically using the same
+      mechanism as skew join splitting.
+    before_code: |
+      # 90% of rows in one partition — straggler task
+      result = df.groupBy('status').agg(sum('amount').alias('total'))
+    after_code: |
+      from pyspark.sql.functions import rand, sum as _sum
+
+      N = 10  # number of salt buckets
+      # Phase 1: partial sums distributed across N buckets per status
+      partial = (
+          df.withColumn('bucket', (rand() * N).cast('int'))
+          .groupBy('status', 'bucket')
+          .agg(_sum('amount').alias('partial_total'))
+      )
+      # Phase 2: roll up partial sums — each status now has N small inputs
+      result = partial.groupBy('status').agg(_sum('partial_total').alias('total'))
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+      spark.sql.adaptive.skewJoin.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#adaptive-query-execution"
+    estimated_speedup: "10-100x stage speedup for dominant groups; eliminates straggler"
+    effort: MAJOR_REFACTOR
+    common_in: "Status-based aggregations, boolean-flag rollups, categorical groupBy ETL"
+
+  - rule_id: SPL-D05-003
+    short_recommendation: >-
+      Re-enable spark.sql.adaptive.skewJoin.enabled; disabling it removes
+      Spark 3's automatic skewed-partition splitting safety net.
+    detailed_recommendation: |
+      Spark 3.0+ Adaptive Query Execution includes an automatic skew join
+      optimization that detects partitions larger than
+      `skewedPartitionThresholdInBytes × skewedPartitionFactor` and automatically
+      splits them across multiple tasks — the lowest-effort skew fix available.
+      Disabling AQE entirely (`spark.sql.adaptive.enabled = false`) or the skew
+      join feature specifically (`spark.sql.adaptive.skewJoin.enabled = false`)
+      removes this safety net, turning every skewed join into a long-running
+      straggler that blocks the stage. The feature was occasionally disabled in
+      early Spark 3.0 betas due to incorrect plan rewrites, but has been stable
+      since Spark 3.1. Remove the `false` override and set both
+      `spark.sql.adaptive.enabled = true` and
+      `spark.sql.adaptive.skewJoin.enabled = true`.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.skewJoin.enabled", "false")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.enabled", "true")
+          .config("spark.sql.adaptive.skewJoin.enabled", "true")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+      spark.sql.adaptive.skewJoin.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#skew-join-optimization"
+    estimated_speedup: "Restores automatic skew splitting; eliminates straggler tasks on skewed joins"
+    effort: CONFIG_ONLY
+    common_in: "Any job with joins on skew-prone keys, Spark 3.0 era codebases"
+
+  - rule_id: SPL-D05-004
+    short_recommendation: >-
+      Lower skewedPartitionThresholdInBytes to ≤256 MB and skewedPartitionFactor
+      to ≤5 so AQE detects moderate skew, not only extreme outliers.
+    detailed_recommendation: |
+      AQE's skew join optimization uses two thresholds: a partition is considered
+      skewed only when it is both above `skewedPartitionThresholdInBytes` (default
+      256 MB) AND larger than `skewedPartitionFactor × median partition size`
+      (default factor 5). Setting the byte threshold above 1 GB means partitions
+      between 256 MB and 1 GB — already causing significant straggler behaviour
+      relative to a 50 MB median — go undetected. Setting the factor above 10
+      requires a partition to be 10× the median before AQE intervenes, missing
+      moderate but still harmful skew. Keep both at or below their defaults:
+      `skewedPartitionThresholdInBytes = 256m` and `skewedPartitionFactor = 5`.
+      Lower values make AQE more aggressive at splitting skewed partitions; the
+      only downside is a small additional AQE planning overhead per stage, which
+      is negligible compared to straggler runtime.
+    before_code: |
+      spark = (
+          SparkSession.builder
+          # Only partitions > 2 GB are considered skewed — misses moderate skew
+          .config("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "2g")
+          .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "20")
+          .getOrCreate()
+      )
+    after_code: |
+      spark = (
+          SparkSession.builder
+          .config("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "256m")
+          .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
+          .getOrCreate()
+      )
+    config_changes:
+      spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes: "268435456"  # 256 MB
+      spark.sql.adaptive.skewJoin.skewedPartitionFactor: "5"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#skew-join-optimization"
+    estimated_speedup: "Detects and splits moderate skew that previously ran as stragglers"
+    effort: CONFIG_ONLY
+    common_in: "All jobs with AQE enabled on skew-prone data distributions"
+
+  - rule_id: SPL-D05-005
+    short_recommendation: >-
+      Enable AQE skew join first; if skew persists on power-law ID columns
+      (user_id, product_id), implement key salting to distribute whale keys.
+    detailed_recommendation: |
+      Columns like user_id, customer_id, and product_id often follow power-law
+      distributions: a handful of whale users generate millions of events, and
+      a handful of popular products receive most orders. When joining a fact table
+      on such a column, the reducer tasks for popular IDs receive far more rows
+      than average, causing straggler tasks. Start by enabling AQE skew join
+      (`spark.sql.adaptive.skewJoin.enabled = true`) — it handles many cases
+      automatically with zero code changes. If skew persists (confirm via Spark
+      UI Stage Detail → task duration distribution), implement salting: append a
+      random bucket number (0–N) to the join key so one popular ID is distributed
+      across N tasks. The larger table gets a `salt` column via `rand()`, the
+      smaller lookup table is exploded into N copies (one per salt value), and the
+      join is performed on `(original_key, salt)`.
+    before_code: |
+      # user_id may be highly skewed — whale users dominate one reducer
+      result = events.join(user_profiles, 'user_id')
+    after_code: |
+      from pyspark.sql.functions import rand, explode, array, lit
+
+      N = 10  # salt buckets — tune based on skew severity
+      events_salted = events.withColumn('salt', (rand() * N).cast('int'))
+      profiles_salted = user_profiles.withColumn(
+          'salt', explode(array([lit(i) for i in range(N)]))
+      )
+      result = events_salted.join(profiles_salted, ['user_id', 'salt'])
+    config_changes:
+      spark.sql.adaptive.enabled: "true"
+      spark.sql.adaptive.skewJoin.enabled: "true"
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html#skew-join-optimization"
+    estimated_speedup: "N× reduction in straggler task size where N = salt bucket count"
+    effort: MAJOR_REFACTOR
+    common_in: "User-level fact joins, product analytics, social graph traversals"
+
+  - rule_id: SPL-D05-006
+    short_recommendation: >-
+      Add a secondary high-cardinality key to Window.partitionBy() on low-
+      cardinality columns; skewed window partitions cause executor OOM.
+    detailed_recommendation: |
+      `Window.partitionBy('status')` sends all rows with the same status to the
+      same executor task, which must buffer and sort the entire partition in memory
+      to compute the window function. Unlike join skew (where AQE can split the
+      partition after the shuffle), window function partitions cannot be
+      parallelised within a partition — the full sorted window must be held in
+      memory at once. A skewed window partition on a 90%-dominant status value
+      routinely causes executor OOM that is hard to reproduce in staging
+      environments. Add a secondary high-cardinality key to bound each partition
+      to a manageable size: `Window.partitionBy('status', 'user_id').orderBy('ts')`
+      limits each partition to one user's rows within a given status, rather than
+      all rows across every user with that status.
+    before_code: |
+      from pyspark.sql import Window
+      from pyspark.sql.functions import rank
+
+      # All 'active' rows in one memory-bound partition
+      w = Window.partitionBy('status').orderBy('ts')
+      df.withColumn('rnk', rank().over(w))
+    after_code: |
+      from pyspark.sql import Window
+      from pyspark.sql.functions import rank
+
+      # Each partition now bounded to one user's rows within a status
+      w = Window.partitionBy('status', 'user_id').orderBy('ts')
+      df.withColumn('rnk', rank().over(w))
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.Window.partitionBy.html"
+    estimated_speedup: "Prevents executor OOM; window stage runs in bounded memory per partition"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Sessionization, ranking pipelines, time-series windowed aggregations"
+
+  - rule_id: SPL-D05-007
+    short_recommendation: >-
+      Filter isNotNull() on nullable foreign-key join columns before joining;
+      all null-key rows hash to the same partition causing null-bucket skew.
+    detailed_recommendation: |
+      In Spark, NULL values do not match each other in inner joins, but they do
+      hash to the same constant bucket because `hash(NULL)` is deterministic and
+      fixed. When a join key column contains millions of null rows (common for
+      nullable foreign keys such as `parent_id` for root records, `manager_id`
+      for top-level managers, or `referred_by` for organic users), all those rows
+      are routed to the same reducer partition, creating a single massively
+      oversized task. Filter out nulls before the join:
+      `df.filter(col('parent_id').isNotNull()).join(other, 'parent_id')`. If null
+      keys must be preserved in the result, use a left join and handle the nulls
+      explicitly in the output rather than allowing them to pollute the shuffle
+      key distribution.
+    before_code: |
+      # parent_id is NULL for root-level records — all nulls go to one partition
+      result = items.join(parents, 'parent_id')
+    after_code: |
+      from pyspark.sql.functions import col
+
+      # Filter nulls before join — null rows handled separately if needed
+      result = (
+          items.filter(col('parent_id').isNotNull())
+          .join(parents, 'parent_id')
+      )
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-ref-null-semantics.html"
+    estimated_speedup: "Eliminates null-bucket straggler; stage time proportional to non-null data"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Hierarchical data joins, optional FK relationships, CDC merge pipelines"
+
+  # ---------------------------------------------------------------------------
+  # D06 — Caching and Persistence (SPL-D06-001 through SPL-D06-008)
+  # ---------------------------------------------------------------------------
+
+  - rule_id: SPL-D06-001
+    short_recommendation: >-
+      Add df.unpersist() after each cache()/persist(); without it, cached
+      blocks remain pinned for the SparkContext lifetime and leak executor memory.
+    detailed_recommendation: |
+      Every `cache()` or `persist()` call pins the DataFrame's RDD partitions in
+      executor memory (and optionally disk). If `unpersist()` is never called,
+      those blocks remain pinned for the lifetime of the SparkContext. In a
+      long-running job or shared notebook this causes memory pressure, evictions
+      of other cached DataFrames, and ultimately OOM errors. The pattern is
+      especially dangerous in notebooks where the SparkContext lives for hours and
+      cells are re-run frequently. Always pair each `cache()` / `persist()` with
+      an `unpersist()` call once the DataFrame is no longer needed. Call `count()`
+      or another action immediately after `cache()` to materialize the cache
+      eagerly, then call `unpersist()` at the end of the scope where the DataFrame
+      is used.
+    before_code: |
+      # Cached blocks pinned indefinitely — memory leak
+      df_joined = customers.join(orders, 'customer_id').cache()
+      result = df_joined.groupBy('region').agg(sum('amount'))
+      result.write.parquet('s3://bucket/output/')
+    after_code: |
+      df_joined = customers.join(orders, 'customer_id').cache()
+      df_joined.count()  # materialize eagerly
+
+      result = df_joined.groupBy('region').agg(sum('amount'))
+      result.write.parquet('s3://bucket/output/')
+
+      df_joined.unpersist()  # release memory when done
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#which-storage-level-to-choose"
+    estimated_speedup: "Prevents OOM; releases memory for other stages and concurrent jobs"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Long-running notebooks, multi-stage ETL, iterative analytical jobs"
+
+  - rule_id: SPL-D06-002
+    short_recommendation: >-
+      Remove cache() on DataFrames consumed only once; caching adds a
+      serialization pass and memory overhead with no recomputation benefit.
+    detailed_recommendation: |
+      `cache()` / `persist()` is valuable only when a DataFrame is consumed
+      multiple times — it avoids recomputing the same pipeline on each action.
+      When a DataFrame is used only once after caching, the cache write itself
+      (an extra pass through the data plus serialization to the block manager)
+      makes the job strictly slower and uses memory that other stages need. Common
+      causes: defensive caching of every intermediate step "just in case", or
+      caching added during development that became unnecessary after a refactor
+      reduced downstream consumers to one. Remove the `cache()` call entirely.
+      The Spark catalyst optimizer and pipelining will handle the single-use
+      execution more efficiently without the intermediate materialization.
+    before_code: |
+      # Cached once and used once — net negative
+      df_agg = df.groupBy('category').agg(sum('revenue').alias('total')).cache()
+      df_agg.write.parquet('s3://bucket/output/')  # only use
+    after_code: |
+      # No cache — one pass through the data, no serialization overhead
+      df.groupBy('category').agg(sum('revenue').alias('total')).write.parquet('s3://bucket/output/')
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#which-storage-level-to-choose"
+    estimated_speedup: "Eliminates unnecessary serialization pass; frees memory for active stages"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Defensive coding patterns, iterative notebook development, refactored pipelines"
+
+  - rule_id: SPL-D06-003
+    short_recommendation: >-
+      Move cache()/persist() outside the loop or replace with checkpoint()
+      inside it; each iteration accumulates cached blocks until OOM.
+    detailed_recommendation: |
+      Each `cache()` / `persist()` call inside a loop creates a new pinned RDD
+      in executor memory. Without an `unpersist()` inside the same iteration,
+      every loop pass accumulates more cached blocks until the executor exhausts
+      its storage fraction. Even when `unpersist()` is present, the pattern is
+      fragile: an early exit (exception, `break`) leaves the last iteration's
+      cache pinned. For iterative algorithms (ML training, graph processing) use
+      `checkpoint()` inside the loop instead — it truncates the DAG lineage so
+      the plan does not grow unboundedly across iterations, and the checkpoint
+      directory on HDFS/S3 acts as a natural materialization. Call `unpersist()`
+      at the start of each iteration to release the previous one. If the same
+      DataFrame is reused across all iterations unchanged, cache it once before
+      the loop.
+    before_code: |
+      # Each iteration adds a new cached RDD — OOM after O(N) iterations
+      for epoch in range(100):
+          df = model.transform(df).cache()
+          loss = df.agg(mean('loss')).collect()[0][0]
+    after_code: |
+      sc.setCheckpointDir('s3://bucket/checkpoints/')
+
+      for epoch in range(100):
+          prev = df
+          df = model.transform(df)
+          if epoch % 10 == 0:
+              df = df.checkpoint()  # truncate lineage every 10 epochs
+          prev.unpersist()
+
+          loss = df.agg(mean('loss')).collect()[0][0]
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#rdd-persistence"
+    estimated_speedup: "Prevents OOM accumulation; bounded memory use regardless of loop iterations"
+    effort: MAJOR_REFACTOR
+    common_in: "Iterative ML training, graph algorithm loops, incremental ETL loops"
+
+  - rule_id: SPL-D06-004
+    short_recommendation: >-
+      Push filter()/where() before cache() so only the relevant subset is
+      stored; caching then filtering wastes memory on discarded rows.
+    detailed_recommendation: |
+      When `cache()` / `persist()` is called before `filter()` / `where()`, Spark
+      caches the full unfiltered dataset and re-applies the filter on every
+      downstream action. This wastes memory proportional to the rows removed by
+      the filter — if the filter removes 90% of rows, 90% of the cache allocation
+      holds data that is immediately discarded. The fix is mechanical: swap the
+      order so `filter()` runs first, then `cache()` stores only the relevant
+      subset. This also improves downstream performance because all subsequent
+      operations on the cached DataFrame work with a smaller, already-filtered
+      dataset. Filtering early is one of the most impactful general Spark
+      optimizations: it reduces data volume for every downstream operation,
+      not just the cached copy.
+    before_code: |
+      # Caches all rows; filter discards 95% of them on every downstream action
+      active_users = df.cache().filter('status = "active"')
+      count1 = active_users.count()
+      revenue = active_users.agg(sum('amount')).collect()
+    after_code: |
+      # Cache only active users — 95% memory saving
+      active_users = df.filter('status = "active"').cache()
+      active_users.count()  # materialize
+
+      count1 = active_users.count()
+      revenue = active_users.agg(sum('amount')).collect()
+      active_users.unpersist()
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/sql-performance-tuning.html"
+    estimated_speedup: "Up to filter-selectivity × cache-size memory saving; faster downstream reads"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Multi-action analytical pipelines, filtered aggregation ETL, reporting jobs"
+
+  - rule_id: SPL-D06-005
+    short_recommendation: >-
+      Replace persist(MEMORY_ONLY) with persist(MEMORY_AND_DISK) to fall back
+      to disk instead of silently recomputing evicted partitions.
+    detailed_recommendation: |
+      `StorageLevel.MEMORY_ONLY` (the default for RDD `cache()`) evicts partitions
+      when the executor's storage fraction is exhausted. Evicted partitions are
+      silently recomputed from scratch on the next access — no warning, no
+      exception, just a performance cliff that is difficult to diagnose. For large
+      datasets this can turn what looked like a cache hit into a full pipeline
+      recomputation, negating the caching benefit entirely while still occupying
+      partial memory. `MEMORY_AND_DISK` spills evicted partitions to disk instead,
+      providing a safety net at the cost of disk I/O — always preferable to silent
+      recomputation. `MEMORY_AND_DISK_SER` further reduces the memory footprint by
+      serializing objects before storage, trading CPU for memory. Note: DataFrame
+      `cache()` (without explicit StorageLevel) already uses `MEMORY_AND_DISK` by
+      default; this finding only fires when `MEMORY_ONLY` is set explicitly via
+      `persist()`.
+    before_code: |
+      from pyspark import StorageLevel
+
+      # Evicted partitions are recomputed silently — no disk fallback
+      df.persist(StorageLevel.MEMORY_ONLY)
+    after_code: |
+      from pyspark import StorageLevel
+
+      # Evicted partitions spill to disk instead of recomputing
+      df.persist(StorageLevel.MEMORY_AND_DISK)
+
+      # For memory-constrained environments with CPU headroom:
+      # df.persist(StorageLevel.MEMORY_AND_DISK_SER)
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#which-storage-level-to-choose"
+    estimated_speedup: "Prevents silent full-pipeline recomputation under memory pressure"
+    effort: MINOR_CODE_CHANGE
+    common_in: "RDD-based ML pipelines, large dataset caching, memory-constrained cluster jobs"
+
+  - rule_id: SPL-D06-006
+    short_recommendation: >-
+      Add .cache() after the expensive transformation when the DataFrame is
+      used multiple times; each use without caching recomputes the full lineage.
+    detailed_recommendation: |
+      When a DataFrame variable built from an expensive operation (join,
+      aggregation, wide shuffle) is used as the receiver of multiple actions or
+      transformations, Spark recomputes its full lineage for each action. Two
+      downstream uses of `df_agg = df.groupBy('id').agg(sum('v'))` trigger two
+      full aggregations and two full shuffles. Add `.cache()` immediately after
+      the expensive transformation to materialize the result once, then trigger
+      materialization with an action (`count()` is idiomatic). Call `unpersist()`
+      when the DataFrame is no longer needed to release the memory. The pattern
+      is especially impactful when the lineage includes multiple joins or shuffle
+      stages — the recomputation cost is the sum of all upstream stages, not just
+      the last transformation.
+    before_code: |
+      # Two full aggregations + two full shuffles
+      df_agg = df.groupBy('customer_id').agg(sum('revenue').alias('total'))
+      report = df_agg.join(segments, 'customer_id')   # recomputes df_agg
+      total = df_agg.count()                          # recomputes df_agg again
+    after_code: |
+      # One aggregation + one shuffle; both consumers read from cache
+      df_agg = df.groupBy('customer_id').agg(sum('revenue').alias('total')).cache()
+      df_agg.count()  # materialize eagerly
+
+      report = df_agg.join(segments, 'customer_id')
+      total = df_agg.count()
+      df_agg.unpersist()
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#rdd-persistence"
+    estimated_speedup: "N-fold reduction where N = number of downstream uses of the cached DataFrame"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Multi-output ETL, fan-out pipelines, report generation with multiple aggregations"
+
+  - rule_id: SPL-D06-007
+    short_recommendation: >-
+      Verify the repartitioned DataFrame is used 2+ times before caching it;
+      if used once, remove cache() to avoid a redundant serialization pass.
+    detailed_recommendation: |
+      `repartition()` already triggers a full shuffle — an expensive distributed
+      sort. Caching the result immediately afterward with `cache()` / `persist()`
+      is beneficial only when the repartitioned DataFrame is consumed multiple
+      times downstream, because it avoids re-running the shuffle on each action.
+      If the repartitioned DataFrame is used only once, the cache write is pure
+      overhead: an extra serialization pass and memory allocation on top of an
+      already-expensive shuffle. Check the code for downstream uses of the cached
+      variable: if only one action or transformation follows, remove `cache()`.
+      If two or more uses follow, the cache is justified and this finding can be
+      suppressed with a comment. This rule is INFO-level specifically because the
+      pattern can be correct — it requires human judgment to confirm whether
+      multiple uses exist.
+    before_code: |
+      # repartition + cache, but df2 is only used once
+      df2 = df.repartition(200, 'key').cache()
+      result = df2.groupBy('key').agg(sum('val'))  # only downstream use
+    after_code: |
+      # Single use — remove cache, let the repartition feed directly into groupBy
+      result = df.repartition(200, 'key').groupBy('key').agg(sum('val'))
+
+      # If df2 IS used multiple times, cache is justified:
+      # df2 = df.repartition(200, 'key').cache()
+      # use1 = df2.join(other, 'key')
+      # use2 = df2.count()
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#rdd-persistence"
+    estimated_speedup: "Eliminates serialization pass after an already-expensive shuffle"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Pre-join repartitioning, output preparation pipelines, manually tuned shuffle counts"
+
+  - rule_id: SPL-D06-008
+    short_recommendation: >-
+      Replace checkpoint() with cache() in non-iterative code; checkpoint always
+      writes to disk and provides no benefit outside iterative DAG growth.
+    detailed_recommendation: |
+      `checkpoint()` saves a DataFrame to HDFS / the checkpoint directory and
+      truncates the DAG lineage up to that point. It is designed specifically for
+      iterative algorithms (ML training loops, graph processing) where the lineage
+      grows unboundedly across iterations and eventually causes stack overflows or
+      OOM in the Catalyst planner. In non-iterative code the DAG is bounded
+      regardless — lineage truncation provides no benefit, and `checkpoint()` is
+      strictly slower than `cache()` because it always writes to disk, requires
+      a SparkContext checkpoint directory to be configured, and the write is
+      blocking (it waits for the checkpoint to complete before proceeding). Replace
+      it with `cache()` / `persist()` in non-iterative pipelines. If this code
+      is inside an iterative loop (check the surrounding context), `checkpoint()`
+      is correct and this finding should be suppressed.
+    before_code: |
+      # Non-iterative pipeline — checkpoint is unnecessary overhead
+      df_enriched = (
+          raw_events
+          .join(users, 'user_id')
+          .join(products, 'product_id')
+          .checkpoint()  # writes to HDFS; no lineage problem to solve here
+      )
+      df_enriched.write.parquet('s3://bucket/output/')
+    after_code: |
+      # cache() is faster — no disk write, no checkpoint dir required
+      df_enriched = (
+          raw_events
+          .join(users, 'user_id')
+          .join(products, 'product_id')
+          .cache()
+      )
+      df_enriched.count()  # materialize
+      df_enriched.write.parquet('s3://bucket/output/')
+      df_enriched.unpersist()
+    config_changes: null
+    spark_docs_link: "https://spark.apache.org/docs/latest/rdd-programming-guide.html#rdd-checkpointing"
+    estimated_speedup: "Eliminates mandatory disk write; cache() reads from memory instead"
+    effort: MINOR_CODE_CHANGE
+    common_in: "Non-iterative ETL pipelines, data enrichment jobs, defensive checkpointing patterns"
