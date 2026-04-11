@@ -8,6 +8,17 @@
 [![pre-commit: enabled](https://img.shields.io/badge/pre--commit-enabled-F59E0B?logo=pre-commit&logoColor=white)](https://pre-commit.com)
 [![code style: black](https://img.shields.io/badge/code%20style-black-000000)](https://github.com/psf/black)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://sunilpradhansharma.github.io/spark-perf-lint/)
+[![PyPI version](https://badge.fury.io/py/spark-perf-lint.svg)](https://pypi.org/project/spark-perf-lint/)
+[![Python versions](https://img.shields.io/pypi/pyversions/spark-perf-lint)](https://pypi.org/project/spark-perf-lint/)
+[![Monthly downloads](https://img.shields.io/pypi/dm/spark-perf-lint)](https://pypi.org/project/spark-perf-lint/)
+[![License](https://img.shields.io/pypi/l/spark-perf-lint)](https://pypi.org/project/spark-perf-lint/)
+[![pip install spark-perf-lint](https://img.shields.io/badge/pip%20install-spark--perf--lint-blue?logo=pypi)](https://pypi.org/project/spark-perf-lint/)
+
+## Installation
+
+```bash
+pip install spark-perf-lint
+```
 
 > **Enterprise-grade Apache Spark performance linter** — catches anti-patterns before they reach production, explains *why* they hurt, and hands you a concrete fix.
 
