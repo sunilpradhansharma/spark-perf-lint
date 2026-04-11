@@ -11,7 +11,6 @@
 [![PyPI version](https://badge.fury.io/py/spark-perf-lint.svg)](https://pypi.org/project/spark-perf-lint/)
 [![Python versions](https://img.shields.io/pypi/pyversions/spark-perf-lint)](https://pypi.org/project/spark-perf-lint/)
 [![Monthly downloads](https://img.shields.io/pypi/dm/spark-perf-lint)](https://pypi.org/project/spark-perf-lint/)
-[![License](https://img.shields.io/pypi/l/spark-perf-lint)](https://pypi.org/project/spark-perf-lint/)
 [![pip install spark-perf-lint](https://img.shields.io/badge/pip%20install-spark--perf--lint-blue?logo=pypi)](https://pypi.org/project/spark-perf-lint/)
 
 ## Installation
