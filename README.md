@@ -4,7 +4,6 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-4F46E5?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Rules: 93](https://img.shields.io/badge/rules-93-6366F1)](docs/RULES_REFERENCE.md)
 [![Dimensions: 11](https://img.shields.io/badge/dimensions-11-818CF8)](docs/RULES_REFERENCE.md)
-[![License: Sunil Pradhan Sharma](https://img.shields.io/badge/license-Sunil%20Pradhan%20Sharma-green.svg)](https://www.linkedin.com/in/sunil-p-sharma/)
 [![pre-commit: enabled](https://img.shields.io/badge/pre--commit-enabled-F59E0B?logo=pre-commit&logoColor=white)](https://pre-commit.com)
 [![code style: black](https://img.shields.io/badge/code%20style-black-000000)](https://github.com/psf/black)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://sunilpradhansharma.github.io/spark-perf-lint/)
@@ -797,12 +796,6 @@ Contributions are welcome — whether that is a new rule, a bug fix, an improvem
 ## 🌐 Live Site
 
 Explore rules, architecture, and setup guides at [sunilpradhansharma.github.io/spark-perf-lint](https://sunilpradhansharma.github.io/spark-perf-lint/)
-
----
-
-## License
-
-Free to use for any purpose including commercial. Credit to Sunil Pradhan Sharma required. See LICENSE.
 
 ---
 
